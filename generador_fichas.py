@@ -305,62 +305,53 @@ with tab3:
 st.divider()
 
 # MUESTRA DE RESULTADOS UNIFICADA
+st.subheader("🛒 Lista de Ingredientes Agregados")
+
+df_ingredientes = preparar_dataframe_ingredientes(st.session_state['ingredientes'])
+ingredientes_editados = st.data_editor(
+    df_ingredientes,
+    use_container_width=True,
+    num_rows="dynamic",
+    column_order=COLUMNAS_INGREDIENTES,
+    column_config={
+        "codigo": st.column_config.TextColumn(
+            "Código",
+            width="small",
+        ),
+        "descripcion": st.column_config.TextColumn(
+            "Ingrediente",
+            width="large",
+        ),
+        "cantidad_bruta": st.column_config.NumberColumn(
+            "Cantidad Bruta (kg/l)",
+            format="%.3f",
+            min_value=0.0,
+        ),
+        "merma": st.column_config.NumberColumn(
+            "% Merma",
+            format="%.2f %%",
+            min_value=0.0,
+            max_value=100.0,
+        ),
+        "precio_unidad": st.column_config.NumberColumn(
+            "Precio Unidad (€)",
+            format="%.2f €",
+            min_value=0.0,
+        ),
+    },
+    key="editor_ingredientes",
+)
+
+df_editado = preparar_dataframe_ingredientes(ingredientes_editados)
+registros_editados = df_editado.to_dict("records")
+registros_actuales = df_ingredientes.to_dict("records")
+if registros_editados != registros_actuales:
+    st.session_state['ingredientes'] = registros_editados
+    st.rerun()
+
+st.session_state['ingredientes'] = registros_editados
+
 if st.session_state['ingredientes']:
-    st.subheader("🛒 Lista de Ingredientes Agregados")
-
-    ingredientes_editados = st.data_editor(
-        st.session_state['ingredientes'],
-        use_container_width=True,
-        num_rows="dynamic",
-        column_order=("descripcion", "cantidad_bruta", "merma", "precio_unidad"),
-        column_config={
-            "descripcion": st.column_config.TextColumn(
-                "Ingrediente",
-            ),
-            "cantidad_bruta": st.column_config.NumberColumn(
-                "Cantidad Bruta (kg/l)",
-                format="%.3f",
-                min_value=0.0,
-                step=0.001,
-            ),
-            "merma": st.column_config.NumberColumn(
-                "% Merma",
-                format="%.2f %%",
-                min_value=0.0,
-                max_value=100.0,
-                step=0.01,
-            ),
-            "precio_unidad": st.column_config.NumberColumn(
-                "Precio Unidad (€)",
-                format="%.2f €",
-                min_value=0.0,
-                step=0.01,
-            ),
-        },
-        key="editor_ingredientes",
-    )
-
-    if hasattr(ingredientes_editados, "to_dict"):
-        ingredientes_editados = ingredientes_editados.to_dict("records")
-
-    def valor_float_seguro(valor):
-        try:
-            if valor is None or valor == "":
-                return 0.0
-            return float(valor)
-        except (TypeError, ValueError):
-            return 0.0
-
-    st.session_state['ingredientes'] = [
-        {
-            'descripcion': str(ing.get('descripcion', '')).strip(),
-            'cantidad_bruta': valor_float_seguro(ing.get('cantidad_bruta')),
-            'merma': valor_float_seguro(ing.get('merma')),
-            'precio_unidad': valor_float_seguro(ing.get('precio_unidad')),
-        }
-        for ing in ingredientes_editados
-        if str(ing.get('descripcion', '')).strip()
-    ]
     
     if st.button("Limpiar todos los ingredientes"):
         st.session_state['ingredientes'] = []
