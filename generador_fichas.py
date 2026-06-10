@@ -71,6 +71,12 @@ def parsear_ingredientes_desde_texto(texto):
             return False
         return bool(re.search(r"[a-záéíóúüñ]{2,}", nombre, re.IGNORECASE))
 
+    def normalizar_cantidad_probable(valor):
+        texto = str(valor).strip()
+        if re.fullmatch(r"\d{3}", texto):
+            return normalizar_numero(texto) / 1000
+        return normalizar_numero(texto)
+
     for num_linea, linea in enumerate(texto.splitlines(), start=1):
         linea = limpiar_linea(linea)
         if es_ruido(linea):
@@ -84,21 +90,21 @@ def parsear_ingredientes_desde_texto(texto):
         if not nombre_valido(descripcion):
             continue
 
-        numeros = [normalizar_numero(match.group(0)) for match in matches_numeros]
+        numeros = [match.group(0) for match in matches_numeros]
         cantidad = 0.0
         merma = 0.0
         precio = 0.0
 
         if len(numeros) >= 3:
-            cantidad = float(numeros[0])
-            cantidad_neta = float(numeros[1])
-            precio = float(numeros[2])
+            cantidad = float(normalizar_cantidad_probable(numeros[0]))
+            cantidad_neta = float(normalizar_cantidad_probable(numeros[1]))
+            precio = float(normalizar_numero(numeros[2]))
             merma = ((cantidad - cantidad_neta) / cantidad) * 100 if cantidad > 0 else 0.0
         elif len(numeros) == 2:
-            cantidad = float(numeros[0])
-            precio = float(numeros[1])
+            cantidad = float(normalizar_cantidad_probable(numeros[0]))
+            precio = float(normalizar_numero(numeros[1]))
         elif len(numeros) == 1:
-            precio = float(numeros[0])
+            precio = float(normalizar_numero(numeros[0]))
 
         ingredientes.append({
             'descripcion': descripcion,
@@ -119,9 +125,61 @@ def extraer_texto_ocr(archivo_imagen):
     except Exception as exc:
         return "", f"No se pudo abrir la imagen: {exc}"
 
+    def agrupar_bloques_por_linea(resultados):
+        bloques = []
+        for resultado in resultados:
+            if len(resultado) < 2:
+                continue
+            caja, texto_detectado = resultado[0], str(resultado[1]).strip()
+            if not texto_detectado:
+                continue
+            xs = [punto[0] for punto in caja]
+            ys = [punto[1] for punto in caja]
+            alto = max(ys) - min(ys)
+            bloques.append({
+                'texto': texto_detectado,
+                'x': min(xs),
+                'y': (min(ys) + max(ys)) / 2,
+                'alto': alto,
+            })
+
+        if not bloques:
+            return ""
+
+        alturas = sorted(bloque['alto'] for bloque in bloques if bloque['alto'] > 0)
+        altura_media = alturas[len(alturas) // 2] if alturas else 18
+        tolerancia_y = max(12, altura_media * 0.75)
+        lineas = []
+
+        for bloque in sorted(bloques, key=lambda item: (item['y'], item['x'])):
+            linea_encontrada = None
+            for linea in lineas:
+                if abs(bloque['y'] - linea['y']) <= tolerancia_y:
+                    linea_encontrada = linea
+                    break
+            if linea_encontrada is None:
+                lineas.append({'y': bloque['y'], 'bloques': [bloque]})
+            else:
+                linea_encontrada['bloques'].append(bloque)
+                total = len(linea_encontrada['bloques'])
+                linea_encontrada['y'] = ((linea_encontrada['y'] * (total - 1)) + bloque['y']) / total
+
+        lineas_ordenadas = []
+        for linea in sorted(lineas, key=lambda item: item['y']):
+            textos = [
+                bloque['texto']
+                for bloque in sorted(linea['bloques'], key=lambda item: item['x'])
+            ]
+            lineas_ordenadas.append(" ".join(textos))
+
+        return "\n".join(lineas_ordenadas)
+
     try:
-        import pytesseract
-        texto = pytesseract.image_to_string(imagen, lang="spa+eng")
+        import easyocr
+        import numpy as np
+        lector = easyocr.Reader(['es', 'en'], gpu=False)
+        resultados = lector.readtext(np.array(imagen), detail=1, paragraph=False)
+        texto = agrupar_bloques_por_linea(resultados)
         if texto and texto.strip():
             return texto, None
     except Exception:
@@ -134,6 +192,14 @@ def extraer_texto_ocr(archivo_imagen):
         resultados = lector.readtext(np.array(imagen), detail=0, paragraph=True)
         texto = "\n".join(resultados)
         if texto.strip():
+            return texto, None
+    except Exception:
+        pass
+
+    try:
+        import pytesseract
+        texto = pytesseract.image_to_string(imagen, lang="spa+eng")
+        if texto and texto.strip():
             return texto, None
     except Exception:
         pass
