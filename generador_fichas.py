@@ -5,14 +5,42 @@ from openpyxl.utils import get_column_letter
 import io
 import base64
 import json
+import pandas as pd
 from openai import OpenAI
 
 # Configuración obligatoria de la página al inicio
 st.set_page_config(page_title="Gestor de Fichas Técnicas IA", page_icon="👨‍🍳", layout="wide")
 
+BASE_DE_DATOS_INGREDIENTES = {
+    "POL-01": {"descripcion": "Cuarto de pollo asado", "merma": 14.29, "precio_unidad": 6.00},
+    "AJO-01": {"descripcion": "Ajo limpio", "merma": 40.00, "precio_unidad": 12.00},
+    "ACE-01": {"descripcion": "Aceite de oliva virgen", "merma": 0.00, "precio_unidad": 8.00},
+    "VIN-01": {"descripcion": "Vino blanco cocina", "merma": 0.00, "precio_unidad": 4.00},
+    "SAL-01": {"descripcion": "Sal fina", "merma": 0.00, "precio_unidad": 2.00},
+    "SOL-01": {"descripcion": "Solomillo de cerdo", "merma": 15.00, "precio_unidad": 12.50},
+}
+
 # Inicializar el estado de la aplicación
 if 'ingredientes' not in st.session_state:
     st.session_state['ingredientes'] = []
+
+COLUMNAS_INGREDIENTES = ["codigo", "descripcion", "cantidad_bruta", "merma", "precio_unidad"]
+
+def preparar_dataframe_ingredientes(ingredientes):
+    df = pd.DataFrame(ingredientes)
+    for columna in COLUMNAS_INGREDIENTES:
+        if columna not in df.columns:
+            df[columna] = "S/C" if columna == "codigo" else "" if columna == "descripcion" else 0.0
+    df = df[COLUMNAS_INGREDIENTES].copy()
+    df["codigo"] = df["codigo"].fillna("S/C").astype(str).str.strip().replace("", "S/C")
+    df["descripcion"] = df["descripcion"].fillna("").astype(str).str.strip()
+    for columna in ["cantidad_bruta", "merma", "precio_unidad"]:
+        df[columna] = pd.to_numeric(df[columna], errors="coerce").fillna(0.0).astype(float)
+    df = df[df["descripcion"] != ""]
+    return df
+
+def registros_ingredientes(ingredientes):
+    return preparar_dataframe_ingredientes(ingredientes).to_dict("records")
 
 # Obtener la API Key de forma segura desde los Secrets de Streamlit
 api_key = st.secrets.get("OPENAI_API_KEY", None)
@@ -29,20 +57,28 @@ def procesar_con_openai(texto_plano=None, bytes_imagen=None, mime_type=None):
     try:
         client = OpenAI(api_key=api_key)
         
+        base_datos_json = json.dumps(BASE_DE_DATOS_INGREDIENTES, ensure_ascii=False, indent=2)
+
         # Instrucción del sistema (System Prompt) para asegurar la estructura exacta
         prompt_sistema = (
             "Eres un experto contable y chef de catering. Tu trabajo es analizar textos o imágenes de recetas, "
             "albaranes o facturas y extraer los ingredientes para un escandallo técnico.\n\n"
+            f"Esta es la base de datos local de ingredientes disponibles:\n{base_datos_json}\n\n"
             "Debes ignorar por completo títulos de tablas, encabezados (como Bruto, Neto, Precio, Código), subtotales, IVA o totales de facturas.\n\n"
+            "Para cada ingrediente real, si detectas una coincidencia clara o un nombre muy similar con la base de datos, "
+            "usa exactamente su 'codigo', 'descripcion', 'merma' y 'precio_unidad'.\n"
+            "Si el ingrediente no existe en la base, inventa un código corto mnemónico de 5 caracteres con formato similar a 'CEB-01', "
+            "extrae su descripción, cantidad bruta, merma si existe y precio unidad desde la fuente.\n\n"
             "Calcula o extrae los siguientes campos obligatorios para cada ingrediente real:\n"
-            "- 'descripcion': Nombre claro del ingrediente (ej: 'Cuarto de pollo asado').\n"
+            "- 'codigo': Código del ingrediente. Usa el de la base de datos si hay coincidencia; si es nuevo, inventa uno mnemónico.\n"
+            "- 'descripcion': Nombre claro del ingrediente.\n"
             "- 'cantidad_bruta': Peso o cantidad inicial en kg o litros (número decimal flotante).\n"
             "- 'merma': Porcentaje de merma estimado o calculado (número de 0 a 100). Si dispones de peso bruto y peso neto, "
             "calcúlalo como: ((bruto - neto) / bruto) * 100. Redondea a 2 decimales. Si no hay merma o no se puede calcular, devuelve 0.0.\n"
             "- 'precio_unidad': El coste por unidad de medida kg/litro (número decimal flotante). Ignora el coste total de la fila.\n\n"
             "REQUISITO CRÍTICO: Devuelve ÚNICAMENTE un array JSON puro, sin bloques de código markdown (no uses ```json), "
             "con esta estructura exacta:\n"
-            "[{\"descripcion\": \"Nombre\", \"cantidad_bruta\": 0.35, \"merma\": 14.29, \"precio_unidad\": 6.00}]"
+            "[{\"codigo\": \"POL-01\", \"descripcion\": \"Cuarto de pollo asado\", \"cantidad_bruta\": 0.35, \"merma\": 14.29, \"precio_unidad\": 6.00}]"
         )
 
         contenido_usuario = []
@@ -85,7 +121,7 @@ def procesar_con_openai(texto_plano=None, bytes_imagen=None, mime_type=None):
                 json_texto = json_texto[4:].strip()
 
         lista_ingredientes = json.loads(json_texto)
-        return lista_ingredientes
+        return registros_ingredientes(lista_ingredientes)
 
     except Exception as e:
         st.error(f"⚠️ Error al conectar con la Inteligencia Artificial: {str(e)}")
@@ -96,7 +132,9 @@ def generar_excel(nombre_plato, ingredientes, costes_indirectos_pct, margen_bene
     ws = wb.active
     ws.title = "Ficha Técnica"
 
-    ws.merge_cells('A1:F1')
+    ingredientes = registros_ingredientes(ingredientes)
+
+    ws.merge_cells('A1:G1')
     titulo_cell = ws['A1']
     titulo_cell.value = f"FICHA TÉCNICA: {nombre_plato.upper()}"
     titulo_cell.font = Font(bold=True, size=14, color="FFFFFF")
@@ -106,7 +144,7 @@ def generar_excel(nombre_plato, ingredientes, costes_indirectos_pct, margen_bene
 
     ws.append([])
 
-    headers = ['Ingrediente', 'Cantidad Bruta (kg/l)', '% Merma', 'Peso Neto Real (kg/l)', 'Precio Unidad (€)', 'Coste Total (€)']
+    headers = ['Código', 'Ingrediente', 'Cantidad Bruta (kg/l)', '% Merma', 'Peso Neto Real (kg/l)', 'Precio Unidad (€)', 'Coste Total (€)']
     ws.append(headers)
     
     for col_num, header in enumerate(headers, 1):
@@ -119,44 +157,45 @@ def generar_excel(nombre_plato, ingredientes, costes_indirectos_pct, margen_bene
     start_row = 4
     for i, ing in enumerate(ingredientes):
         row = start_row + i
-        ws.cell(row=row, column=1, value=ing['descripcion'])
-        ws.cell(row=row, column=2, value=ing['cantidad_bruta']).number_format = '#,##0.000'
-        ws.cell(row=row, column=3, value=ing['merma']/100).number_format = '0.00%'
-        ws.cell(row=row, column=4, value=f"=B{row}*(1-C{row})").number_format = '#,##0.000'
-        ws.cell(row=row, column=5, value=ing['precio_unidad']).number_format = '#,##0.00 €'
-        ws.cell(row=row, column=6, value=f"=B{row}*E{row}").number_format = '#,##0.00 €'
+        ws.cell(row=row, column=1, value=ing['codigo'])
+        ws.cell(row=row, column=2, value=ing['descripcion'])
+        ws.cell(row=row, column=3, value=ing['cantidad_bruta']).number_format = '#,##0.000'
+        ws.cell(row=row, column=4, value=ing['merma']/100).number_format = '0.00%'
+        ws.cell(row=row, column=5, value=f"=C{row}*(1-D{row})").number_format = '#,##0.000'
+        ws.cell(row=row, column=6, value=ing['precio_unidad']).number_format = '#,##0.00 €'
+        ws.cell(row=row, column=7, value=f"=C{row}*F{row}").number_format = '#,##0.00 €'
 
     last_row = start_row + len(ingredientes) - 1 if ingredientes else start_row
     res = last_row + 2
     
-    ws.cell(row=res, column=5, value="Subtotal Ingredientes:").font = Font(bold=True)
-    ws.cell(row=res, column=6, value=f"=SUM(F4:F{last_row})").number_format = '#,##0.00 €'
+    ws.cell(row=res, column=6, value="Subtotal Ingredientes:").font = Font(bold=True)
+    ws.cell(row=res, column=7, value=f"=SUM(G4:G{last_row})").number_format = '#,##0.00 €'
 
     ci = costes_indirectos_pct if costes_indirectos_pct is not None else 10.0
     mb = margen_beneficio_pct if margen_beneficio_pct is not None else 30.0
     iva = iva_pct if iva_pct is not None else 10.0
 
-    ws.cell(row=res+1, column=5, value=f"Costes Indirectos ({ci}%):")
-    ws.cell(row=res+1, column=6, value=f"=F{res}*({ci}/100)").number_format = '#,##0.00 €'
+    ws.cell(row=res+1, column=6, value=f"Costes Indirectos ({ci}%):")
+    ws.cell(row=res+1, column=7, value=f"=G{res}*({ci}/100)").number_format = '#,##0.00 €'
 
-    ws.cell(row=res+2, column=5, value="COSTE TOTAL DEL PLATO:").font = Font(bold=True)
-    ws.cell(row=res+2, column=6, value=f"=F{res}+F{res+1}").number_format = '#,##0.00 €'
+    ws.cell(row=res+2, column=6, value="COSTE TOTAL DEL PLATO:").font = Font(bold=True)
+    ws.cell(row=res+2, column=7, value=f"=G{res}+G{res+1}").number_format = '#,##0.00 €'
 
-    ws.cell(row=res+4, column=5, value=f"Margen Deseado ({mb}%):").font = Font(bold=True)
+    ws.cell(row=res+4, column=6, value=f"Margen Deseado ({mb}%):").font = Font(bold=True)
     
-    ws.cell(row=res+5, column=5, value="PRECIO VENTA (SIN IVA):").font = Font(bold=True)
-    pvp_sin_iva = ws.cell(row=res+5, column=6, value=f"=F{res+2}/(1-({mb}/100))")
+    ws.cell(row=res+5, column=6, value="PRECIO VENTA (SIN IVA):").font = Font(bold=True)
+    pvp_sin_iva = ws.cell(row=res+5, column=7, value=f"=G{res+2}/(1-({mb}/100))")
     pvp_sin_iva.number_format = '#,##0.00 €'
     pvp_sin_iva.font = Font(bold=True)
 
-    ws.cell(row=res+6, column=5, value=f"IVA Aplicado ({iva}%):")
-    iva_calc = ws.cell(row=res+6, column=6, value=f"=F{res+5}*({iva}/100)")
+    ws.cell(row=res+6, column=6, value=f"IVA Aplicado ({iva}%):")
+    iva_calc = ws.cell(row=res+6, column=7, value=f"=G{res+5}*({iva}/100)")
     iva_calc.number_format = '#,##0.00 €'
 
-    ws.cell(row=res+7, column=5, value="PRECIO DE VENTA TOTAL (PVP):").font = Font(bold=True, color="FFFFFF")
-    ws.cell(row=res+7, column=5).fill = PatternFill(start_color="375623", end_color="375623", fill_type="solid")
+    ws.cell(row=res+7, column=6, value="PRECIO DE VENTA TOTAL (PVP):").font = Font(bold=True, color="FFFFFF")
+    ws.cell(row=res+7, column=6).fill = PatternFill(start_color="375623", end_color="375623", fill_type="solid")
     
-    pvp_total = ws.cell(row=res+7, column=6, value=f"=F{res+5}+F{res+6}")
+    pvp_total = ws.cell(row=res+7, column=7, value=f"=G{res+5}+G{res+6}")
     pvp_total.number_format = '#,##0.00 €'
     pvp_total.font = Font(bold=True)
     pvp_total.fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
@@ -197,25 +236,42 @@ with col4:
 
 st.divider()
 
-tab1, tab2, tab3 = st.tabs(["✍️ Entrada Manual", "📝 Copia y Pega Inteligente", "📸 Escáner de Imagen (IA Vision)"])
+tab1, tab2, tab3 = st.tabs(["✍️ Entrada Manual / Código", "📝 Copia y Pega Inteligente", "📸 Escáner de Imagen (IA Vision)"])
 
 # TAB 1: MANUAL
 with tab1:
     with st.form("form_ingrediente", clear_on_submit=True):
-        c_m1, c_m2, c_m3, c_m4 = st.columns(4)
+        c_m0, c_m1, c_m2, c_m3, c_m4 = st.columns([1, 2, 1, 1, 1])
+        codigo_man = c_m0.text_input("Código", placeholder="Ej: SOL-01")
         desc_man = c_m1.text_input("Ingrediente", placeholder="Ej: Solomillo de ternera")
         cant_man = c_m2.number_input("Cant. Bruta (kg/l)", min_value=0.0, step=0.001, format="%.3f", value=None, placeholder="0.000")
         merma_man = c_m3.number_input("% Merma", min_value=0.0, max_value=100.0, step=0.01, value=None, placeholder="0.00%")
         precio_man = c_m4.number_input("Precio Unidad (€)", min_value=0.0, step=0.01, format="%.2f", value=None, placeholder="0.00 €")
         
-        if st.form_submit_button("Añadir Individualmente") and desc_man:
-            st.session_state['ingredientes'].append({
-                'descripcion': desc_man,
-                'cantidad_bruta': cant_man if cant_man is not None else 0.0,
-                'merma': merma_man if merma_man is not None else 0.0,
-                'precio_unidad': precio_man if precio_man is not None else 0.0
-            })
-            st.rerun()
+        if st.form_submit_button("Añadir Individualmente"):
+            codigo_limpio = codigo_man.strip().upper() if codigo_man else "S/C"
+            datos_codigo = BASE_DE_DATOS_INGREDIENTES.get(codigo_limpio)
+            if datos_codigo:
+                desc_final = datos_codigo["descripcion"]
+                merma_final = datos_codigo["merma"]
+                precio_final = datos_codigo["precio_unidad"]
+            else:
+                codigo_limpio = codigo_limpio or "S/C"
+                desc_final = desc_man.strip()
+                merma_final = merma_man if merma_man is not None else 0.0
+                precio_final = precio_man if precio_man is not None else 0.0
+
+            if desc_final:
+                st.session_state['ingredientes'].append({
+                    'codigo': codigo_limpio,
+                    'descripcion': desc_final,
+                    'cantidad_bruta': cant_man if cant_man is not None else 0.0,
+                    'merma': merma_final,
+                    'precio_unidad': precio_final
+                })
+                st.rerun()
+            else:
+                st.warning("Introduce un código válido o una descripción para añadir el ingrediente.")
 
 # TAB 2: COPIA Y PEGA CON IA
 with tab2:
