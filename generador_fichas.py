@@ -18,7 +18,15 @@ def normalizar_numero(valor, defecto=0.0):
     try:
         if valor is None:
             return defecto
-        return float(str(valor).strip().replace(',', '.'))
+        texto = str(valor).strip()
+        if ',' in texto and '.' in texto:
+            if texto.rfind(',') > texto.rfind('.'):
+                texto = texto.replace('.', '').replace(',', '.')
+            else:
+                texto = texto.replace(',', '')
+        else:
+            texto = texto.replace(',', '.')
+        return float(texto)
     except (TypeError, ValueError):
         return defecto
 
@@ -29,62 +37,129 @@ def parsear_ingredientes_desde_texto(texto):
     if not texto:
         return ingredientes, errores
 
-    patron_cantidad = re.compile(
-        r"^\s*"
-        r"(?P<cantidad>\d+(?:[.,]\d+)?)\s*"
-        r"(?P<unidad>kg|kilo(?:s)?|gr|gramo(?:s)?|g|lt|litro(?:s)?|ml|l|unidad(?:es)?|uds|ud)?\s+",
+    unidades = r"kg|kilo(?:s)?|l|lt|litro(?:s)?|g|gr|gramo(?:s)?|ml|ud|uds|unidad(?:es)?|pack(?:s)?"
+    patron_numero = re.compile(r"(?<![\w])\d+(?:[.,]\d+)*(?![\w])")
+    patron_unidad = re.compile(rf"^\s*(?:{unidades})\b", re.IGNORECASE)
+    patron_precio = re.compile(
+        r"(?:€\s*(?P<precio_pre>\d+(?:[.,]\d+)*))|"
+        r"(?:(?P<precio_post>\d+(?:[.,]\d+)*)\s*(?:€|eur|euro(?:s)?))",
+        re.IGNORECASE,
+    )
+    patron_ruido_duro = re.compile(
+        r"\b(?:page|pagina|página|total|invoice|factura|fecha|subtotal)\b",
+        re.IGNORECASE,
+    )
+    patron_cabecera = re.compile(
+        r"\b(?:descripcion|descripción|producto|ingrediente|cantidad|cant\.?|unidad|precio|"
+        r"importe|merma|bruto|neto|coste|costo)\b",
+        re.IGNORECASE,
+    )
+    patron_limpieza_descripcion = re.compile(
+        rf"(?:€|%|\b(?:eur|euro(?:s)?|precio|price|merma|desperdicio|waste|"
+        rf"{unidades})\b|\d+(?:[.,]\d+)*)",
         re.IGNORECASE,
     )
 
-    patron_merma = re.compile(
-        r"(?:\b(?P<merma_pre>\d+(?:[.,]\d+)?)\s*%?\s*(?:merma|desperdicio|waste)\b)"
-        r"|(?:\b(?:merma|desperdicio|waste)\s*(?P<merma_post>\d+(?:[.,]\d+)?)\s*%?)",
-        re.IGNORECASE,
-    )
+    def limpiar_linea(linea):
+        linea = re.sub(r"[|;\t]+", " ", linea)
+        linea = re.sub(r"\s+", " ", linea).strip()
+        return linea
+
+    def es_ruido(linea):
+        if patron_ruido_duro.search(linea):
+            return True
+        tiene_numero = bool(patron_numero.search(linea))
+        palabras = re.findall(r"\b[a-záéíóúüñ]+\b", linea.lower())
+        if not tiene_numero and palabras and patron_cabecera.search(linea):
+            palabras_cabecera = [palabra for palabra in palabras if patron_cabecera.fullmatch(palabra)]
+            return len(palabras_cabecera) >= max(1, len(palabras) - 1)
+        return False
+
+    def numero_es_precio(match_numero, match_precio):
+        if not match_precio:
+            return False
+        return (
+            match_numero.start() >= match_precio.start()
+            and match_numero.end() <= match_precio.end()
+        )
+
+    def buscar_precio(linea, numeros):
+        match_precio = patron_precio.search(linea)
+        if match_precio:
+            precio_texto = match_precio.group('precio_pre') or match_precio.group('precio_post')
+            return normalizar_numero(precio_texto), match_precio
+        if numeros:
+            ultimo = numeros[-1]
+            return ultimo['valor'], None
+        return 0.0, None
+
+    def buscar_cantidad_bruta(linea, numeros, match_precio):
+        candidatos = []
+        for numero in numeros:
+            texto_despues = linea[numero['fin']:]
+            unidad_match = patron_unidad.match(texto_despues)
+            if unidad_match:
+                valor = numero['valor']
+                unidad = unidad_match.group(0).strip().lower()
+                if unidad in {'g', 'gr', 'gramo', 'gramos', 'ml'}:
+                    valor = valor / 1000
+                candidatos.append({**numero, 'valor': valor, 'unidad': unidad})
+
+        if not candidatos:
+            candidatos = [
+                numero for numero in numeros
+                if not numero_es_precio(numero['match'], match_precio)
+            ]
+
+        if not candidatos and numeros:
+            candidatos = [numeros[0]]
+
+        if len(candidatos) >= 2:
+            primero, segundo = candidatos[0], candidatos[1]
+            cantidad_bruta = max(primero['valor'], segundo['valor'])
+            cantidad_neta = min(primero['valor'], segundo['valor'])
+            merma = ((cantidad_bruta - cantidad_neta) / cantidad_bruta) * 100 if cantidad_bruta else 0.0
+            return cantidad_bruta, merma
+
+        if candidatos:
+            return candidatos[0]['valor'], 0.0
+
+        return 0.0, 0.0
+
+    def limpiar_descripcion(linea):
+        descripcion = patron_limpieza_descripcion.sub(" ", linea)
+        descripcion = re.sub(r"[-_:,./()?]+", " ", descripcion)
+        descripcion = re.sub(r"\s+", " ", descripcion).strip()
+        return descripcion
 
     for num_linea, linea in enumerate(texto.splitlines(), start=1):
-        linea = linea.strip()
+        linea = limpiar_linea(linea)
         if not linea:
             continue
-
-        match_cantidad = patron_cantidad.match(linea)
-        if not match_cantidad:
-            errores.append(f"Línea {num_linea}: no se pudo interpretar.")
+        if es_ruido(linea):
             continue
 
-        cantidad = normalizar_numero(match_cantidad.group('cantidad'))
-        unidad = (match_cantidad.group('unidad') or '').lower()
-        if unidad in {'g', 'gr', 'gramo', 'gramos', 'ml'}:
-            cantidad = cantidad / 1000
+        numeros = [
+            {
+                'texto': match.group(0),
+                'valor': normalizar_numero(match.group(0)),
+                'inicio': match.start(),
+                'fin': match.end(),
+                'match': match,
+            }
+            for match in patron_numero.finditer(linea)
+        ]
+        precio, match_precio = buscar_precio(linea, numeros)
+        cantidad, merma = buscar_cantidad_bruta(linea, numeros, match_precio)
+        descripcion = limpiar_descripcion(linea)
 
-        cuerpo = linea[match_cantidad.end():].strip()
-        match_precio = re.search(
-            r"(?P<precio>\d+(?:[.,]\d+)?)(?:\D*)$",
-            cuerpo,
-            re.IGNORECASE,
-        )
-        if not match_precio:
-            errores.append(f"Línea {num_linea}: falta el precio unidad.")
-            continue
-
-        precio = normalizar_numero(match_precio.group('precio'))
-        cuerpo = cuerpo[:match_precio.start()].strip()
-
-        merma_match = patron_merma.search(cuerpo)
-        merma_texto = (
-            merma_match.group('merma_pre') or merma_match.group('merma_post')
-            if merma_match
-            else None
-        )
-
-        descripcion = patron_merma.sub("", cuerpo)
-        descripcion = re.sub(r"\b(?:precio|price|eur|euro(?:s)?)\b", "", descripcion, flags=re.IGNORECASE)
-        descripcion = descripcion.strip(" -:,")
-
-        merma = normalizar_numero(merma_texto)
-
+        if not numeros and descripcion:
+            cantidad = 0.0
+            precio = 0.0
+            merma = 0.0
         if not descripcion:
-            errores.append(f"Línea {num_linea}: falta el nombre del ingrediente.")
+            if numeros:
+                errores.append(f"Línea {num_linea}: se encontraron números, pero falta el nombre del ingrediente.")
             continue
 
         ingredientes.append({
