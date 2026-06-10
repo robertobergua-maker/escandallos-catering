@@ -37,136 +37,74 @@ def parsear_ingredientes_desde_texto(texto):
     if not texto:
         return ingredientes, errores
 
-    unidades = r"kg|kilo(?:s)?|l|lt|litro(?:s)?|g|gr|gramo(?:s)?|ml|ud|uds|unidad(?:es)?|pack(?:s)?"
-    patron_numero = re.compile(r"(?<![\w])\d+(?:[.,]\d+)*(?![\w])")
-    patron_unidad = re.compile(rf"^\s*(?:{unidades})\b", re.IGNORECASE)
-    patron_precio = re.compile(
-        r"(?:€\s*(?P<precio_pre>\d+(?:[.,]\d+)*))|"
-        r"(?:(?P<precio_post>\d+(?:[.,]\d+)*)\s*(?:€|eur|euro(?:s)?))",
-        re.IGNORECASE,
-    )
-    patron_ruido_duro = re.compile(
-        r"\b(?:page|pagina|página|total|invoice|factura|fecha|subtotal)\b",
-        re.IGNORECASE,
-    )
-    patron_cabecera = re.compile(
-        r"\b(?:descripcion|descripción|producto|ingrediente|cantidad|cant\.?|unidad|precio|"
-        r"importe|merma|bruto|neto|coste|costo)\b",
-        re.IGNORECASE,
-    )
-    patron_limpieza_descripcion = re.compile(
-        rf"(?:€|%|\b(?:eur|euro(?:s)?|precio|price|merma|desperdicio|waste|"
-        rf"{unidades})\b|\d+(?:[.,]\d+)*)",
+    patron_numero = re.compile(r"\d+(?:[.,]\d+)*")
+    patron_ruido = re.compile(
+        r"\b(?:nombre|plato|categoria|categoría|valoracion|valoración|salsa|"
+        r"guarnicion|guarnición|articulos|artículos|codigo|código|descripcion|"
+        r"descripción|cantidad|bruto|neto|kilos|unidad|precio|coste|costo|page|"
+        r"pagina|página|total|invoice|factura|fecha|subtotal)\b",
         re.IGNORECASE,
     )
 
     def limpiar_linea(linea):
-        linea = re.sub(r"[|;\t]+", " ", linea)
+        linea = re.sub(r"[|;\t]+", " ", str(linea))
         linea = re.sub(r"\s+", " ", linea).strip()
         return linea
 
     def es_ruido(linea):
-        if patron_ruido_duro.search(linea):
-            return True
-        tiene_numero = bool(patron_numero.search(linea))
-        palabras = re.findall(r"\b[a-záéíóúüñ]+\b", linea.lower())
-        if not tiene_numero and palabras and patron_cabecera.search(linea):
-            palabras_cabecera = [palabra for palabra in palabras if patron_cabecera.fullmatch(palabra)]
-            return len(palabras_cabecera) >= max(1, len(palabras) - 1)
-        return False
+        return len(linea) < 4 or bool(patron_ruido.search(linea))
 
-    def numero_es_precio(match_numero, match_precio):
-        if not match_precio:
+    def extraer_nombre(linea, primer_numero):
+        texto_nombre = linea[:primer_numero.start()] if primer_numero else linea
+        texto_nombre = re.sub(r"[€%()_.,:;/-]+", " ", texto_nombre)
+        texto_nombre = re.sub(r"\b(?:kg|kilos?|l|lt|litros?|g|gr|gramos?|ml|ud|uds|pack(?:s)?)\b$", "", texto_nombre, flags=re.IGNORECASE)
+        texto_nombre = re.sub(r"\s+", " ", texto_nombre).strip()
+        texto_nombre = re.sub(r"(?:kg|l|g)$", "", texto_nombre, flags=re.IGNORECASE)
+        texto_nombre = re.sub(r"\s+", " ", texto_nombre).strip()
+        return texto_nombre
+
+    def nombre_valido(nombre):
+        solo_letras = re.sub(r"[^a-záéíóúüñ]", "", nombre.lower())
+        if len(solo_letras) < 3:
             return False
-        return (
-            match_numero.start() >= match_precio.start()
-            and match_numero.end() <= match_precio.end()
-        )
-
-    def buscar_precio(linea, numeros):
-        match_precio = patron_precio.search(linea)
-        if match_precio:
-            precio_texto = match_precio.group('precio_pre') or match_precio.group('precio_post')
-            return normalizar_numero(precio_texto), match_precio
-        if numeros:
-            ultimo = numeros[-1]
-            return ultimo['valor'], None
-        return 0.0, None
-
-    def buscar_cantidad_bruta(linea, numeros, match_precio):
-        candidatos = []
-        for numero in numeros:
-            texto_despues = linea[numero['fin']:]
-            unidad_match = patron_unidad.match(texto_despues)
-            if unidad_match:
-                valor = numero['valor']
-                unidad = unidad_match.group(0).strip().lower()
-                if unidad in {'g', 'gr', 'gramo', 'gramos', 'ml'}:
-                    valor = valor / 1000
-                candidatos.append({**numero, 'valor': valor, 'unidad': unidad})
-
-        if not candidatos:
-            candidatos = [
-                numero for numero in numeros
-                if not numero_es_precio(numero['match'], match_precio)
-            ]
-
-        if not candidatos and numeros:
-            candidatos = [numeros[0]]
-
-        if len(candidatos) >= 2:
-            primero, segundo = candidatos[0], candidatos[1]
-            cantidad_bruta = max(primero['valor'], segundo['valor'])
-            cantidad_neta = min(primero['valor'], segundo['valor'])
-            merma = ((cantidad_bruta - cantidad_neta) / cantidad_bruta) * 100 if cantidad_bruta else 0.0
-            return cantidad_bruta, merma
-
-        if candidatos:
-            return candidatos[0]['valor'], 0.0
-
-        return 0.0, 0.0
-
-    def limpiar_descripcion(linea):
-        descripcion = patron_limpieza_descripcion.sub(" ", linea)
-        descripcion = re.sub(r"[-_:,./()?]+", " ", descripcion)
-        descripcion = re.sub(r"\s+", " ", descripcion).strip()
-        return descripcion
+        if len(solo_letras) <= 2 or len(set(solo_letras)) == 1:
+            return False
+        return bool(re.search(r"[a-záéíóúüñ]{2,}", nombre, re.IGNORECASE))
 
     for num_linea, linea in enumerate(texto.splitlines(), start=1):
         linea = limpiar_linea(linea)
-        if not linea:
-            continue
         if es_ruido(linea):
             continue
 
-        numeros = [
-            {
-                'texto': match.group(0),
-                'valor': normalizar_numero(match.group(0)),
-                'inicio': match.start(),
-                'fin': match.end(),
-                'match': match,
-            }
-            for match in patron_numero.finditer(linea)
-        ]
-        precio, match_precio = buscar_precio(linea, numeros)
-        cantidad, merma = buscar_cantidad_bruta(linea, numeros, match_precio)
-        descripcion = limpiar_descripcion(linea)
-
-        if not numeros and descripcion:
-            cantidad = 0.0
-            precio = 0.0
-            merma = 0.0
-        if not descripcion:
-            if numeros:
-                errores.append(f"Línea {num_linea}: se encontraron números, pero falta el nombre del ingrediente.")
+        matches_numeros = list(patron_numero.finditer(linea))
+        if not matches_numeros:
             continue
+
+        descripcion = extraer_nombre(linea, matches_numeros[0] if matches_numeros else None)
+        if not nombre_valido(descripcion):
+            continue
+
+        numeros = [normalizar_numero(match.group(0)) for match in matches_numeros]
+        cantidad = 0.0
+        merma = 0.0
+        precio = 0.0
+
+        if len(numeros) >= 3:
+            cantidad = float(numeros[0])
+            cantidad_neta = float(numeros[1])
+            precio = float(numeros[2])
+            merma = ((cantidad - cantidad_neta) / cantidad) * 100 if cantidad > 0 else 0.0
+        elif len(numeros) == 2:
+            cantidad = float(numeros[0])
+            precio = float(numeros[1])
+        elif len(numeros) == 1:
+            precio = float(numeros[0])
 
         ingredientes.append({
             'descripcion': descripcion,
-            'cantidad_bruta': cantidad,
+            'cantidad_bruta': float(cantidad),
             'merma': max(0.0, min(100.0, merma)),
-            'precio_unidad': precio
+            'precio_unidad': float(precio)
         })
 
     return ingredientes, errores
