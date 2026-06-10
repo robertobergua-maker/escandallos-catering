@@ -287,12 +287,20 @@ if st.session_state['ingredientes']:
     if hasattr(ingredientes_editados, "to_dict"):
         ingredientes_editados = ingredientes_editados.to_dict("records")
 
+    def valor_float_seguro(valor):
+        try:
+            if valor is None or valor == "":
+                return 0.0
+            return float(valor)
+        except (TypeError, ValueError):
+            return 0.0
+
     st.session_state['ingredientes'] = [
         {
             'descripcion': str(ing.get('descripcion', '')).strip(),
-            'cantidad_bruta': normalizar_numero(ing.get('cantidad_bruta')),
-            'merma': normalizar_numero(ing.get('merma')),
-            'precio_unidad': normalizar_numero(ing.get('precio_unidad')),
+            'cantidad_bruta': valor_float_seguro(ing.get('cantidad_bruta')),
+            'merma': valor_float_seguro(ing.get('merma')),
+            'precio_unidad': valor_float_seguro(ing.get('precio_unidad')),
         }
         for ing in ingredientes_editados
         if str(ing.get('descripcion', '')).strip()
