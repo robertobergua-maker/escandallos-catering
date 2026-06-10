@@ -251,7 +251,52 @@ st.divider()
 # MUESTRA DE RESULTADOS UNIFICADA
 if st.session_state['ingredientes']:
     st.subheader("🛒 Lista de Ingredientes Agregados")
-    st.dataframe(st.session_state['ingredientes'], use_container_width=True)
+
+    ingredientes_editados = st.data_editor(
+        st.session_state['ingredientes'],
+        use_container_width=True,
+        num_rows="dynamic",
+        column_order=("descripcion", "cantidad_bruta", "merma", "precio_unidad"),
+        column_config={
+            "descripcion": st.column_config.TextColumn(
+                "Ingrediente",
+            ),
+            "cantidad_bruta": st.column_config.NumberColumn(
+                "Cantidad Bruta (kg/l)",
+                format="%.3f",
+                min_value=0.0,
+                step=0.001,
+            ),
+            "merma": st.column_config.NumberColumn(
+                "% Merma",
+                format="%.2f %%",
+                min_value=0.0,
+                max_value=100.0,
+                step=0.01,
+            ),
+            "precio_unidad": st.column_config.NumberColumn(
+                "Precio Unidad (€)",
+                format="%.2f €",
+                min_value=0.0,
+                step=0.01,
+            ),
+        },
+        key="editor_ingredientes",
+    )
+
+    if hasattr(ingredientes_editados, "to_dict"):
+        ingredientes_editados = ingredientes_editados.to_dict("records")
+
+    st.session_state['ingredientes'] = [
+        {
+            'descripcion': str(ing.get('descripcion', '')).strip(),
+            'cantidad_bruta': normalizar_numero(ing.get('cantidad_bruta')),
+            'merma': normalizar_numero(ing.get('merma')),
+            'precio_unidad': normalizar_numero(ing.get('precio_unidad')),
+        }
+        for ing in ingredientes_editados
+        if str(ing.get('descripcion', '')).strip()
+    ]
     
     if st.button("Limpiar todos los ingredientes"):
         st.session_state['ingredientes'] = []
