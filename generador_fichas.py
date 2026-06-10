@@ -3,92 +3,93 @@ import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill
 from openpyxl.utils import get_column_letter
 import io
-import re
+import base64
+import json
+from openai import OpenAI
 
-# Configuración de la página obligatoria al inicio
-st.set_page_config(page_title="Gestor de Fichas Técnicas", page_icon="👨‍🍳", layout="wide")
+# Configuración obligatoria de la página al inicio
+st.set_page_config(page_title="Gestor de Fichas Técnicas IA", page_icon="👨‍🍳", layout="wide")
 
+# Inicializar el estado de la aplicación
 if 'ingredientes' not in st.session_state:
     st.session_state['ingredientes'] = []
 
-def parsear_linea_inteligente(linea):
+# Obtener la API Key de forma segura desde los Secrets de Streamlit
+api_key = st.secrets.get("OPENAI_API_KEY", None)
+
+def procesar_con_openai(texto_plano=None, bytes_imagen=None, mime_type=None):
     """
-    Analiza una línea de texto plano o una línea reconstruida de OCR
-    de forma agnóstica para extraer Nombre, Cantidad Bruta, Merma y Precio.
+    Envía el texto plano o la imagen a GPT-4o para extraer ingredientes 
+    en un formato JSON estructurado y limpio.
     """
-    # Limpieza de ruido de tablas y encabezados
-    linea_clean = linea.strip()
-    palabras_ruido = ["nombre", "plato", "categoria", "valoracion", "salsa", "guarnicion", 
-                      "articulos", "codigo", "descripcion", "cantidad", "bruto", "neto", 
-                      "kilos", "unidad", "precio", "coste", "servicio", "peso"]
-    
-    if any(ruido in linea_clean.lower() for ruido in palabras_ruido) or len(linea_clean) < 3:
-        return None
+    if not api_key:
+        st.error("❌ Error de configuración: No se ha encontrado la clave 'OPENAI_API_KEY' en los Secrets de Streamlit.")
+        return []
 
-    # Encontrar todos los números (incluyendo decimales con comas o puntos)
-    numeros_str = re.findall(r'\d+[\.,]\d+|\d+', linea_clean)
-    numeros = []
-    for n in numeros_str:
-        try:
-            numeros.append(float(n.replace(',', '.')))
-        except:
-            pass
-
-    # Si no hay números, no podemos escandallar la fila
-    if not numeros:
-        return None
-
-    # Extraer el nombre del ingrediente (todo el texto antes del primer número)
-    primer_num_idx = linea_clean.find(numeros_str[0])
-    nombre = linea_clean[:primer_num_idx].strip()
-    
-    # Limpiar caracteres sueltos o símbolos del nombre
-    nombre = re.sub(r'^[^\w]+|[^\w]+$', '', nombre).strip()
-    # Quitar unidades sueltas del final del nombre
-    nombre = re.sub(r'\b(kg|l|g|gr|ml|ud|uds)\b$', '', nombre, flags=re.IGNORECASE).strip()
-
-    if not nombre or len(nombre) < 2:
-        return None
-
-    # Heurística numérica basada en la cantidad de valores encontrados
-    cantidad_bruta = 0.0
-    merma = 0.0
-    precio_unidad = 0.0
-
-    if len(numeros) >= 3:
-        # Formato: Bruto, Neto, Precio (Ignoramos el 4º si es el coste total de la fila)
-        bruto = numeros[0]
-        neto = numeros[1]
-        precio_unidad = numeros[2]
+    try:
+        client = OpenAI(api_key=api_key)
         
-        # Corrección si el OCR se comió el "0," (ej: "350" -> 0.350)
-        if bruto > 50 and bruto % 1 != 0: # Si es un entero grande sospechoso de gramos
-            pass 
-        elif bruto >= 100 and bruto.is_integer():
-            bruto = bruto / 1000
-            neto = neto / 1000 if neto >= 100 else neto
+        # Instrucción del sistema (System Prompt) para asegurar la estructura exacta
+        prompt_sistema = (
+            "Eres un experto contable y chef de catering. Tu trabajo es analizar textos o imágenes de recetas, "
+            "albaranes o facturas y extraer los ingredientes para un escandallo técnico.\n\n"
+            "Debes ignorar por completo títulos de tablas, encabezados (como Bruto, Neto, Precio, Código), subtotales, IVA o totales de facturas.\n\n"
+            "Calcula o extrae los siguientes campos obligatorios para cada ingrediente real:\n"
+            "- 'descripcion': Nombre claro del ingrediente (ej: 'Cuarto de pollo asado').\n"
+            "- 'cantidad_bruta': Peso o cantidad inicial en kg o litros (número decimal flotante).\n"
+            "- 'merma': Porcentaje de merma estimado o calculado (número de 0 a 100). Si dispones de peso bruto y peso neto, "
+            "calcúlalo como: ((bruto - neto) / bruto) * 100. Redondea a 2 decimales. Si no hay merma o no se puede calcular, devuelve 0.0.\n"
+            "- 'precio_unidad': El coste por unidad de medida kg/litro (número decimal flotante). Ignora el coste total de la fila.\n\n"
+            "REQUISITO CRÍTICO: Devuelve ÚNICAMENTE un array JSON puro, sin bloques de código markdown (no uses ```json), "
+            "con esta estructura exacta:\n"
+            "[{\"descripcion\": \"Nombre\", \"cantidad_bruta\": 0.35, \"merma\": 14.29, \"precio_unidad\": 6.00}]"
+        )
 
-        cantidad_bruta = bruto
-        if bruto > 0 and bruto >= neto:
-            merma = ((bruto - neto) / bruto) * 100
-        else:
-            merma = 0.0
-            
-    elif len(numeros) == 2:
-        # Formato: Cantidad y Precio
-        cantidad_bruta = numeros[0]
-        precio_unidad = numeros[1]
-        merma = 0.0
-    else:
-        # Solo precio
-        precio_unidad = numeros[0]
+        contenido_usuario = []
 
-    return {
-        'descripcion': nombre,
-        'cantidad_bruta': cantidad_bruta,
-        'merma': merma,
-        'precio_unidad': precio_unidad
-    }
+        if texto_plano:
+            contenido_usuario.append({
+                "type": "text",
+                "text": f"Analiza este bloque de texto tabulado o desordenado y extrae los ingredientes:\n\n{texto_plano}"
+            })
+        
+        elif bytes_imagen:
+            base64_image = base64.b64encode(bytes_imagen).decode('utf-8')
+            contenido_usuario.append({
+                "type": "text",
+                "text": "Analiza esta imagen (puede ser una factura, albarán o tabla de Excel) y extrae los ingredientes ordenando filas y columnas semánticamente."
+            })
+            contenido_usuario.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{mime_type};base64,{base64_image}"
+                }
+            })
+
+        # Llamada al modelo GPT-4o (multimodal, procesa texto e imágenes)
+        respuesta = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": prompt_sistema},
+                {"role": "user", "content": contenido_usuario}
+            ],
+            temperature=0.1
+        )
+
+        # Limpiar y parsear la respuesta JSON
+        json_texto = respuesta.choices[0].message.content.strip()
+        # En caso de que el modelo use bloques de código a pesar de la orden:
+        if json_texto.startswith("```"):
+            json_texto = json_texto.split("\n", 1)[1].rsplit("\n", 1)[0].strip()
+            if json_texto.startswith("json"):
+                json_texto = json_texto[4:].strip()
+
+        lista_ingredientes = json.loads(json_texto)
+        return lista_ingredientes
+
+    except Exception as e:
+        st.error(f"⚠️ Error al conectar con la Inteligencia Artificial: {str(e)}")
+        return []
 
 def generar_excel(nombre_plato, ingredientes, costes_indirectos_pct, margen_beneficio_pct, iva_pct):
     wb = openpyxl.Workbook()
@@ -176,9 +177,13 @@ def generar_excel(nombre_plato, ingredientes, costes_indirectos_pct, margen_bene
     virtual_workbook.seek(0)
     return virtual_workbook
 
+
 # --- INTERFAZ DE USUARIO ---
-st.title("👨‍🍳 Asistente Financiero de Catering")
-st.markdown("Generador automático de escandallos adaptativo.")
+st.title("👨‍🍳 Asistente Inteligente de Catering (GPT-4o)")
+st.markdown("Carga tus recetas mediante texto o imágenes. La IA de OpenAI estructurará los datos automáticamente.")
+
+if not api_key:
+    st.info("💡 Consejo para el administrador: Configura tu 'OPENAI_API_KEY' en los Secrets de la plataforma Streamlit Cloud para activar los módulos inteligentes.")
 
 col1, col2, col3, col4 = st.columns(4)
 with col1:
@@ -192,15 +197,15 @@ with col4:
 
 st.divider()
 
-tab1, tab2, tab3 = st.tabs(["✍️ Manual", "📝 Copia y Pega (Texto/Excel)", "📸 Imagen OCR"])
+tab1, tab2, tab3 = st.tabs(["✍️ Entrada Manual", "📝 Copia y Pega Inteligente", "📸 Escáner de Imagen (IA Vision)"])
 
 # TAB 1: MANUAL
 with tab1:
     with st.form("form_ingrediente", clear_on_submit=True):
         c_m1, c_m2, c_m3, c_m4 = st.columns(4)
-        desc_man = c_m1.text_input("Ingrediente", placeholder="Ej: Solomillo")
+        desc_man = c_m1.text_input("Ingrediente", placeholder="Ej: Solomillo de ternera")
         cant_man = c_m2.number_input("Cant. Bruta (kg/l)", min_value=0.0, step=0.001, format="%.3f", value=None, placeholder="0.000")
-        merma_man = c_m3.number_input("% Merma", min_value=0.0, max_value=100.0, step=1.0, value=None, placeholder="0%")
+        merma_man = c_m3.number_input("% Merma", min_value=0.0, max_value=100.0, step=0.01, value=None, placeholder="0.00%")
         precio_man = c_m4.number_input("Precio Unidad (€)", min_value=0.0, step=0.01, format="%.2f", value=None, placeholder="0.00 €")
         
         if st.form_submit_button("Añadir Individualmente") and desc_man:
@@ -212,72 +217,34 @@ with tab1:
             })
             st.rerun()
 
-# TAB 2: COPIA Y PEGA DESDE EXCEL
+# TAB 2: COPIA Y PEGA CON IA
 with tab2:
-    st.markdown("💡 **Truco profesional:** Abre tu Excel, selecciona las filas de tus ingredientes, dale a **Copiar** y pégalas aquí dentro. El sistema mantendrá las líneas unidas de forma perfecta.")
-    texto_pegado = st.text_area("Pega aquí las filas de tu receta o tabla:", height=150, placeholder="cuarto de pollo asado\t0,350\t0,300\tkg\t6,000 €")
+    st.markdown("📋 **Pega cualquier texto:** Un correo, un mensaje de WhatsApp desordenado, o filas sueltas de un Excel viejo. GPT-4o identificará los datos relevantes.")
+    texto_pegado = st.text_area("Bloque de texto a analizar:", height=150, placeholder="He comprado 3 kilos de solomillo a 12.50€ el kilo. Además sal común 1 brik por 1.20€...")
     
-    if st.button("Procesar Bloque de Texto", type="secondary"):
+    if st.button("Analizar texto con IA", type="primary"):
         if texto_pegado:
-            lineas = texto_pegado.split('\n')
-            contador = 0
-            for l in lineas:
-                resultado = parsear_linea_inteligente(l)
-                if resultado:
-                    st.session_state['ingredientes'].append(resultado)
-                    contador += 1
-            if contador > 0:
-                st.success(f"¡Se añadieron {contador} ingredientes con éxito!")
-                st.rerun()
-            else:
-                st.warning("No pudimos identificar ingredientes válidos en ese formato. Revisa el texto.")
+            with st.spinner("GPT-4o está leyendo y estructurando el texto..."):
+                nuevos_ingredientes = procesar_con_openai(texto_plano=texto_pegado)
+                if nuevos_ingredientes:
+                    st.session_state['ingredientes'].extend(nuevos_ingredientes)
+                    st.success(f"¡Se han añadido {len(nuevos_ingredientes)} ingredientes!")
+                    st.rerun()
 
-# TAB 3: IMAGEN OCR CON RECONSTRUCCIÓN DE FILAS
+# TAB 3: IMAGEN CON IA VISION
 with tab3:
-    archivo_imagen = st.file_uploader("Sube una foto de tu receta o tabla (JPG/PNG)", type=['jpg', 'jpeg', 'png'])
+    st.markdown("📸 **Sube una foto o captura:** Albaranes arrugados, fotos a pantallas de proveedores o capturas de PDFs. La IA Vision organizará las columnas sin importar el formato.")
+    archivo_imagen = st.file_uploader("Sube una foto de tu receta o factura (JPG/PNG)", type=['jpg', 'jpeg', 'png'])
+    
     if archivo_imagen:
-        import easyocr
-        from PIL import Image
-        import numpy as np
-        
-        with st.spinner("La Inteligencia Artificial está ordenando las filas de la tabla..."):
-            img = Image.open(archivo_imagen)
-            reader = easyocr.Reader(['es'])
-            # Obtener coordenadas de cada bloque de texto
-            resultados_ocr = reader.readtext(np.array(img))
-            
-            # AGRUPACIÓN POR COORDENADAS VERTICALES (Y)
-            # Agrupamos los bloques de texto que están en la misma franja de altura (tolerancia de 15 píxeles)
-            lineas_reconstruidas = {}
-            for (bbox, text, prob) in resultados_ocr:
-                y_centro = (bbox[0][1] + bbox[2][1]) / 2
-                # Buscar si ya existe una línea en esa altura aproximada
-                encontrada = False
-                for y_base in lineas_reconstruidas.keys():
-                    if abs(y_centro - y_base) < 15:
-                        lineas_reconstruidas[y_base].append((bbox[0][0], text))
-                        encontrada = True
-                        break
-                if not encontrada:
-                    lineas_reconstruidas[y_centro] = [(bbox[0][0], text)]
-            
-            # Ordenar horizontalmente cada línea y procesar
-            contador_ocr = 0
-            for y_base in sorted(lineas_reconstruidas.keys()):
-                # Ordenar de izquierda a derecha por la coordenada X
-                bloques_ordenados = sorted(lineas_reconstruidas[y_base], key=lambda x: x[0])
-                texto_linea = " ".join([b[1] for b in bloques_ordenados])
-                
-                res_ocr = parsear_linea_inteligente(texto_linea)
-                if res_ocr:
-                    st.session_state['ingredientes'].append(res_ocr)
-                    contador_ocr += 1
-            
-            if contador_ocr > 0:
-                st.success(f"¡Se cargaron {contador_ocr} ingredientes desde la imagen de forma alineada!")
-                st.rerun()
-            else:
-                st.error("No logramos alinear las columnas de esta foto de forma segura. Prueba el Copia y Pega de la pestaña de texto.")
+        if st.button("Escanear imagen con IA Vision", type="primary"):
+            bytes_img = archivo_imagen.read()
+            with st.spinner("La IA Vision está analizando la estructura de la imagen..."):
+                nuevos_ingredientes = procesar_con_openai(bytes_imagen=bytes_img, mime_type=archivo_imagen.type)
+                if nuevos_ingredientes:
+                    st.session_state['ingredientes'].extend(nuevos_ingredientes)
+                    st.success(f"¡Se han extraído {len(nuevos_ingredientes)} ingredientes con éxito!")
+                    st.rerun()
 
 st.divider()
 
