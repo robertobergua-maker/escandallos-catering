@@ -1,99 +1,173 @@
 import streamlit as st
+import pandas as pd
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill
 from openpyxl.utils import get_column_letter
 import io
 import base64
 import json
-import pandas as pd
 from openai import OpenAI
+from supabase import create_client, Client
 
-# Configuración obligatoria de la página al inicio
-st.set_page_config(page_title="Gestor de Fichas Técnicas IA", page_icon="👨‍🍳", layout="wide")
+# Configuración de página obligatoria al inicio de Streamlit
+st.set_page_config(page_title="Gestor de Fichas Técnicas Cloud", page_icon="👨‍🍳", layout="wide")
 
-BASE_DE_DATOS_INGREDIENTES = {
-    "POL-01": {"descripcion": "Cuarto de pollo asado", "merma": 14.29, "precio_unidad": 6.00},
-    "AJO-01": {"descripcion": "Ajo limpio", "merma": 40.00, "precio_unidad": 12.00},
-    "ACE-01": {"descripcion": "Aceite de oliva virgen", "merma": 0.00, "precio_unidad": 8.00},
-    "VIN-01": {"descripcion": "Vino blanco cocina", "merma": 0.00, "precio_unidad": 4.00},
-    "SAL-01": {"descripcion": "Sal fina", "merma": 0.00, "precio_unidad": 2.00},
-    "SOL-01": {"descripcion": "Solomillo de cerdo", "merma": 15.00, "precio_unidad": 12.50},
-}
+# =============================================================================
+# 🔑 INICIALIZACIÓN DE CONEXIONES CLOUD (SUPABASE Y OPENAI)
+# =============================================================================
+supabase_url = st.secrets.get("SUPABASE_URL", None)
+supabase_key = st.secrets.get("SUPABASE_KEY", None)
+api_key = st.secrets.get("OPENAI_API_KEY", None)
 
-# Inicializar el estado de la aplicación
+supabase_disponible = supabase_url is not None and supabase_key is not None
+
+# Variable de cliente global para Supabase
+supabase: Client = None
+if supabase_disponible:
+    try:
+        supabase = create_client(supabase_url, supabase_key)
+    except Exception as e:
+        st.error(f"⚠️ Error al conectar con el cliente de Supabase: {e}")
+        supabase_disponible = False
+
+# Inicializar estado de sesión para el escandallo activo
 if 'ingredientes' not in st.session_state:
     st.session_state['ingredientes'] = []
 
-COLUMNAS_INGREDIENTES = ["codigo", "descripcion", "cantidad_bruta", "merma", "precio_unidad"]
+# Trigger para invalidar caché de Supabase al editar el catálogo
+if 'db_trigger' not in st.session_state:
+    st.session_state['db_trigger'] = 0
 
-def preparar_dataframe_ingredientes(ingredientes):
-    df = pd.DataFrame(ingredientes)
-    for columna in COLUMNAS_INGREDIENTES:
-        if columna not in df.columns:
-            df[columna] = "S/C" if columna == "codigo" else "" if columna == "descripcion" else 0.0
-    df = df[COLUMNAS_INGREDIENTES].copy()
-    df["codigo"] = df["codigo"].fillna("S/C").astype(str).str.strip().replace("", "S/C")
-    df["descripcion"] = df["descripcion"].fillna("").astype(str).str.strip()
-    for columna in ["cantidad_bruta", "merma", "precio_unidad"]:
-        df[columna] = pd.to_numeric(df[columna], errors="coerce").fillna(0.0).astype(float)
-    df = df[df["descripcion"] != ""]
-    return df
+# =============================================================================
+# 📥 FUNCIÓN CACHÉ PARA CARGAR INVENTARIO DESDE SUPABASE
+# =============================================================================
+@st.cache_data(ttl=600)
+def cargar_inventario_supabase(trigger):
+    """
+    Trae todo el listado de ingredientes de Supabase de forma segura.
+    Se invalida automáticamente al cambiar el 'trigger'.
+    Incluye normalización ultra-defensiva de columnas contra errores de formato (BOM, mayúsculas, etc).
+    """
+    if not supabase_disponible or supabase is None:
+        return pd.DataFrame(columns=["codigo", "familia", "descripcion", "merma", "precio_unidad"])
+    try:
+        # Petición masiva a la tabla 'inventario'
+        respuesta = supabase.table("inventario").select("*").execute()
+        df = pd.DataFrame(respuesta.data)
+        
+        if not df.empty:
+            # 1. Normalización de nombres de columnas (eliminar BOM, comillas, mayúsculas y espacios laterales)
+            df.columns = [
+                str(c).lower().strip().replace('\ufeff', '').replace('"', '').replace("'", "") 
+                for c in df.columns
+            ]
+            
+            # 2. Mapeo semántico de columnas por aproximación (por si se importaron con nombres parecidos)
+            mapeo = {}
+            for col in df.columns:
+                if 'cod' in col:
+                    mapeo[col] = 'codigo'
+                elif 'fam' in col:
+                    mapeo[col] = 'familia'
+                elif 'desc' in col or 'art' in col or 'nom' in col:
+                    mapeo[col] = 'descripcion'
+                elif 'merm' in col or 'rend' in col:
+                    mapeo[col] = 'merma'
+                elif 'prec' in col or 'cost' in col or 'val' in col:
+                    mapeo[col] = 'precio_unidad'
+            
+            df = df.rename(columns=mapeo)
+            
+            # 3. Garantizar que existan todas las columnas requeridas (si faltan, se crean vacías)
+            cols_deseadas = ["codigo", "familia", "descripcion", "merma", "precio_unidad"]
+            for col in cols_deseadas:
+                if col not in df.columns:
+                    df[col] = 0.0 if col in ["merma", "precio_unidad"] else ""
+            
+            # 4. Asegurar tipos numéricos correctos
+            df["merma"] = pd.to_numeric(df["merma"], errors='coerce').fillna(0.0)
+            df["precio_unidad"] = pd.to_numeric(df["precio_unidad"], errors='coerce').fillna(0.0)
+            
+            df = df[cols_deseadas]
+            # Ordenar alfabéticamente por descripción
+            df = df.sort_values(by="descripcion")
+        else:
+            df = pd.DataFrame(columns=["codigo", "familia", "descripcion", "merma", "precio_unidad"])
+        return df
+    except Exception as e:
+        st.error(f"Error al leer de Supabase: {e}")
+        return pd.DataFrame(columns=["codigo", "familia", "descripcion", "merma", "precio_unidad"])
 
-def registros_ingredientes(ingredientes):
-    return preparar_dataframe_ingredientes(ingredientes).to_dict("records")
+# Cargar inventario actual para autocompletado y contexto IA
+inventario_df = cargar_inventario_supabase(st.session_state['db_trigger'])
 
-# Obtener la API Key de forma segura desde los Secrets de Streamlit
-api_key = st.secrets.get("OPENAI_API_KEY", None)
+# Convertir inventario a diccionario seguro para búsquedas rápidas en milisegundos sin KeyError
+inventario_dict = {}
+if not inventario_df.empty:
+    for _, row in inventario_df.iterrows():
+        codigo_raw = row.get("codigo", None)
+        if codigo_raw is not None and pd.notna(codigo_raw):
+            codigo_str = str(codigo_raw).strip().upper()
+            inventario_dict[codigo_str] = {
+                "familia": row.get("familia", "VARIOS"),
+                "descripcion": row.get("descripcion", ""),
+                "merma": float(row.get("merma", 0.0)) if pd.notna(row.get("merma")) else 0.0,
+                "precio_unidad": float(row.get("precio_unidad", 0.0)) if pd.notna(row.get("precio_unidad")) else 0.0
+            }
 
+# =============================================================================
+# 🧠 PROCESAMIENTO INTELIGENTE CON OPENAI GPT-4o
+# =============================================================================
 def procesar_con_openai(texto_plano=None, bytes_imagen=None, mime_type=None):
     """
-    Envía el texto plano o la imagen a GPT-4o para extraer ingredientes 
-    en un formato JSON estructurado y limpio.
+    Envía la información a GPT-4o pasándole el inventario actual de Supabase como contexto.
     """
     if not api_key:
-        st.error("❌ Error de configuración: No se ha encontrado la clave 'OPENAI_API_KEY' en los Secrets de Streamlit.")
+        st.error("❌ Error: No se ha encontrado la clave 'OPENAI_API_KEY' en los Secrets de Streamlit.")
         return []
 
     try:
         client = OpenAI(api_key=api_key)
         
-        base_datos_json = json.dumps(BASE_DE_DATOS_INGREDIENTES, ensure_ascii=False, indent=2)
+        # Mandar un subconjunto ligero del catálogo real a la IA para optimizar la ventana de contexto
+        catalogo_reducido = []
+        for codigo, data in list(inventario_dict.items()):
+            catalogo_reducido.append({
+                "c": codigo,
+                "d": data["descripcion"],
+                "m": data["merma"],
+                "p": data["precio_unidad"]
+            })
 
-        # Instrucción del sistema (System Prompt) para asegurar la estructura exacta
-        prompt_sistema = (
-            "Eres un experto contable y chef de catering. Tu trabajo es analizar textos o imágenes de recetas, "
-            "albaranes o facturas y extraer los ingredientes para un escandallo técnico.\n\n"
-            f"Esta es la base de datos local de ingredientes disponibles:\n{base_datos_json}\n\n"
-            "Debes ignorar por completo títulos de tablas, encabezados (como Bruto, Neto, Precio, Código), subtotales, IVA o totales de facturas.\n\n"
-            "Para cada ingrediente real, si detectas una coincidencia clara o un nombre muy similar con la base de datos, "
-            "usa exactamente su 'codigo', 'descripcion', 'merma' y 'precio_unidad'.\n"
-            "Si el ingrediente no existe en la base, inventa un código corto mnemónico de 5 caracteres con formato similar a 'CEB-01', "
-            "extrae su descripción, cantidad bruta, merma si existe y precio unidad desde la fuente.\n\n"
-            "Calcula o extrae los siguientes campos obligatorios para cada ingrediente real:\n"
-            "- 'codigo': Código del ingrediente. Usa el de la base de datos si hay coincidencia; si es nuevo, inventa uno mnemónico.\n"
-            "- 'descripcion': Nombre claro del ingrediente.\n"
-            "- 'cantidad_bruta': Peso o cantidad inicial en kg o litros (número decimal flotante).\n"
-            "- 'merma': Porcentaje de merma estimado o calculado (número de 0 a 100). Si dispones de peso bruto y peso neto, "
-            "calcúlalo como: ((bruto - neto) / bruto) * 100. Redondea a 2 decimales. Si no hay merma o no se puede calcular, devuelve 0.0.\n"
-            "- 'precio_unidad': El coste por unidad de medida kg/litro (número decimal flotante). Ignora el coste total de la fila.\n\n"
-            "REQUISITO CRÍTICO: Devuelve ÚNICAMENTE un array JSON puro, sin bloques de código markdown (no uses ```json), "
-            "con esta estructura exacta:\n"
-            "[{\"codigo\": \"POL-01\", \"descripcion\": \"Cuarto de pollo asado\", \"cantidad_bruta\": 0.35, \"merma\": 14.29, \"precio_unidad\": 6.00}]"
-        )
+        bd_contexto = json.dumps(catalogo_reducido, ensure_ascii=False)
+
+        prompt_sistema = f'''Eres un experto en contabilidad hostelera de alta cocina. Tu trabajo consiste en procesar textos o imágenes de recetas, albaranes, facturas o capturas, y extraer los ingredientes para un escandallo técnico estructurado.
+
+Dispones del catálogo completo de ingredientes reales de nuestra cocina en formato JSON de referencia:
+{bd_contexto}
+
+INSTRUCCIONES CRÍTICAS:
+1. Compara semánticamente cada ingrediente detectado con el catálogo de referencia. Si encuentras una coincidencia clara (por ejemplo, "pollo" con "CUARTO POLLO ASADO" o "aceite oliva" con "ACEITE OLIVA"), asigna exactamente su "codigo" (parámetro "c") y usa su "descripcion", "merma" y "precio_unidad" correspondientes del catálogo.
+2. Si el ingrediente analizado NO existe en el catálogo, invéntale un código único y nuevo corto que comience por "ING-" seguido de 4 números lógicos, asigna su descripción extraída y sus precios o mermas correspondientes.
+3. Si el texto o la imagen presenta mermas implícitas (por ejemplo, Peso Bruto: 0.350, Peso Neto: 0.300), calcula la merma porcentual de forma precisa: ((bruto - neto)/bruto)*100.
+4. Ignora títulos de columnas de cabecera de Excel, importes totales o subtotales de facturas.
+
+REQUISITO EXCLUSIVO DE RESPUESTA: Devuelve ÚNICAMENTE un array de formato JSON puro sin bloques de código markdown de tipo ```json y sin explicaciones adicionales:
+[
+  {{"codigo": "ING-0019", "descripcion": "PECHUGA POLLO ENTERA FRESCA", "cantidad_bruta": 0.35, "merma": 14.29, "precio_unidad": 5.15}}
+]'''
 
         contenido_usuario = []
-
         if texto_plano:
             contenido_usuario.append({
                 "type": "text",
-                "text": f"Analiza este bloque de texto tabulado o desordenado y extrae los ingredientes:\n\n{texto_plano}"
+                "text": f"Analiza esta lista de ingredientes y estructúrala cruzando sus nombres con nuestra base de datos:\n\n{texto_plano}"
             })
-        
         elif bytes_imagen:
             base64_image = base64.b64encode(bytes_imagen).decode('utf-8')
             contenido_usuario.append({
                 "type": "text",
-                "text": "Analiza esta imagen (puede ser una factura, albarán o tabla de Excel) y extrae los ingredientes ordenando filas y columnas semánticamente."
+                "text": "Analiza esta imagen (puede ser un tique, albarán o factura) y extrae los ingredientes vinculando los códigos correctos del catálogo."
             })
             contenido_usuario.append({
                 "type": "image_url",
@@ -102,7 +176,6 @@ def procesar_con_openai(texto_plano=None, bytes_imagen=None, mime_type=None):
                 }
             })
 
-        # Llamada al modelo GPT-4o (multimodal, procesa texto e imágenes)
         respuesta = client.chat.completions.create(
             model="gpt-4o",
             messages=[
@@ -112,28 +185,27 @@ def procesar_con_openai(texto_plano=None, bytes_imagen=None, mime_type=None):
             temperature=0.1
         )
 
-        # Limpiar y parsear la respuesta JSON
         json_texto = respuesta.choices[0].message.content.strip()
-        # En caso de que el modelo use bloques de código a pesar de la orden:
         if json_texto.startswith("```"):
             json_texto = json_texto.split("\n", 1)[1].rsplit("\n", 1)[0].strip()
             if json_texto.startswith("json"):
                 json_texto = json_texto[4:].strip()
 
-        lista_ingredientes = json.loads(json_texto)
-        return registros_ingredientes(lista_ingredientes)
+        return json.loads(json_texto)
 
     except Exception as e:
-        st.error(f"⚠️ Error al conectar con la Inteligencia Artificial: {str(e)}")
+        st.error(f"⚠️ Error al conectar con la Inteligencia Artificial de OpenAI: {str(e)}")
         return []
 
+# =============================================================================
+# 📊 GENERADOR DE EXCEL CON FÓRMULAS CONSOLIDADAS
+# =============================================================================
 def generar_excel(nombre_plato, ingredientes, costes_indirectos_pct, margen_beneficio_pct, iva_pct):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Ficha Técnica"
 
-    ingredientes = registros_ingredientes(ingredientes)
-
+    # Título Principal Estilizado en Azul Marino
     ws.merge_cells('A1:G1')
     titulo_cell = ws['A1']
     titulo_cell.value = f"FICHA TÉCNICA: {nombre_plato.upper()}"
@@ -144,6 +216,7 @@ def generar_excel(nombre_plato, ingredientes, costes_indirectos_pct, margen_bene
 
     ws.append([])
 
+    # Cabeceras alineadas con la nueva columna Código
     headers = ['Código', 'Ingrediente', 'Cantidad Bruta (kg/l)', '% Merma', 'Peso Neto Real (kg/l)', 'Precio Unidad (€)', 'Coste Total (€)']
     ws.append(headers)
     
@@ -154,20 +227,22 @@ def generar_excel(nombre_plato, ingredientes, costes_indirectos_pct, margen_bene
         cell.alignment = Alignment(horizontal='center', vertical='center')
     ws.row_dimensions[3].height = 25
 
+    # Insertar registros y configurar fórmulas dinámicas
     start_row = 4
     for i, ing in enumerate(ingredientes):
         row = start_row + i
-        ws.cell(row=row, column=1, value=ing['codigo'])
-        ws.cell(row=row, column=2, value=ing['descripcion'])
-        ws.cell(row=row, column=3, value=ing['cantidad_bruta']).number_format = '#,##0.000'
-        ws.cell(row=row, column=4, value=ing['merma']/100).number_format = '0.00%'
+        ws.cell(row=row, column=1, value=ing.get('codigo', 'S/C'))
+        ws.cell(row=row, column=2, value=ing.get('descripcion', ''))
+        ws.cell(row=row, column=3, value=float(ing.get('cantidad_bruta', 0.0))).number_format = '#,##0.000'
+        ws.cell(row=row, column=4, value=float(ing.get('merma', 0.0))/100).number_format = '0.00%'
         ws.cell(row=row, column=5, value=f"=C{row}*(1-D{row})").number_format = '#,##0.000'
-        ws.cell(row=row, column=6, value=ing['precio_unidad']).number_format = '#,##0.00 €'
+        ws.cell(row=row, column=6, value=float(ing.get('precio_unidad', 0.0))).number_format = '#,##0.00 €'
         ws.cell(row=row, column=7, value=f"=C{row}*F{row}").number_format = '#,##0.00 €'
 
     last_row = start_row + len(ingredientes) - 1 if ingredientes else start_row
     res = last_row + 2
     
+    # Cálculos Financieros del Escandallo
     ws.cell(row=res, column=6, value="Subtotal Ingredientes:").font = Font(bold=True)
     ws.cell(row=res, column=7, value=f"=SUM(G4:G{last_row})").number_format = '#,##0.00 €'
 
@@ -200,6 +275,7 @@ def generar_excel(nombre_plato, ingredientes, costes_indirectos_pct, margen_bene
     pvp_total.font = Font(bold=True)
     pvp_total.fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
 
+    # Ajuste automático del ancho de las celdas para que no salgan truncadas (###)
     for col in ws.columns:
         max_len = 0
         col_idx = col[0].column
@@ -209,7 +285,7 @@ def generar_excel(nombre_plato, ingredientes, costes_indirectos_pct, margen_bene
                 continue
             if cell.value:
                 max_len = max(max_len, len(str(cell.value)))
-        ws.column_dimensions[col_letter].width = max(max_len + 3, 22)
+        ws.column_dimensions[col_letter].width = max(max_len + 3, 20)
 
     virtual_workbook = io.BytesIO()
     wb.save(virtual_workbook)
@@ -217,13 +293,26 @@ def generar_excel(nombre_plato, ingredientes, costes_indirectos_pct, margen_bene
     return virtual_workbook
 
 
-# --- INTERFAZ DE USUARIO ---
-st.title("👨‍🍳 Asistente Inteligente de Catering (GPT-4o)")
-st.markdown("Carga tus recetas mediante texto o imágenes. La IA de OpenAI estructurará los datos automáticamente.")
+# --- INTERFAZ GRÁFICA DE STREAMLIT ---
+st.title("👨‍🍳 Gestor de Escandallos Inteligente con Supabase PostgreSQL")
 
-if not api_key:
-    st.info("💡 Consejo para el administrador: Configura tu 'OPENAI_API_KEY' en los Secrets de la plataforma Streamlit Cloud para activar los módulos inteligentes.")
+# Panel lateral indicador de conexiones activas
+with st.sidebar:
+    st.header("⚙️ Estado de Conexiones Cloud")
+    if supabase_disponible:
+        st.success("⚡ Supabase: Conectado")
+    else:
+        st.warning("⚠️ Supabase: Desconectado. Configure 'SUPABASE_URL' y 'SUPABASE_KEY' en los Secrets.")
+        
+    if api_key:
+        st.success("🤖 OpenAI GPT-4o: Activo")
+    else:
+        st.warning("⚠️ OpenAI: Desconectado. Configure 'OPENAI_API_KEY' en los Secrets.")
+        
+    st.divider()
+    st.info("💡 Consejo: Al realizar modificaciones en la pestaña del Catálogo Supabase, haz clic en el botón 'Guardar Cambios en Supabase' para persistirlos en la nube de forma permanente.")
 
+# Inputs generales del plato
 col1, col2, col3, col4 = st.columns(4)
 with col1:
     nombre_plato = st.text_input("📝 Nombre del Plato", value="Mi Receta")
@@ -236,131 +325,227 @@ with col4:
 
 st.divider()
 
-tab1, tab2, tab3 = st.tabs(["✍️ Entrada Manual / Código", "📝 Copia y Pega Inteligente", "📸 Escáner de Imagen (IA Vision)"])
+# Definición de pestañas (Tabs) principales de la aplicación
+tab1, tab2, tab3, tab4 = st.tabs([
+    "✍️ Entrada Manual / Código", 
+    "📝 Copia y Pega Inteligente", 
+    "📸 Escáner de Imagen (IA Vision)", 
+    "🎒 Catálogo Supabase"
+])
 
-# TAB 1: MANUAL
+# -----------------------------------------------------------------------------
+# TAB 1: ENTRADA MANUAL E IDENTIFICACIÓN POR CÓDIGO EN SUPABASE
+# -----------------------------------------------------------------------------
 with tab1:
+    st.markdown("💡 **Tip:** Selecciona un código existente de tu base de datos y se auto-rellenarán la descripción, el precio y su merma.")
+    
+    opciones_codigo = [""] + list(inventario_dict.keys())
+    
     with st.form("form_ingrediente", clear_on_submit=True):
-        c_m0, c_m1, c_m2, c_m3, c_m4 = st.columns([1, 2, 1, 1, 1])
-        codigo_man = c_m0.text_input("Código", placeholder="Ej: SOL-01")
-        desc_man = c_m1.text_input("Ingrediente", placeholder="Ej: Solomillo de ternera")
+        c_m0, c_m1, c_m2, c_m3, c_m4 = st.columns(5)
+        
+        # Desplegable predictivo de ingredientes
+        cod_select = c_m0.selectbox(
+            "Buscar por Código", 
+            opciones_codigo, 
+            format_func=lambda x: f"{x} - {inventario_dict[x]['descripcion']}" if x else "Seleccione un código..."
+        )
+        
+        desc_man = c_m1.text_input("Ingrediente (Nuevo)", placeholder="Ej: Cebolla tierna")
         cant_man = c_m2.number_input("Cant. Bruta (kg/l)", min_value=0.0, step=0.001, format="%.3f", value=None, placeholder="0.000")
         merma_man = c_m3.number_input("% Merma", min_value=0.0, max_value=100.0, step=0.01, value=None, placeholder="0.00%")
         precio_man = c_m4.number_input("Precio Unidad (€)", min_value=0.0, step=0.01, format="%.2f", value=None, placeholder="0.00 €")
         
-        if st.form_submit_button("Añadir Individualmente"):
-            codigo_limpio = codigo_man.strip().upper() if codigo_man else "S/C"
-            datos_codigo = BASE_DE_DATOS_INGREDIENTES.get(codigo_limpio)
-            if datos_codigo:
-                desc_final = datos_codigo["descripcion"]
-                merma_final = datos_codigo["merma"]
-                precio_final = datos_codigo["precio_unidad"]
-            else:
-                codigo_limpio = codigo_limpio or "S/C"
-                desc_final = desc_man.strip()
-                merma_final = merma_man if merma_man is not None else 0.0
-                precio_final = precio_man if precio_man is not None else 0.0
-
-            if desc_final:
+        if st.form_submit_button("Añadir al Escandallo"):
+            # Si el usuario seleccionó un código del desplegable
+            if cod_select:
+                info_bd = inventario_dict[cod_select]
                 st.session_state['ingredientes'].append({
-                    'codigo': codigo_limpio,
-                    'descripcion': desc_final,
+                    'codigo': cod_select,
+                    'descripcion': info_bd['descripcion'],
                     'cantidad_bruta': cant_man if cant_man is not None else 0.0,
-                    'merma': merma_final,
-                    'precio_unidad': precio_final
+                    'merma': info_bd['merma'],
+                    'precio_unidad': info_bd['precio_unidad']
                 })
-                st.rerun()
+                st.success(f"Ingrediente de Supabase añadido: {info_bd['descripcion']}")
             else:
-                st.warning("Introduce un código válido o una descripción para añadir el ingrediente.")
+                # Si es un ingrediente sin código en el inventario
+                st.session_state['ingredientes'].append({
+                    'codigo': "S/C",
+                    'descripcion': desc_man if desc_man else "Ingrediente nuevo",
+                    'cantidad_bruta': cant_man if cant_man is not None else 0.0,
+                    'merma': merma_man if merma_man is not None else 0.0,
+                    'precio_unidad': precio_man if precio_man is not None else 0.0
+                })
+            st.rerun()
 
-# TAB 2: COPIA Y PEGA CON IA
+# -----------------------------------------------------------------------------
+# TAB 2: COPIA Y PEGA INTELIGENTE CON GPT-4o
+# -----------------------------------------------------------------------------
 with tab2:
-    st.markdown("📋 **Pega cualquier texto:** Un correo, un mensaje de WhatsApp desordenado, o filas sueltas de un Excel viejo. GPT-4o identificará los datos relevantes.")
-    texto_pegado = st.text_area("Bloque de texto a analizar:", height=150, placeholder="He comprado 3 kilos de solomillo a 12.50€ el kilo. Además sal común 1 brik por 1.20€...")
+    st.markdown("📋 **Pega cualquier bloque de texto:** Textos de correo de proveedores, chats de WhatsApp o filas de PDF.")
+    texto_pegado = st.text_area("Pega tu texto aquí para analizar con IA:", height=150, placeholder="3 kg de pollo asado ING-0027...")
     
     if st.button("Analizar texto con IA", type="primary"):
         if texto_pegado:
-            with st.spinner("GPT-4o está leyendo y estructurando el texto..."):
-                nuevos_ingredientes = procesar_con_openai(texto_plano=texto_pegado)
-                if nuevos_ingredientes:
-                    st.session_state['ingredientes'].extend(nuevos_ingredientes)
-                    st.success(f"¡Se han añadido {len(nuevos_ingredientes)} ingredientes!")
+            with st.spinner("La IA está leyendo y cruzando los datos con tu Supabase..."):
+                nuevos = procesar_con_openai(texto_plano=texto_pegado)
+                if nuevos:
+                    st.session_state['ingredientes'].extend(nuevos)
                     st.rerun()
 
-# TAB 3: IMAGEN CON IA VISION
+# -----------------------------------------------------------------------------
+# TAB 3: ESCÁNER DE IMAGEN IA VISION (SOPORTE CTRL+V / DRAG & DROP)
+# -----------------------------------------------------------------------------
 with tab3:
-    st.markdown("📸 **Sube una foto o captura:** Albaranes arrugados, fotos a pantallas de proveedores o capturas de PDFs. La IA Vision organizará las columnas sin importar el formato.")
-    archivo_imagen = st.file_uploader("Sube una foto de tu receta o factura (JPG/PNG)", type=['jpg', 'jpeg', 'png'])
+    st.markdown("📸 **Arrastra o pega tu imagen:** Haz una captura de pantalla de tu factura u hoja física de albarán, y pulsa **Ctrl+V** directamente sobre este panel para subirla.")
+    archivo_imagen = st.file_uploader("Sube, arrastra o pega (Ctrl+V) una foto de tu receta o factura (JPG/PNG)", type=['jpg', 'jpeg', 'png'])
     
     if archivo_imagen:
         if st.button("Escanear imagen con IA Vision", type="primary"):
             bytes_img = archivo_imagen.read()
-            with st.spinner("La IA Vision está analizando la estructura de la imagen..."):
-                nuevos_ingredientes = procesar_con_openai(bytes_imagen=bytes_img, mime_type=archivo_imagen.type)
-                if nuevos_ingredientes:
-                    st.session_state['ingredientes'].extend(nuevos_ingredientes)
-                    st.success(f"¡Se han extraído {len(nuevos_ingredientes)} ingredientes con éxito!")
+            with st.spinner("Leyendo factura y asociando códigos de Supabase..."):
+                nuevos = procesar_con_openai(bytes_imagen=bytes_img, mime_type=archivo_imagen.type)
+                if nuevos:
+                    st.session_state['ingredientes'].extend(nuevos)
                     st.rerun()
+
+# -----------------------------------------------------------------------------
+# TAB 4:🎒 GESTIÓN DEL CATÁLOGO DIRECTAMENTE EN SUPABASE (CRUD COMPLETO)
+# -----------------------------------------------------------------------------
+with tab4:
+    st.subheader("🎒 Catálogo Relacional de Ingredientes en Supabase")
+    st.markdown("Busca, añade, modifica o elimina productos de tu base de datos en la nube. **Los cambios realizados aquí se sincronizarán directamente en Postgres.**")
+    
+    if not inventario_df.empty:
+        # Buscador ágil en la base de datos para no colapsar el rendimiento de la web
+        busqueda = st.text_input("🔍 Buscar ingrediente por Código, Descripción o Familia:")
+        df_filtrado = inventario_df.copy()
+        
+        if busqueda:
+            df_filtrado = df_filtrado[
+                df_filtrado["codigo"].str.contains(busqueda, case=False, na=False) |
+                df_filtrado["descripcion"].str.contains(busqueda, case=False, na=False) |
+                df_filtrado["familia"].str.contains(busqueda, case=False, na=False)
+            ]
+        
+        # Grid editable conectado al catálogo
+        catalogo_editado = st.data_editor(
+            df_filtrado,
+            num_rows="dynamic",
+            use_container_width=True,
+            column_config={
+                "codigo": st.column_config.TextColumn("Código", help="ID único de Supabase", required=True),
+                "familia": st.column_config.TextColumn("Familia / Categoría", help="Ej: CARNES, PESCADOS..."),
+                "descripcion": st.column_config.TextColumn("Descripción / Ingrediente", required=True),
+                "merma": st.column_config.NumberColumn("% Merma Estándar", format="%.2f %%", min_value=0.0, max_value=100.0),
+                "precio_unidad": st.column_config.NumberColumn("Precio Proveedor (€)", format="%.2f €", min_value=0.0)
+            },
+            key="db_editor_component"
+        )
+        
+        # Guardar cambios aplicados en el editor interactivo directo a Supabase
+        if st.button("💾 Guardar Cambios en Supabase", type="primary"):
+            editor_state = st.session_state.get("db_editor_component")
+            if editor_state and supabase_disponible:
+                with st.spinner("Sincronizando catálogo con Supabase..."):
+                    try:
+                        # 1. Procesar modificaciones de filas existentes
+                        for row_idx_str, edits in editor_state.get("edited_rows", {}).items():
+                            row_idx = int(row_idx_str)
+                            fila_original = df_filtrado.iloc[row_idx]
+                            original_code = fila_original["codigo"]
+                            
+                            datos_actualizados = {
+                                "codigo": original_code,
+                                "familia": edits.get("familia", fila_original.get("familia", "VARIOS")),
+                                "descripcion": edits.get("descripcion", fila_original.get("descripcion", "")),
+                                "merma": float(edits.get("merma", fila_original.get("merma", 0.0))),
+                                "precio_unidad": float(edits.get("precio_unidad", fila_original.get("precio_unidad", 0.0)))
+                            }
+                            supabase.table("inventario").upsert(datos_actualizados).execute()
+
+                        # 2. Procesar inserciones de ingredientes nuevos
+                        for nueva_fila in editor_state.get("added_rows", []):
+                            if "codigo" in nueva_fila and nueva_fila["codigo"]:
+                                datos_nuevos = {
+                                    "codigo": str(nueva_fila["codigo"]).strip().upper(),
+                                    "familia": nueva_fila.get("familia", "VARIOS"),
+                                    "descripcion": nueva_fila.get("descripcion", "Ingrediente Nuevo"),
+                                    "merma": float(nueva_fila.get("merma", 0.0)),
+                                    "precio_unidad": float(nueva_fila.get("precio_unidad", 0.0))
+                                }
+                                supabase.table("inventario").upsert(datos_nuevos).execute()
+
+                        # 3. Procesar eliminaciones de ingredientes
+                        for row_idx in editor_state.get("deleted_rows", []):
+                            fila_original = df_filtrado.iloc[row_idx]
+                            original_code = fila_original["codigo"]
+                            supabase.table("inventario").delete().eq("codigo", original_code).execute()
+
+                        st.success("¡Base de datos de Supabase actualizada con éxito! 🚀")
+                        st.session_state['db_trigger'] += 1  # Forzar actualización de caché
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error al sincronizar datos con Supabase: {e}")
+            elif not supabase_disponible:
+                st.error("❌ Supabase no está conectado correctamente.")
+    else:
+        st.info("💡 Tu tabla 'inventario' en Supabase está vacía o cargando datos...")
 
 st.divider()
 
-# MUESTRA DE RESULTADOS UNIFICADA
-st.subheader("🛒 Lista de Ingredientes Agregados")
-
-df_ingredientes = preparar_dataframe_ingredientes(st.session_state['ingredientes'])
-ingredientes_editados = st.data_editor(
-    df_ingredientes,
-    use_container_width=True,
-    num_rows="dynamic",
-    column_order=COLUMNAS_INGREDIENTES,
-    column_config={
-        "codigo": st.column_config.TextColumn(
-            "Código",
-            width="small",
-        ),
-        "descripcion": st.column_config.TextColumn(
-            "Ingrediente",
-            width="large",
-        ),
-        "cantidad_bruta": st.column_config.NumberColumn(
-            "Cantidad Bruta (kg/l)",
-            format="%.3f",
-            min_value=0.0,
-        ),
-        "merma": st.column_config.NumberColumn(
-            "% Merma",
-            format="%.2f %%",
-            min_value=0.0,
-            max_value=100.0,
-        ),
-        "precio_unidad": st.column_config.NumberColumn(
-            "Precio Unidad (€)",
-            format="%.2f €",
-            min_value=0.0,
-        ),
-    },
-    key="editor_ingredientes",
-)
-
-df_editado = preparar_dataframe_ingredientes(ingredientes_editados)
-registros_editados = df_editado.to_dict("records")
-registros_actuales = df_ingredientes.to_dict("records")
-if registros_editados != registros_actuales:
-    st.session_state['ingredientes'] = registros_editados
-    st.rerun()
-
-st.session_state['ingredientes'] = registros_editados
-
+# =============================================================================
+# 🛒 LISTA DE INGREDIENTES ACTIVA EN EL ESCANDALLO (EDITABLE AL VUELO)
+# =============================================================================
 if st.session_state['ingredientes']:
+    st.subheader("🛒 Lista de Ingredientes de la Receta Activa")
     
-    if st.button("Limpiar todos los ingredientes"):
+    # Preparamos DataFrame de representación visual
+    df_display = pd.DataFrame(st.session_state['ingredientes'])
+    
+    # Garantizar que existan las 5 columnas estructurales
+    for col in ["codigo", "descripcion", "cantidad_bruta", "merma", "precio_unidad"]:
+        if col not in df_display.columns:
+            df_display[col] = 0.0 if col in ["cantidad_bruta", "merma", "precio_unidad"] else "S/C"
+            
+    df_display = df_display[["codigo", "descripcion", "cantidad_bruta", "merma", "precio_unidad"]]
+
+    # Lanzamos el editor interactivo de la receta activa
+    ingredientes_editados = st.data_editor(
+        df_display,
+        num_rows="dynamic",
+        use_container_width=True,
+        column_config={
+            "codigo": st.column_config.TextColumn("Código", help="Código único del inventario", width="small"),
+            "descripcion": st.column_config.TextColumn("Ingrediente", help="Descripción del producto", width="large"),
+            "cantidad_bruta": st.column_config.NumberColumn("Cantidad Bruta (kg/l)", format="%.3f", min_value=0.0),
+            "merma": st.column_config.NumberColumn("% Merma", format="%.2f %%", min_value=0.0, max_value=100.0),
+            "precio_unidad": st.column_config.NumberColumn("Precio Unidad (€)", format="%.2f €", min_value=0.0)
+        },
+        key="editor_receta_activa"
+    )
+    
+    # Casteo numérico robusto para que la suma de costes no falle nunca con floats
+    for col in ["cantidad_bruta", "merma", "precio_unidad"]:
+        ingredientes_editados[col] = pd.to_numeric(ingredientes_editados[col]).fillna(0.0)
+        
+    ingredientes_lista = ingredientes_editados.to_dict(orient='records')
+    
+    # Sincronizar el estado al vuelo
+    if ingredientes_lista != st.session_state['ingredientes']:
+        st.session_state['ingredientes'] = ingredientes_lista
+        st.rerun()
+        
+    if st.button("Limpiar toda la receta"):
         st.session_state['ingredientes'] = []
         st.rerun()
 
     st.divider()
 
-    st.subheader(f"📊 Vista Previa del Escandallo: {nombre_plato}")
-    subtotal_ing = sum(ing['cantidad_bruta'] * ing['precio_unidad'] for ing in st.session_state['ingredientes'])
+    # MÉTRIQUES FINANCIERAS EN TIEMPO REAL
+    st.subheader(f"📊 Métricas y Estructuración de Costes: {nombre_plato}")
+    subtotal_ing = sum(float(ing.get('cantidad_bruta', 0.0)) * float(ing.get('precio_unidad', 0.0)) for ing in st.session_state['ingredientes'])
     
     ci_val = costes_indirectos_pct if costes_indirectos_pct is not None else 0.0
     mb_val = margen_beneficio_pct if margen_beneficio_pct is not None else 0.0
@@ -378,7 +563,7 @@ if st.session_state['ingredientes']:
     v1.metric("Materia Prima", f"{subtotal_ing:.2f} €")
     v2.metric("Costes Ind.", f"{costes_ind:.2f} €")
     v3.metric("COSTE TOTAL", f"{coste_total:.2f} €")
-    v4.metric("PVP Sugerido", f"{pvp_final:.2f} €")
+    v4.metric("PVP Sugerido (Con IVA)", f"{pvp_final:.2f} €")
 
     st.divider()
     
@@ -391,4 +576,4 @@ if st.session_state['ingredientes']:
         type="primary"
     )
 else:
-    st.info("💡 Comienza agregando ingredientes usando cualquiera de las 3 pestañas superiores.")
+    st.info("💡 Empieza agregando ingredientes usando cualquiera de las pestañas de entrada superiores.")
