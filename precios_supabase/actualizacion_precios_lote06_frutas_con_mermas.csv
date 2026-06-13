@@ -1,0 +1,101 @@
+﻿codigo,descripcion,merma,precio_unidad,proveedor_precio,formato_compra,precio_original,unidad_original,fecha_precio,url_precio,observaciones_precio
+ING-0709,ACEITE DE COCO 1L,0.0,,PENDIENTE,,,,2026-06-13,,Duplicado/fuera de lote: aceite de coco ya tratado en lote01.
+ING-0466,AGUACATE 1K,30.0,5.0,CONSUM,Aguacate premadurado pieza precio aprox.,1.0,"pieza aprox.; 5,00 €/kg",2026-06-13,https://tienda.consum.es/es/c/frescos/frutas/2179,Precio con IVA. €/kg indicado en categoría. Merma por piel y hueso.
+ING-0449,AGUACATE A DADOS 1K,0.0,6.55,MAKRO,METRO Chef aguacate dados 1 kg congelado,6.55,1 kg,2026-06-13,https://tienda.makro.es/shop/category/alimentaci%C3%B3n-general/congelados/frutas-y-verduras-congeladas/frutas-congeladas,"Precio de categoría Makro. Producto congelado limpio, merma 0%."
+ING-0467,ALBARICOQUE (ABRIL-JUNIO),10.0,,PENDIENTE,,,,2026-06-13,,Albaricoque fresco estacional; no localizado precio actual claro en fuentes objetivo.
+ING-0523,ALBARICOQUE mitad congelado,0.0,19.92,CONSUM,Orejón albaricoque desecado doypack 125 g,2.49,125 g,2026-06-13,https://tienda.consum.es/es/p/zanahoria-rallada-bolsa/7288645,"Equivalente desecado, no mitad congelado. Precio con IVA. Convertido a €/kg. Revisar antes de actualizar si se necesita congelado."
+ING-0288,ALCACHOFA MORADA,55.0,,PENDIENTE,,,,2026-06-13,,Duplicado/fuera de lote: alcachofa morada ya tratada en lote05 verduras.
+ING-0468,ARANDANO 125G,1.0,13.78,CONSUM,Arándano vaso 225 g,3.1,225 g,2026-06-13,https://tienda.consum.es/es/p/arandano-vaso/7374866,Precio con IVA. €/kg indicado por tienda. Merma mínima por selección.
+ING-0530,ARANDANO CONGELADO 1k,0.0,5.85,MAKRO,METRO Chef mix frutas del bosque bolsa 1 kg,5.85,1 kg,2026-06-13,https://tienda.makro.es/shop/pv/BTY-X110814/0032/0021/METRO-Chef-Mix-frutas-del-bosque-bolsa-1Kg,"Equivalente congelado genérico, no arándano puro. Precio con IVA/IGIC según ficha. Revisar si se requiere arándano 100%."
+ING-0204,BACALAO COCOCHAS,5.0,,PENDIENTE,,,,2026-06-13,,"Fuera de lote: pescado/marisco, revisar en lote04."
+ING-0261,BACALAO COCOCHAS 400 G,5.0,,PENDIENTE,,,,2026-06-13,,"Fuera de lote: pescado/marisco, revisar en lote04."
+ING-0469,CALABAZA CHATA,25.0,1.99,CONSUM,Calabaza entera,1.99,1 kg,2026-06-13,https://tienda.consum.es/es/c/frescos/verduras/2187?page=5,"Duplicado de verdura, precio con IVA. €/kg. Merma por piel y semillas."
+ING-0470,CARAMBOLA,15.0,,PENDIENTE,,,,2026-06-13,,Carambola no localizada con precio oficial claro.
+ING-0471,CASTAÑA ( SEPT-DIC),25.0,,PENDIENTE,,,,2026-06-13,,Castaña estacional; no localizado precio actual claro.
+ING-0472,CAVIAR CÍTRICO (FINGER LIME),5.0,,PENDIENTE,,,,2026-06-13,,Caviar cítrico/finger lime producto gourmet muy específico; no localizado precio claro en fuentes objetivo.
+ING-0312,CEBOLLA MORADA 1K,10.0,,PENDIENTE,,,,2026-06-13,,Duplicado/fuera de lote: cebolla morada ya tratada en lote05 verduras.
+ING-0473,CEREZAS,8.0,,PENDIENTE,,,,2026-06-13,,Cereza estacional; no localizado precio actual claro en fuentes objetivo.
+ING-0474,CHUFA SECA,0.0,,PENDIENTE,,,,2026-06-13,,Chufa seca producto específico; no localizado precio claro en Makro/Consum/Mercadona.
+ING-0560,CIRUELA PASA/SECA S/HUESO1K,0.0,,PENDIENTE,,,,2026-06-13,,Ciruela pasa/seca: reservar para lote08 pastelería/frutos secos.
+ING-0475,CIRUELA ROJA,8.0,3.99,CONSUM,Ciruela roja pieza precio aprox.,0.42,"pieza aprox.; 3,99 €/kg",2026-06-13,https://tienda.consum.es/es/p/freson-bandeja/242081,Precio con IVA. €/kg indicado en recomendados de producto. Merma por hueso.
+ING-0566,COCO EN POLVO,0.0,,PENDIENTE,,,,2026-06-13,,Coco en polvo: reservar para lote08 pastelería.
+ING-0476,COCO FRESCO,60.0,,PENDIENTE,,,,2026-06-13,,Coco fresco no actualizado: no localizado precio oficial claro comparable por kg; requiere decidir si se compra por pieza.
+ING-0567,COCO RALLADO,0.0,,PENDIENTE,,,,2026-06-13,,Coco rallado: reservar para lote08 pastelería.
+ING-0228,COCOCHA BACALAO,5.0,,PENDIENTE,,,,2026-06-13,,"Fuera de lote: pescado/marisco, revisar en lote04."
+ING-0331,COLIFLOR MORADA,30.0,,PENDIENTE,,,,2026-06-13,,Duplicado/fuera de lote: coliflor morada ya tratada en lote05 verduras.
+ING-0571,COLORANTE NARANJA PASTA 200 G,0.0,,PENDIENTE,,,,2026-06-13,,Fuera de lote: colorante de pastelería/decoración; reservar para lote08/lote12.
+ING-0576,COLORANTEAMARILLO LIMÓN PASTA 200g,0.0,,PENDIENTE,,,,2026-06-13,,Fuera de lote: colorante de pastelería/decoración; reservar para lote08/lote12.
+ING-0577,CONFITURA FRAMBUESA 3K,0.0,,PENDIENTE,,,,2026-06-13,,Confitura frambuesa 3 kg: reservar para lote08/lote09 conservas y pastelería.
+ING-0578,DÁTIL SIN HUESO,0.0,,PENDIENTE,,,,2026-06-13,,Duplicado: dátil sin hueso ya tratado en lote02.
+ING-0477,FRAMBUESA 125G,1.0,15.92,CONSUM,Frambuesa bandeja 125 g,1.99,125 g,2026-06-13,https://tienda.consum.es/es/p/frambuesa-bandeja/7472520,Precio con IVA. €/kg indicado por tienda. Merma mínima por selección.
+ING-0586,FRAMBUESA BRISURA congelada,0.0,,PENDIENTE,,,,2026-06-13,,Frambuesa brisura congelada: no localizada como producto exacto; revisar proveedor profesional.
+ING-0585,FRAMBUESA congelada,0.0,9.72,MAKRO,METRO Chef frambuesas 1 kg congelado,9.72,1 kg,2026-06-13,https://tienda.makro.es/shop/pv/BTY-X221047/0032/0021/Metro-Chef-frambuesas-1-kg-congelado,"Precio con IVA/IGIC incluido. Producto congelado limpio, merma 0%."
+ING-0587,FRESA LIOFILIZADA 50G,0.0,,PENDIENTE,,,,2026-06-13,,Fresa liofilizada 50 g: reservar para lote08 pastelería; no localizado precio claro en fuentes objetivo.
+ING-0478,FRESON FRESCO,3.0,5.0,CONSUM,Fresón bandeja 500 g aprox.,2.5,500 g,2026-06-13,https://tienda.consum.es/es/p/freson-bandeja/242081,Precio con IVA. €/kg indicado por tienda. Merma mínima por selección/pedúnculo.
+ING-0479,FRUTA DE LA PASION,5.0,12.06,MAKRO,PONTHIER puré de maracuyá 1 kg,12.06,1 kg,2026-06-13,https://tienda.makro.es/shop/pv/BTY-X100600/0032/0021/PONTHIER-pur%C3%A9-de-maracuya-1-kg,Equivalente profesional a fruta de la pasión. Precio base por kg indicado; revisar IVA si se aplica oferta.
+ING-0480,GRANADA,45.0,,PENDIENTE,,,,2026-06-13,,Granada no localizada con precio oficial claro en fuentes objetivo.
+ING-0481,GROSELLA ROJA 125G,1.0,,PENDIENTE,,,,2026-06-13,,Grosella roja 125 g no localizada con precio oficial claro.
+ING-0482,GUAYABA,20.0,,PENDIENTE,,,,2026-06-13,,Guayaba no localizada con precio oficial claro.
+ING-0483,HIGO ( SEPT-OCT),15.0,,PENDIENTE,,,,2026-06-13,,Higo fresco estacional; no localizado precio actual claro.
+ING-0602,HIGO SECO,0.0,,PENDIENTE,,,,2026-06-13,,Higo seco: reservar para lote08 pastelería/frutos secos.
+ING-0362,HOJA LIMA KAFFIR 100 GR,0.0,,PENDIENTE,,,,2026-06-13,,Hoja de lima kaffir: producto aromático fuera de fruta fresca; reservar para lote09/12.
+ING-0484,KAKI persimon,15.0,,PENDIENTE,,,,2026-06-13,,Kaki/persimon estacional; no localizado precio actual claro.
+ING-0485,KIWI VERDE 1k,10.0,,PENDIENTE,,,,2026-06-13,,Kiwi verde no actualizado: fuente localizada fue kiwi amarillo; revisar si se acepta sustitución.
+ING-0486,KUMKUAT 300G,8.0,,PENDIENTE,,,,2026-06-13,,Kumquat 300 g no localizado con precio oficial claro.
+ING-0609,LECHE DE COCO 1 LT DIEXPA,0.0,,PENDIENTE,,,,2026-06-13,,Duplicado/fuera de lote: leche de coco ya tratada en lote02.
+ING-0487,LIMA,12.0,,PENDIENTE,,,,2026-06-13,,Lima no localizada con precio oficial claro en fuentes objetivo.
+ING-0488,LIMON,10.0,3.49,CONSUM,Limón pieza precio aprox.,0.84,"pieza aprox.; 3,49 €/kg",2026-06-13,https://tienda.consum.es/es/c/frescos/frutas/2179,Precio con IVA. €/kg indicado en categoría. Merma por piel/semilla según uso.
+ING-0489,LITCHIES ( NOV-ENE),25.0,,PENDIENTE,,,,2026-06-13,,Litchi estacional no localizado con precio actual claro.
+ING-0490,MANDARINA,25.0,,PENDIENTE,,,,2026-06-13,,Mandarina no localizada en fuentes consultadas con precio claro actual.
+ING-0491,MANGO,35.0,2.89,CONSUM,Mango pieza precio aprox.,1.45,"pieza aprox.; 2,89 €/kg",2026-06-13,https://tienda.consum.es/es/c/frescos/frutas/2179,Precio con IVA. €/kg indicado en categoría. Merma por piel y hueso.
+ING-0462,MANGO A DADOS,0.0,7.54,MAKRO,La Cuerva mango en dados 1 kg,7.54,1 kg,2026-06-13,https://tienda.makro.es/shop/pv/BTY-X156899/0032/0021/La-Cuerva-mango-en-dados-1Kg,"Precio con IVA/IGIC incluido. Producto congelado limpio, merma 0%."
+ING-0492,MANZANA GOLDEN,12.0,2.2,CONSUM,Manzana Golden pieza precio aprox.,0.48,"pieza aprox.; 2,20 €/kg",2026-06-13,https://tienda.consum.es/es/c/frescos/frutas/2179,Precio con IVA. €/kg indicado en categoría. Merma por corazón/piel si se pela.
+ING-0493,MANZANA GRANNY,12.0,2.39,CONSUM,Manzana Granny Smith pieza precio aprox.,0.59,"pieza aprox.; 2,39 €/kg",2026-06-13,https://tienda.consum.es/es/c/frescos/frutas/manzana-pera-uva/2182,Precio con IVA. €/kg indicado en categoría. Merma por corazón/piel si se pela.
+ING-0494,MANZANA REINETA,12.0,,PENDIENTE,,,,2026-06-13,,Manzana reineta no localizada con precio oficial claro.
+ING-0495,MANZANA ROYAL GALA ( ROJA),12.0,2.39,CONSUM,Manzana Fuji pieza precio aprox.,0.6,"pieza aprox.; 2,39 €/kg",2026-06-13,https://tienda.consum.es/es/c/frescos/frutas/2179,Equivalente a manzana roja/Royal Gala por falta de producto exacto. Revisar antes de actualizar si se exige variedad.
+ING-0496,MARACUYA,5.0,12.06,MAKRO,PONTHIER puré de maracuyá 1 kg,12.06,1 kg,2026-06-13,https://tienda.makro.es/shop/pv/BTY-X100600/0032/0021/PONTHIER-pur%C3%A9-de-maracuya-1-kg,Equivalente profesional a maracuyá/fruta de la pasión. Precio base por kg indicado.
+ING-0497,MELOCOTON AMARILLO ( MAYO),12.0,,PENDIENTE,,,,2026-06-13,,Melocotón fresco estacional; no localizado precio actual claro.
+ING-0813,"MELOCOTON.EXT.ALMIBAR 1,4K",0.0,4.2467,MAKRO,ARO melocotón gajo en almíbar lata 1500 g neto escurrido,6.37,1500 g neto escurrido,2026-06-13,https://tienda.makro.es/shop/pv/BTY-X220459/0032/0021/aro-Melocot%C3%B3n-gajo-almibar-lata-1500-gne-%282600-g%29,Precio con IVA/IGIC incluido. Convertido a €/kg neto escurrido.
+ING-0498,"MELON GALIA 1,2k",40.0,,PENDIENTE,,,,2026-06-13,,Melón Galia no localizado con precio actual claro.
+ING-0499,MELON PIEL DE SAPO,40.0,1.65,CONSUM,Melón piel de sapo entero,4.02,"pieza aprox.; 1,65 €/kg",2026-06-13,https://tienda.consum.es/es/c/frescos/frutas/2179,Precio con IVA. €/kg indicado en categoría. Merma por piel y semillas.
+ING-0500,MEMBRILLO ( OCT-ENERO),20.0,,PENDIENTE,,,,2026-06-13,,Membrillo estacional no localizado con precio actual claro.
+ING-0632,MERMELADA ALBARICOQUE 800G makro,0.0,,PENDIENTE,,,,2026-06-13,,Mermelada albaricoque: reservar para lote08/lote09 conservas.
+ING-0628,MERMELADA DE ARANDANOS 1K makro,0.0,,PENDIENTE,,,,2026-06-13,,Mermelada de arándanos: reservar para lote08/lote09 conservas.
+ING-0629,MERMELADA DE NARANJA AMARGA 800 g makro,0.0,,PENDIENTE,,,,2026-06-13,,Mermelada de naranja amarga: reservar para lote08/lote09 conservas.
+ING-0814,MERMELADA FRAMBUESA 340g mercadona,0.0,,PENDIENTE,,,,2026-06-13,,Mermelada frambuesa Mercadona: reservar para lote08/lote09; requiere consulta específica.
+ING-0631,MERMELADA FRESA decofrut DIEXPA 3K,0.0,,PENDIENTE,,,,2026-06-13,,Mermelada fresa Decofrut: reservar para lote08/lote09 conservas.
+ING-0501,MORA 125G,1.0,19.12,CONSUM,Moras tarrina 125 g,2.39,125 g,2026-06-13,https://tienda.consum.es/es/p/moras-tarrina/7102791,Precio con IVA. €/kg indicado por tienda. Merma mínima por selección.
+ING-0633,MORAS congelada MAKRO,0.0,7.75,MAKRO,La Cuerva frutas del bosque 1 kg,7.75,1 kg,2026-06-13,https://tienda.makro.es/shop/pv/BTY-X953696/0032/0021/La-Cuerva-frutas-del-bosque-1kg,Equivalente a moras/frutos del bosque congelados. Precio con IVA/IGIC incluido. Revisar si se exige mora 100%.
+ING-0502,NARANJA mesa,20.0,,PENDIENTE,,,,2026-06-13,,Naranja de mesa no localizada con precio oficial claro en consulta actual.
+ING-0503,NARANJA SANGUINA,20.0,,PENDIENTE,,,,2026-06-13,,Naranja sanguina estacional no localizada con precio actual claro.
+ING-0504,NECTARINA ( MAYO),12.0,,PENDIENTE,,,,2026-06-13,,Nectarina estacional no localizada con precio actual claro.
+ING-0505,NISPERO ( ABRIL-MAYO),12.0,,PENDIENTE,,,,2026-06-13,,Níspero estacional no localizado con precio actual claro.
+ING-0506,PAPAYA,35.0,5.3,CONSUM,Papayón partido media pieza,4.02,"media pieza aprox.; 5,30 €/kg",2026-06-13,https://tienda.consum.es/es/p/arandano-vaso/7374866,Precio con IVA. €/kg indicado en recomendados de producto. Merma por piel y semillas.
+ING-0507,PERA BLANQUILLA,10.0,,PENDIENTE,,,,2026-06-13,,Pera blanquilla no localizada con precio oficial claro.
+ING-0508,PERA CONFERENCIA,10.0,2.75,CONSUM,Pera Conferencia pieza precio aprox.,0.66,"pieza aprox.; 2,75 €/kg",2026-06-13,https://tienda.consum.es/es/c/frescos/frutas/manzana-pera-uva/2182,Precio con IVA. €/kg indicado en categoría. Merma por corazón/piel si se pela.
+ING-0848,"PERA EN ALMIBAR 1,5k",0.0,,PENDIENTE,,,,2026-06-13,,Pera en almíbar: reservar para lote09 conservas de frutas.
+ING-0186,PEZ LIMON,5.0,,PENDIENTE,,,,2026-06-13,,Fuera de lote: pescado/marisco; reservar para revisión lote04.
+ING-0509,PHYSALIS 80G,5.0,,PENDIENTE,,,,2026-06-13,,Physalis 80 g no localizado con precio oficial claro.
+ING-0510,PIÑA,45.0,1.59,CONSUM,Piña entera pieza precio aprox.,3.38,"pieza aprox.; 1,59 €/kg",2026-06-13,https://tienda.consum.es/es/c/frescos/frutas/fruta-tropical/2184,Precio con IVA. €/kg indicado en categoría. Merma por piel/corazón.
+ING-0855,"PIÑA EN ALMIBAR 1,795K",0.0,6.1838,MAKRO,ARO piña en rodajas en almíbar ligero lata 1795 g neto escurrido,11.1,1795 g neto escurrido,2026-06-13,https://tienda.makro.es/ordercapture/uidispatcher/static/shop/pv/BTY-X217990/0032/0021/aro-pi%C3%B1a-en-rodajas-en-alm%C3%ADbar-ligero-lata-1795-gne-%283050-g%29,Precio con IVA/IGIC incluido. Convertido a €/kg neto escurrido.
+ING-0856,"PIÑA EN SU JUGO 1,795 K",0.0,5.3036,MAKRO,METRO Chef piña en rodajas en su jugo lata 1795 g neto escurrido,9.52,1795 g neto escurrido,2026-06-13,https://tienda.makro.es/shop/pv/BTY-X136873/0032/0021/METRO-Chef-pi%C3%B1a-en-rodajas-en-su-jugo-lata-1795gne-%283050-g%29,Precio con IVA/IGIC incluido. Convertido a €/kg neto escurrido.
+ING-0511,PITAHAYA ROJA pieza 300-500 g,35.0,,PENDIENTE,,,,2026-06-13,,Pitahaya roja no localizada con precio actual claro.
+ING-0512,PLATANO CANARIAS,35.0,2.9,CONSUM,Plátano Canario IGP pieza precio aprox.,0.54,"pieza aprox.; 2,90 €/kg",2026-06-13,https://tienda.consum.es/es/c/frescos/frutas/2179,Precio con IVA. €/kg indicado en categoría. Merma por piel.
+ING-0513,PLATANO MACHO,35.0,2.99,CONSUM,Plátano de freír/macho pieza precio aprox.,0.0,"pieza aprox.; 2,99 €/kg",2026-06-13,https://tienda.consum.es/es/p/aguacate-bandeja/7333623,Precio con IVA. €/kg indicado en recomendados de producto. Merma por piel.
+ING-0514,POMELO ROSA,40.0,3.29,CONSUM,Pomelo rojo pieza precio aprox.,1.17,"pieza aprox.; 3,29 €/kg",2026-06-13,https://tienda.consum.es/es/p/arandanos-seleccion/7471113,Precio con IVA. €/kg indicado en recomendados de producto. Merma por piel y membranas.
+ING-0662,PURE ALBARICOQUE 1K,0.0,,PENDIENTE,,,,2026-06-13,,Puré albaricoque 1 kg no localizado con precio oficial claro.
+ING-0663,PURE DE FRAMBUESA 1K,0.0,13.27,MAKRO,PONTHIER puré de frambuesa 1 kg,13.27,1 kg,2026-06-13,https://tienda.makro.es/shop/pv/BTY-X100595/0032/0021/PONTHIER-pur%C3%A9-de-frambruesa-1-kg,"Precio con IVA/IGIC incluido según ficha. Producto listo, merma 0%."
+ING-0664,PURE HIGOS 1K,0.0,,PENDIENTE,,,,2026-06-13,,Puré de higos 1 kg no localizado con precio oficial claro.
+ING-0665,PURE MANGO 1KG,0.0,12.06,MAKRO,PONTHIER puré de mango 1 kg,12.06,1 kg,2026-06-13,https://tienda.makro.es/shop/pv/BTY-X100598/0032/0021/PONTHIER-pur%C3%A9-de-mango-1-kg,"Precio base por kg indicado. Revisar tarifa por volumen. Producto listo, merma 0%."
+ING-0969,REFRESCO LIMON fanta 35cl 24 u,0.0,,PENDIENTE,,,,2026-06-13,,Fuera de lote: bebida/refresco; reservar para lote11 bebidas.
+ING-0971,REFRESCO LIMON FANTA LATA 33cl x 24,0.0,,PENDIENTE,,,,2026-06-13,,Fuera de lote: bebida/refresco; reservar para lote11 bebidas.
+ING-0970,REFRESCO NARANJA 35cl 24 u,0.0,,PENDIENTE,,,,2026-06-13,,Fuera de lote: bebida/refresco; reservar para lote11 bebidas.
+ING-0972,REFRESCO NARANJA LATA 33cl x 24,0.0,,PENDIENTE,,,,2026-06-13,,Fuera de lote: bebida/refresco; reservar para lote11 bebidas.
+ING-0515,SANDIA RALLADA SIN PEPITAS,40.0,,PENDIENTE,,,,2026-06-13,,Sandía rallada/sin pepitas no localizada con precio oficial claro.
+ING-0690,"SIROPE FRESA 1,2l",0.0,,PENDIENTE,,,,2026-06-13,,Sirope fresa: reservar para lote08/lote09 pastelería/salsas.
+ING-0516,TAMARINDO 150g,45.0,,PENDIENTE,,,,2026-06-13,,Tamarindo 150 g no localizado con precio oficial claro.
+ING-0434,TOMATE CHERRY PERA,8.0,,PENDIENTE,,,,2026-06-13,,Fuera de lote: tomate cherry pertenece a verduras; reservar para lote05 o revisión posterior.
+ING-0438,TOMATE PERA ROJO,8.0,,PENDIENTE,,,,2026-06-13,,Fuera de lote: tomate pera pertenece a verduras; reservar para lote05 o revisión posterior.
+ING-0517,UVA BLANCA,5.0,,PENDIENTE,,,,2026-06-13,,Uva blanca no localizada con precio oficial claro en consulta actual.
+ING-0518,UVA ROJA,5.0,,PENDIENTE,,,,2026-06-13,,Uva roja no localizada con precio oficial claro en consulta actual.
+ING-0909,VINAGRE MANZANA 750ML,0.0,,PENDIENTE,,,,2026-06-13,,Fuera de lote: vinagre de manzana; reservar para lote09 almacén seco.
