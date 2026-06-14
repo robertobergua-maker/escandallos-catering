@@ -843,16 +843,11 @@ if st.session_state['ingredientes']:
         df_display = pd.DataFrame(st.session_state['ingredientes'])
 
         # Garantizar que existan las 5 columnas estructurales
-        for col in ["codigo", "descripcion", "unidad_medida", "cantidad_bruta", "merma", "precio_unidad"]:
+        for col in ["codigo", "descripcion", "cantidad_bruta", "merma", "precio_unidad"]:
             if col not in df_display.columns:
                 df_display[col] = 0.0 if col in ["cantidad_bruta", "merma", "precio_unidad"] else "S/C"
-        df_display["unidad_medida"] = df_display["unidad_medida"].replace("S/C", "kg").fillna("kg")
-        df_display["cantidad_bruta"] = pd.to_numeric(df_display["cantidad_bruta"], errors="coerce").fillna(0.0)
-        df_display["merma"] = pd.to_numeric(df_display["merma"], errors="coerce").fillna(0.0)
-        df_display["precio_unidad"] = pd.to_numeric(df_display["precio_unidad"], errors="coerce").fillna(0.0)
-        df_display["cantidad_neta"] = df_display["cantidad_bruta"] * (1 - (df_display["merma"] / 100))
 
-        df_display = df_display[["codigo", "descripcion", "unidad_medida", "cantidad_bruta", "merma", "cantidad_neta", "precio_unidad"]]
+        df_display = df_display[["codigo", "descripcion", "cantidad_bruta", "merma", "precio_unidad"]]
 
         # Lanzamos el editor interactivo de la receta activa
         ingredientes_editados = st.data_editor(
@@ -863,22 +858,18 @@ if st.session_state['ingredientes']:
             column_config={
                 "codigo": st.column_config.TextColumn("Código", help="Código único del inventario", width="small"),
                 "descripcion": st.column_config.TextColumn("Ingrediente", help="Descripción del producto", width="large"),
-                "unidad_medida": st.column_config.SelectboxColumn("Unidad", options=["kg", "l", "ud", "sobre", "botella", "lata", "paquete", "caja", "bandeja", "hoja"], width="small"),
-                "cantidad_bruta": st.column_config.NumberColumn("Cantidad Bruta", format="%.3f", min_value=0.0),
+                "cantidad_bruta": st.column_config.NumberColumn("Cantidad Bruta (kg/l)", format="%.3f", min_value=0.0),
                 "merma": st.column_config.NumberColumn("% Merma", format="%.2f %%", min_value=0.0, max_value=100.0),
-                "cantidad_neta": st.column_config.NumberColumn("Cantidad Neta", format="%.3f", min_value=0.0),
                 "precio_unidad": st.column_config.NumberColumn("Precio Unidad (€)", format="%.2f €", min_value=0.0)
             },
-            disabled=["cantidad_neta"],
             key="editor_receta_activa"
         )
 
         # Casteo numérico robusto para que la suma de costes no falle nunca con floats
         for col in ["cantidad_bruta", "merma", "precio_unidad"]:
             ingredientes_editados[col] = pd.to_numeric(ingredientes_editados[col]).fillna(0.0)
-        ingredientes_editados["cantidad_neta"] = ingredientes_editados["cantidad_bruta"] * (1 - (ingredientes_editados["merma"] / 100))
 
-        ingredientes_lista = ingredientes_editados.drop(columns=["cantidad_neta"], errors="ignore").to_dict(orient='records')
+        ingredientes_lista = ingredientes_editados.to_dict(orient='records')
 
         # Sincronizar el estado al vuelo
         if ingredientes_lista != st.session_state['ingredientes']:
@@ -976,7 +967,6 @@ if st.session_state['ingredientes']:
                                 ingrediente_actualizado.update({
                                     "codigo": sugerencia["codigo"],
                                     "descripcion": sugerencia["descripcion"],
-                                    "unidad_medida": sugerencia["unidad_medida"],
                                     "merma": sugerencia["merma"],
                                     "precio_unidad": sugerencia["precio_unidad"]
                                 })
@@ -985,77 +975,6 @@ if st.session_state['ingredientes']:
                                 st.rerun()
                     else:
                         st.caption("Sin coincidencias claras. Puedes crearlo como nuevo con el botón superior.")
-
-        ingredientes_vinculados = [
-            (idx, ing, str(ing.get("codigo", "")).strip().upper())
-            for idx, ing in enumerate(st.session_state['ingredientes'])
-            if str(ing.get("codigo", "")).strip().upper() in inventario_dict
-        ]
-        if ingredientes_vinculados:
-            with st.expander("🧾 Fichas editables de BBDD vinculadas", expanded=False):
-                for idx, ing, codigo in ingredientes_vinculados:
-                    ficha_bd = inventario_dict[codigo]
-                    with st.form(f"ficha_inventario_{codigo}_{idx}"):
-                        st.markdown(f"**{codigo}** · {ficha_bd.get('descripcion', ing.get('descripcion', ''))}")
-                        f1, f2 = st.columns([2, 1])
-                        descripcion_ficha = f1.text_input(
-                            "Descripción BBDD",
-                            value=str(ficha_bd.get("descripcion", ing.get("descripcion", ""))),
-                            key=f"desc_ficha_{codigo}_{idx}"
-                        )
-                        familia_ficha = f2.text_input(
-                            "Familia",
-                            value=str(ficha_bd.get("familia", ing.get("familia", "VARIOS"))),
-                            key=f"familia_ficha_{codigo}_{idx}"
-                        )
-                        f3, f4, f5 = st.columns(3)
-                        unidad_ficha = f3.selectbox(
-                            "Unidad base",
-                            ["kg", "l", "ud", "sobre", "botella", "lata", "paquete", "caja", "bandeja", "hoja"],
-                            index=["kg", "l", "ud", "sobre", "botella", "lata", "paquete", "caja", "bandeja", "hoja"].index(str(ficha_bd.get("unidad_medida", "kg")).strip() or "kg") if str(ficha_bd.get("unidad_medida", "kg")).strip() in ["kg", "l", "ud", "sobre", "botella", "lata", "paquete", "caja", "bandeja", "hoja"] else 0,
-                            key=f"unidad_ficha_{codigo}_{idx}"
-                        )
-                        merma_ficha = f4.number_input(
-                            "% Merma BBDD",
-                            min_value=0.0,
-                            max_value=100.0,
-                            step=0.01,
-                            value=float(ficha_bd.get("merma", ing.get("merma", 0.0))),
-                            key=f"merma_ficha_{codigo}_{idx}"
-                        )
-                        precio_ficha = f5.number_input(
-                            "Precio Unidad (€)",
-                            min_value=0.0,
-                            step=0.01,
-                            value=float(ficha_bd.get("precio_unidad", ing.get("precio_unidad", 0.0))),
-                            key=f"precio_ficha_{codigo}_{idx}"
-                        )
-                        if st.form_submit_button("Guardar ficha y actualizar receta"):
-                            if not supabase_disponible:
-                                st.error("Supabase no está conectado correctamente.")
-                            else:
-                                datos_ficha = {
-                                    "codigo": codigo,
-                                    "familia": familia_ficha,
-                                    "descripcion": descripcion_ficha,
-                                    "unidad_medida": unidad_ficha,
-                                    "merma": float(merma_ficha),
-                                    "precio_unidad": float(precio_ficha)
-                                }
-                                try:
-                                    supabase.table("inventario").upsert(datos_ficha).execute()
-                                    st.session_state['ingredientes'][idx].update({
-                                        "descripcion": descripcion_ficha,
-                                        "unidad_medida": unidad_ficha,
-                                        "merma": float(merma_ficha),
-                                        "precio_unidad": float(precio_ficha)
-                                    })
-                                    st.session_state['db_trigger'] += 1
-                                    marcar_receta_modificada_manualmente()
-                                    st.success(f"Ficha {codigo} actualizada.")
-                                    st.rerun()
-                                except Exception as e:
-                                    st.error(f"Error al guardar la ficha en Supabase: {e}")
 
     with resumen_col:
         st.subheader(f"📊 Costes: {nombre_plato}")
