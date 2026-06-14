@@ -86,6 +86,15 @@ if 'receta_id_cargada' not in st.session_state:
 if 'codigo_receta_cargada' not in st.session_state:
     st.session_state['codigo_receta_cargada'] = ""
 
+if 'costes_indirectos_pct' not in st.session_state:
+    st.session_state['costes_indirectos_pct'] = 10.0
+
+if 'margen_beneficio_pct' not in st.session_state:
+    st.session_state['margen_beneficio_pct'] = 30.0
+
+if 'iva_pct' not in st.session_state:
+    st.session_state['iva_pct'] = 10.0
+
 # =============================================================================
 # 📥 FUNCIÓN CACHÉ PARA CARGAR INVENTARIO DESDE SUPABASE
 # =============================================================================
@@ -954,344 +963,257 @@ with st.sidebar:
     st.divider()
     st.info("💡 Consejo: Al realizar modificaciones en la pestaña del Catálogo Supabase, haz clic en el botón 'Guardar Cambios en Supabase' para persistirlos en la nube de forma permanente.")
 
-st.subheader("Cargar receta guardada")
-mensaje_receta_cargada = st.session_state.pop("mensaje_receta_cargada", None)
-if mensaje_receta_cargada:
-    st.success(mensaje_receta_cargada)
-
-if not supabase_disponible:
-    st.warning("Supabase no está disponible. No se pueden cargar recetas guardadas ahora.")
-else:
-    recetas_guardadas_df = cargar_recetas_supabase()
-    if recetas_guardadas_df.empty:
-        st.info("Todavía no hay recetas guardadas en Supabase.")
-    else:
-        recetas_guardadas_df = recetas_guardadas_df.copy()
-        recetas_guardadas_df["etiqueta_selector"] = recetas_guardadas_df.apply(
-            lambda row: f"{row.get('codigo_receta', '')} · {row.get('nombre', '')}".strip(" ·"),
-            axis=1
-        )
-        opciones_recetas = recetas_guardadas_df["id"].dropna().astype(str).tolist()
-        recetas_por_id = {
-            str(row.get("id")): row.to_dict()
-            for _, row in recetas_guardadas_df.iterrows()
-            if row.get("id")
+    ingredientes_vinculados = [
+        (idx, ing, str(ing.get("codigo", "")).strip().upper())
+        for idx, ing in enumerate(st.session_state['ingredientes'])
+        if str(ing.get("codigo", "")).strip().upper() in inventario_dict
+    ]
+    if ingredientes_vinculados:
+        st.markdown("#### 🧾 Ficha editable del ingrediente seleccionado")
+        opciones_ficha = [f"{idx}|{codigo}" for idx, _, codigo in ingredientes_vinculados]
+        etiquetas_ficha = {
+            f"{idx}|{codigo}": f"{idx + 1}. {codigo} · {inventario_dict[codigo].get('descripcion', '')}"
+            for idx, _, codigo in ingredientes_vinculados
         }
+        seleccion_ficha = st.selectbox(
+            "Ingrediente vinculado a BBDD",
+            opciones_ficha,
+            format_func=lambda opcion: etiquetas_ficha.get(opcion, opcion),
+            key="selector_ficha_ingrediente_activo"
+        )
+        idx_ficha = int(seleccion_ficha.split("|", 1)[0])
+        codigo_ficha = seleccion_ficha.split("|", 1)[1]
+        ficha_bd = inventario_dict[codigo_ficha]
 
-        if not opciones_recetas:
-            st.info("Hay recetas guardadas, pero no se pudo leer su identificador.")
-        else:
-            cargar_col1, cargar_col2 = st.columns([3, 1])
-            with cargar_col1:
-                receta_id_seleccionada = st.selectbox(
-                    "Recetas guardadas",
-                    opciones_recetas,
-                    format_func=lambda receta_id: recetas_por_id.get(str(receta_id), {}).get("etiqueta_selector", str(receta_id)),
-                    key="selector_receta_guardada"
-                )
-            with cargar_col2:
-                st.write("")
-                st.write("")
-                cargar_receta_btn = st.button("Cargar receta", use_container_width=True)
+        with st.form(f"ficha_inventario_seleccionada_{codigo_ficha}_{idx_ficha}"):
+            st.caption(f"Código: {codigo_ficha}")
+            descripcion_ficha = st.text_input("Descripción", value=str(ficha_bd.get("descripcion", "")))
+            familia_ficha = st.text_input("Familia", value=str(ficha_bd.get("familia", "SIN CLASIFICAR")))
+            unidades_validas = ["kg", "l", "ud", "sobre", "botella", "lata", "paquete", "caja", "bandeja", "hoja"]
+            unidad_actual = str(ficha_bd.get("unidad_medida", "kg")).strip() or "kg"
+            unidad_ficha = st.selectbox(
+                "Unidad base",
+                unidades_validas,
+                index=unidades_validas.index(unidad_actual) if unidad_actual in unidades_validas else 0
+            )
+            merma_ficha = st.number_input(
+                "% Merma",
+                min_value=0.0,
+                max_value=100.0,
+                step=0.01,
+                value=float(ficha_bd.get("merma", 0.0))
+            )
+            precio_ficha = st.number_input(
+                "Precio Unidad (€)",
+                min_value=0.0,
+                step=0.01,
+                value=float(ficha_bd.get("precio_unidad", 0.0))
+            )
 
-            if cargar_receta_btn:
-                cabecera, ingredientes_df = cargar_receta_detalle_supabase(receta_id_seleccionada)
-                ingredientes_cargados = preparar_ingredientes_receta_para_sesion(ingredientes_df)
-                if not cabecera:
-                    st.error("No se pudo cargar la cabecera de la receta seleccionada.")
-                elif not ingredientes_cargados:
-                    st.warning("La receta seleccionada no tiene ingredientes guardados.")
+            st.text_input("Proveedor precio", value=str(ficha_bd.get("proveedor_precio", "")), disabled=True)
+            st.text_input("Formato compra", value=str(ficha_bd.get("formato_compra", "")), disabled=True)
+            st.text_input("Fecha precio", value=str(ficha_bd.get("fecha_precio", "")), disabled=True)
+            st.text_input("Cantidad formato", value="" if pd.isna(ficha_bd.get("cantidad_formato_compra", None)) else str(ficha_bd.get("cantidad_formato_compra", "")), disabled=True)
+            st.text_input("Unidad formato", value=str(ficha_bd.get("unidad_formato_compra", "")), disabled=True)
+            st.text_input("Precio formato", value="" if pd.isna(ficha_bd.get("precio_formato_compra", None)) else str(ficha_bd.get("precio_formato_compra", "")), disabled=True)
+            st.text_input("URL precio", value=str(ficha_bd.get("url_precio", "")), disabled=True)
+            st.text_area("Observaciones precio", value=str(ficha_bd.get("observaciones_precio", "")), disabled=True, height=80)
+
+            if st.form_submit_button("Guardar cambios en BBDD"):
+                if not supabase_disponible:
+                    st.error("Supabase no está conectado correctamente.")
                 else:
-                    raciones_cargadas = numero_seguro(cabecera.get("raciones_base", 1.0), 1.0)
-                    st.session_state["ingredientes"] = ingredientes_cargados
-                    st.session_state["ingredientes_base_raciones"] = [dict(ing) for ing in ingredientes_cargados]
-                    st.session_state["factor_raciones"] = 1.0
-                    st.session_state["raciones_base"] = raciones_cargadas
-                    st.session_state["raciones_deseadas"] = raciones_cargadas
-                    st.session_state["raciones_base_aplicadas"] = raciones_cargadas
-                    st.session_state["raciones_deseadas_aplicadas"] = raciones_cargadas
-                    st.session_state["input_raciones_base"] = raciones_cargadas
-                    st.session_state["input_raciones_deseadas"] = raciones_cargadas
-                    st.session_state["sincronizar_inputs_raciones"] = True
-                    st.session_state["nombre_plato"] = str(cabecera.get("nombre", "") or "Mi Receta")
-                    st.session_state["receta_categoria"] = str(cabecera.get("categoria", "") or "")
-                    st.session_state["receta_tipo_plato"] = str(cabecera.get("tipo_plato", "") or "")
-                    st.session_state["receta_observaciones"] = str(
-                        cabecera.get("observaciones") or cabecera.get("descripcion") or ""
-                    )
-                    codigo_cargado = str(cabecera.get("codigo_receta", "") or "").strip()
-                    nombre_cargado = str(cabecera.get("nombre", "") or "receta").strip()
-                    st.session_state["receta_id_cargada"] = str(cabecera.get("id", receta_id_seleccionada))
-                    st.session_state["codigo_receta_cargada"] = codigo_cargado
-                    st.session_state["mensaje_receta_cargada"] = f"Receta cargada: {nombre_cargado} ({codigo_cargado})."
-                    st.rerun()
-
-st.divider()
-
-# Inputs generales del plato
-col1, col2, col3, col4 = st.columns(4)
-with col1:
-    nombre_plato = st.text_input("📝 Nombre del Plato", key="nombre_plato")
-with col2:
-    costes_indirectos_pct = st.number_input("⚡ Costes Indirectos (%)", min_value=0.0, value=10.0)
-with col3:
-    margen_beneficio_pct = st.number_input("💰 Margen Beneficio (%)", min_value=0.0, max_value=99.9, value=30.0)
-with col4:
-    iva_pct = st.number_input("📊 IVA Evento (%)", min_value=0.0, max_value=100.0, value=10.0, step=1.0)
-
-sincronizar_inputs_raciones()
-
-col_r1, col_r2, col_r3, col_r4 = st.columns([1, 1, 1, 1])
-with col_r1:
-    raciones_base = st.number_input(
-        "🍽️ Raciones base",
-        min_value=0.0,
-        step=1.0,
-        key="input_raciones_base"
-    )
-with col_r2:
-    raciones_deseadas = st.number_input(
-        "🎯 Raciones deseadas",
-        min_value=0.0,
-        step=1.0,
-        key="input_raciones_deseadas"
-    )
-
-st.session_state['raciones_base'] = float(raciones_base)
-st.session_state['raciones_deseadas'] = float(raciones_deseadas)
-
-factor_raciones_preview = raciones_deseadas / raciones_base if raciones_base > 0 and raciones_deseadas > 0 else 0.0
-with col_r3:
-    st.markdown(f"**Factor de ajuste:** {factor_raciones_preview:.4f}")
-    st.caption("Se aplica automáticamente a la receta activa.")
-with col_r4:
-    st.write("")
-    st.write("")
-    if st.button("Restablecer cantidades base"):
-        if st.session_state['ingredientes_base_raciones'] is not None:
-            st.session_state['ingredientes'] = [dict(ing) for ing in st.session_state['ingredientes_base_raciones']]
-            st.session_state['ingredientes_base_raciones'] = None
-            st.session_state['factor_raciones'] = 1.0
-            st.session_state['raciones_base_aplicadas'] = float(raciones_base)
-            st.session_state['raciones_deseadas_aplicadas'] = float(raciones_base)
-            st.session_state['raciones_deseadas'] = float(raciones_base)
-            st.session_state['sincronizar_inputs_raciones'] = True
-            st.success("Cantidades base restablecidas.")
-            st.rerun()
-        else:
-            st.info("No hay cantidades base guardadas para restablecer.")
-
-if raciones_base <= 0 or raciones_deseadas <= 0:
-    st.error("Las raciones base y deseadas deben ser mayores que 0.")
-elif st.session_state['ingredientes']:
-    if raciones_han_cambiado(
-        raciones_base,
-        raciones_deseadas,
-        st.session_state['raciones_base_aplicadas'],
-        st.session_state['raciones_deseadas_aplicadas']
-    ):
-        if st.session_state['ingredientes_base_raciones'] is None:
-            st.session_state['ingredientes_base_raciones'] = [dict(ing) for ing in st.session_state['ingredientes']]
-
-        factor_raciones, ingredientes_ajustados = calcular_ajuste_raciones(
-            st.session_state['ingredientes_base_raciones'],
-            raciones_base,
-            raciones_deseadas
-        )
-        st.session_state['ingredientes'] = ingredientes_ajustados
-        st.session_state['factor_raciones'] = float(factor_raciones)
-        st.session_state['raciones_base_aplicadas'] = float(raciones_base)
-        st.session_state['raciones_deseadas_aplicadas'] = float(raciones_deseadas)
-        st.rerun()
-    else:
-        st.session_state['factor_raciones'] = float(factor_raciones_preview)
-else:
-    st.session_state['factor_raciones'] = float(factor_raciones_preview)
-
-st.divider()
-
-# Definición de pestañas (Tabs) principales de la aplicación
-tab1, tab2, tab3, tab4 = st.tabs([
-    "✍️ Entrada Manual / Código", 
-    "📝 Copia y Pega Inteligente", 
-    "📸 Escáner de Imagen (IA Vision)", 
-    "🎒 Catálogo Supabase"
-])
-
-# -----------------------------------------------------------------------------
-# TAB 1: ENTRADA MANUAL E IDENTIFICACIÓN POR CÓDIGO EN SUPABASE
-# -----------------------------------------------------------------------------
-with tab1:
-    st.markdown("💡 **Tip:** Selecciona un código existente de tu base de datos y se auto-rellenarán la descripción, el precio y su merma.")
-    
-    opciones_codigo = [""] + list(inventario_dict.keys())
-    
-    with st.form("form_ingrediente", clear_on_submit=True):
-        c_m0, c_m1, c_m2, c_m3, c_m4, c_m5 = st.columns(6)
-        
-        # Desplegable predictivo de ingredientes
-        cod_select = c_m0.selectbox(
-            "Buscar por Código", 
-            opciones_codigo, 
-            format_func=lambda x: f"{x} - {inventario_dict[x]['descripcion']}" if x else "Seleccione un código..."
-        )
-        
-        desc_man = c_m1.text_input("Ingrediente (Nuevo)", placeholder="Ej: Cebolla tierna")
-        cant_man = c_m2.number_input("Cant. Bruta (kg/l)", min_value=0.0, step=0.001, format="%.3f", value=None, placeholder="0.000")
-        unidad_man = c_m3.selectbox("Unidad", ["kg", "l", "ud", "sobre", "botella", "lata", "paquete", "caja", "bandeja", "hoja"])
-        merma_man = c_m4.number_input("% Merma", min_value=0.0, max_value=100.0, step=0.01, value=None, placeholder="0.00%")
-        precio_man = c_m5.number_input("Precio Unidad (€)", min_value=0.0, step=0.01, format="%.2f", value=None, placeholder="0.00 €")
-        
-        if st.form_submit_button("Añadir al Escandallo"):
-            # Si el usuario seleccionó un código del desplegable
-            if cod_select:
-                info_bd = inventario_dict[cod_select]
-                st.session_state['ingredientes'].append({
-                    'codigo': cod_select,
-                    'descripcion': info_bd['descripcion'],
-                    'unidad_medida': info_bd.get('unidad_medida', 'kg'),
-                    'cantidad_bruta': cant_man if cant_man is not None else 0.0,
-                    'merma': info_bd['merma'],
-                    'precio_unidad': info_bd['precio_unidad']
-                })
-                st.success(f"Ingrediente de Supabase añadido: {info_bd['descripcion']}")
-            else:
-                # Si es un ingrediente sin código en el inventario
-                st.session_state['ingredientes'].append({
-                    'codigo': "S/C",
-                    'descripcion': desc_man if desc_man else "Ingrediente nuevo",
-                    'unidad_medida': unidad_man,
-                    'cantidad_bruta': cant_man if cant_man is not None else 0.0,
-                    'merma': merma_man if merma_man is not None else 0.0,
-                    'precio_unidad': precio_man if precio_man is not None else 0.0
-                })
-            marcar_receta_modificada_manualmente()
-            st.rerun()
-
-# -----------------------------------------------------------------------------
-# TAB 2: COPIA Y PEGA INTELIGENTE CON GPT-4o
-# -----------------------------------------------------------------------------
-with tab2:
-    st.markdown("📋 **Pega cualquier bloque de texto:** Textos de correo de proveedores, chats de WhatsApp o filas de PDF.")
-    texto_pegado = st.text_area("Pega tu texto aquí para analizar con IA:", height=150, placeholder="3 kg de pollo asado ING-0027...")
-    
-    if st.button("Analizar texto con IA", type="primary"):
-        if texto_pegado:
-            with st.spinner("La IA está leyendo y cruzando los datos con tu Supabase..."):
-                nuevos = procesar_con_openai(texto_plano=texto_pegado)
-                if incorporar_ingredientes_ia(nuevos):
-                    st.rerun()
-
-# -----------------------------------------------------------------------------
-# TAB 3: ESCÁNER DE IMAGEN IA VISION (SOPORTE CTRL+V / DRAG & DROP)
-# -----------------------------------------------------------------------------
-with tab3:
-    st.markdown("📸 **Arrastra o pega tu imagen:** Haz una captura de pantalla de tu factura u hoja física de albarán, y pulsa **Ctrl+V** directamente sobre este panel para subirla.")
-    archivo_imagen = st.file_uploader("Sube, arrastra o pega (Ctrl+V) una foto de tu receta o factura (JPG/PNG)", type=['jpg', 'jpeg', 'png'])
-    
-    if archivo_imagen:
-        if st.button("Escanear imagen con IA Vision", type="primary"):
-            bytes_img = archivo_imagen.read()
-            with st.spinner("Leyendo factura y asociando códigos de Supabase..."):
-                nuevos = procesar_con_openai(bytes_imagen=bytes_img, mime_type=archivo_imagen.type)
-                if incorporar_ingredientes_ia(nuevos):
-                    st.rerun()
-
-# -----------------------------------------------------------------------------
-# TAB 4:🎒 GESTIÓN DEL CATÁLOGO DIRECTAMENTE EN SUPABASE (CRUD COMPLETO)
-# -----------------------------------------------------------------------------
-with tab4:
-    st.subheader("🎒 Catálogo Relacional de Ingredientes en Supabase")
-    st.markdown("Busca, añade, modifica o elimina productos de tu base de datos en la nube. **Los cambios realizados aquí se sincronizarán directamente en Postgres.**")
-    
-    if not inventario_df.empty:
-        # Buscador ágil en la base de datos para no colapsar el rendimiento de la web
-        busqueda = st.text_input("🔍 Buscar ingrediente por Código, Descripción o Familia:")
-        df_filtrado = inventario_df.copy()
-        
-        if busqueda:
-            df_filtrado = df_filtrado[
-                df_filtrado["codigo"].str.contains(busqueda, case=False, na=False) |
-                df_filtrado["descripcion"].str.contains(busqueda, case=False, na=False) |
-                df_filtrado["familia"].str.contains(busqueda, case=False, na=False)
-            ]
-        
-        # Grid editable conectado al catálogo
-        catalogo_editado = st.data_editor(
-            df_filtrado,
-            num_rows="dynamic",
-            use_container_width=True,
-            column_config={
-                "codigo": st.column_config.TextColumn("Código", help="ID único de Supabase", required=True),
-                "familia": st.column_config.TextColumn("Familia / Categoría", help="Ej: CARNES, PESCADOS..."),
-                "descripcion": st.column_config.TextColumn("Descripción / Ingrediente", required=True),
-                "unidad_medida": st.column_config.TextColumn("Unidad Base", help="kg, l, ud, sobre..."),
-                "merma": st.column_config.NumberColumn("% Merma Estándar", format="%.2f %%", min_value=0.0, max_value=100.0),
-                "precio_unidad": st.column_config.NumberColumn("Precio Proveedor (€)", format="%.2f €", min_value=0.0)
-            },
-            key="db_editor_component"
-        )
-        
-        # Guardar cambios aplicados en el editor interactivo directo a Supabase
-        if st.button("💾 Guardar Cambios en Supabase", type="primary"):
-            editor_state = st.session_state.get("db_editor_component")
-            if editor_state and supabase_disponible:
-                with st.spinner("Sincronizando catálogo con Supabase..."):
+                    datos_ficha = {
+                        "codigo": codigo_ficha,
+                        "familia": familia_ficha,
+                        "descripcion": descripcion_ficha,
+                        "unidad_medida": unidad_ficha,
+                        "merma": float(merma_ficha),
+                        "precio_unidad": float(precio_ficha)
+                    }
                     try:
-                        # 1. Procesar modificaciones de filas existentes
-                        for row_idx_str, edits in editor_state.get("edited_rows", {}).items():
-                            row_idx = int(row_idx_str)
-                            fila_original = df_filtrado.iloc[row_idx]
-                            original_code = fila_original["codigo"]
-                            
-                            datos_actualizados = {
-                                "codigo": original_code,
-                                "familia": edits.get("familia", fila_original.get("familia", "VARIOS")),
-                                "descripcion": edits.get("descripcion", fila_original.get("descripcion", "")),
-                                "unidad_medida": edits.get("unidad_medida", fila_original.get("unidad_medida", "kg")),
-                                "merma": float(edits.get("merma", fila_original.get("merma", 0.0))),
-                                "precio_unidad": float(edits.get("precio_unidad", fila_original.get("precio_unidad", 0.0)))
-                            }
-                            supabase.table("inventario").upsert(datos_actualizados).execute()
-
-                        # 2. Procesar inserciones de ingredientes nuevos
-                        for nueva_fila in editor_state.get("added_rows", []):
-                            if "codigo" in nueva_fila and nueva_fila["codigo"]:
-                                datos_nuevos = {
-                                    "codigo": str(nueva_fila["codigo"]).strip().upper(),
-                                    "familia": nueva_fila.get("familia", "VARIOS"),
-                                    "descripcion": nueva_fila.get("descripcion", "Ingrediente Nuevo"),
-                                    "unidad_medida": nueva_fila.get("unidad_medida", "kg"),
-                                    "merma": float(nueva_fila.get("merma", 0.0)),
-                                    "precio_unidad": float(nueva_fila.get("precio_unidad", 0.0))
-                                }
-                                supabase.table("inventario").upsert(datos_nuevos).execute()
-
-                        # 3. Procesar eliminaciones de ingredientes
-                        for row_idx in editor_state.get("deleted_rows", []):
-                            fila_original = df_filtrado.iloc[row_idx]
-                            original_code = fila_original["codigo"]
-                            supabase.table("inventario").delete().eq("codigo", original_code).execute()
-
-                        st.success("¡Base de datos de Supabase actualizada con éxito! 🚀")
-                        st.session_state['db_trigger'] += 1  # Forzar actualización de caché
+                        supabase.table("inventario").upsert(datos_ficha).execute()
+                        st.session_state['ingredientes'][idx_ficha].update({
+                            "descripcion": descripcion_ficha,
+                            "unidad_medida": unidad_ficha,
+                            "merma": float(merma_ficha),
+                            "precio_unidad": float(precio_ficha)
+                        })
+                        st.session_state['db_trigger'] += 1
+                        marcar_receta_modificada_manualmente()
+                        st.success(f"Ficha {codigo_ficha} actualizada.")
                         st.rerun()
                     except Exception as e:
-                        st.error(f"Error al sincronizar datos con Supabase: {e}")
-            elif not supabase_disponible:
-                st.error("❌ Supabase no está conectado correctamente.")
-    else:
-        st.info("💡 Tu tabla 'inventario' en Supabase está vacía o cargando datos...")
+                        st.error(f"Error al guardar la ficha en Supabase: {e}")
+
+
 
 st.divider()
 
-# =============================================================================
-# 🛒 LISTA DE INGREDIENTES ACTIVA EN EL ESCANDALLO (EDITABLE AL VUELO)
-# =============================================================================
-if st.session_state['ingredientes']:
-    lista_col, resumen_col = st.columns([2.35, 1], gap="large")
+main_tab_receta, main_tab_guardadas, main_tab_costes, main_tab_base = st.tabs([
+    "Receta activa",
+    "Recetas guardadas",
+    "Costes y exportacion",
+    "Base de ingredientes"
+])
 
-    with lista_col:
+with main_tab_receta:
+    st.subheader("Receta activa")
+    # Inputs generales del plato
+    nombre_plato = st.text_input("Nombre del Plato", key="nombre_plato")
+    st.caption("Ajusta raciones y alimenta la receta desde entrada manual, texto o imagen.")
+
+    sincronizar_inputs_raciones()
+
+    col_r1, col_r2, col_r3, col_r4 = st.columns([1, 1, 1, 1])
+    with col_r1:
+        raciones_base = st.number_input(
+            "🍽️ Raciones base",
+            min_value=0.0,
+            step=1.0,
+            key="input_raciones_base"
+        )
+    with col_r2:
+        raciones_deseadas = st.number_input(
+            "🎯 Raciones deseadas",
+            min_value=0.0,
+            step=1.0,
+            key="input_raciones_deseadas"
+        )
+
+    st.session_state['raciones_base'] = float(raciones_base)
+    st.session_state['raciones_deseadas'] = float(raciones_deseadas)
+
+    factor_raciones_preview = raciones_deseadas / raciones_base if raciones_base > 0 and raciones_deseadas > 0 else 0.0
+    with col_r3:
+        st.markdown(f"**Factor de ajuste:** {factor_raciones_preview:.4f}")
+        st.caption("Se aplica automáticamente a la receta activa.")
+    with col_r4:
+        st.write("")
+        st.write("")
+        if st.button("Restablecer cantidades base"):
+            if st.session_state['ingredientes_base_raciones'] is not None:
+                st.session_state['ingredientes'] = [dict(ing) for ing in st.session_state['ingredientes_base_raciones']]
+                st.session_state['ingredientes_base_raciones'] = None
+                st.session_state['factor_raciones'] = 1.0
+                st.session_state['raciones_base_aplicadas'] = float(raciones_base)
+                st.session_state['raciones_deseadas_aplicadas'] = float(raciones_base)
+                st.session_state['raciones_deseadas'] = float(raciones_base)
+                st.session_state['sincronizar_inputs_raciones'] = True
+                st.success("Cantidades base restablecidas.")
+                st.rerun()
+            else:
+                st.info("No hay cantidades base guardadas para restablecer.")
+
+    if raciones_base <= 0 or raciones_deseadas <= 0:
+        st.error("Las raciones base y deseadas deben ser mayores que 0.")
+    elif st.session_state['ingredientes']:
+        if raciones_han_cambiado(
+            raciones_base,
+            raciones_deseadas,
+            st.session_state['raciones_base_aplicadas'],
+            st.session_state['raciones_deseadas_aplicadas']
+        ):
+            if st.session_state['ingredientes_base_raciones'] is None:
+                st.session_state['ingredientes_base_raciones'] = [dict(ing) for ing in st.session_state['ingredientes']]
+
+            factor_raciones, ingredientes_ajustados = calcular_ajuste_raciones(
+                st.session_state['ingredientes_base_raciones'],
+                raciones_base,
+                raciones_deseadas
+            )
+            st.session_state['ingredientes'] = ingredientes_ajustados
+            st.session_state['factor_raciones'] = float(factor_raciones)
+            st.session_state['raciones_base_aplicadas'] = float(raciones_base)
+            st.session_state['raciones_deseadas_aplicadas'] = float(raciones_deseadas)
+            st.rerun()
+        else:
+            st.session_state['factor_raciones'] = float(factor_raciones_preview)
+    else:
+        st.session_state['factor_raciones'] = float(factor_raciones_preview)
+
+
+    st.divider()
+    st.subheader("Anadir ingredientes")
+    entrada_manual_tab, texto_tab, imagen_tab = st.tabs(["Entrada manual", "Texto con IA", "Imagen con IA"])
+
+    with entrada_manual_tab:
+        st.markdown("💡 **Tip:** Selecciona un código existente de tu base de datos y se auto-rellenarán la descripción, el precio y su merma.")
+
+        opciones_codigo = [""] + list(inventario_dict.keys())
+
+        with st.form("form_ingrediente", clear_on_submit=True):
+            manual_col1, manual_col2 = st.columns(2)
+
+            with manual_col1:
+                cod_select = st.selectbox(
+                    "Buscar por Código",
+                    opciones_codigo,
+                    format_func=lambda x: f"{x} - {inventario_dict[x]['descripcion']}" if x else "Seleccione un código..."
+                )
+                desc_man = st.text_input("Ingrediente (Nuevo)", placeholder="Ej: Cebolla tierna")
+                unidad_man = st.selectbox("Unidad", ["kg", "l", "ud", "sobre", "botella", "lata", "paquete", "caja", "bandeja", "hoja"])
+
+            with manual_col2:
+                cant_man = st.number_input("Cant. Bruta (kg/l)", min_value=0.0, step=0.001, format="%.3f", value=None, placeholder="0.000")
+                merma_man = st.number_input("% Merma", min_value=0.0, max_value=100.0, step=0.01, value=None, placeholder="0.00%")
+                precio_man = st.number_input("Precio Unidad (€)", min_value=0.0, step=0.01, format="%.2f", value=None, placeholder="0.00 €")
+
+            if st.form_submit_button("Añadir al Escandallo"):
+                # Si el usuario seleccionó un código del desplegable
+                if cod_select:
+                    info_bd = inventario_dict[cod_select]
+                    st.session_state['ingredientes'].append({
+                        'codigo': cod_select,
+                        'descripcion': info_bd['descripcion'],
+                        'unidad_medida': info_bd.get('unidad_medida', 'kg'),
+                        'cantidad_bruta': cant_man if cant_man is not None else 0.0,
+                        'merma': info_bd['merma'],
+                        'precio_unidad': info_bd['precio_unidad']
+                    })
+                    st.success(f"Ingrediente de Supabase añadido: {info_bd['descripcion']}")
+                else:
+                    # Si es un ingrediente sin código en el inventario
+                    st.session_state['ingredientes'].append({
+                        'codigo': "S/C",
+                        'descripcion': desc_man if desc_man else "Ingrediente nuevo",
+                        'unidad_medida': unidad_man,
+                        'cantidad_bruta': cant_man if cant_man is not None else 0.0,
+                        'merma': merma_man if merma_man is not None else 0.0,
+                        'precio_unidad': precio_man if precio_man is not None else 0.0
+                    })
+                marcar_receta_modificada_manualmente()
+                st.rerun()
+
+
+    with texto_tab:
+        st.markdown("📋 **Pega cualquier bloque de texto:** Textos de correo de proveedores, chats de WhatsApp o filas de PDF.")
+        texto_pegado = st.text_area("Pega tu texto aquí para analizar con IA:", height=150, placeholder="3 kg de pollo asado ING-0027...")
+
+        if st.button("Analizar texto con IA", type="primary"):
+            if texto_pegado:
+                with st.spinner("La IA está leyendo y cruzando los datos con tu Supabase..."):
+                    nuevos = procesar_con_openai(texto_plano=texto_pegado)
+                    if incorporar_ingredientes_ia(nuevos):
+                        st.rerun()
+
+
+    with imagen_tab:
+        st.markdown("📸 **Arrastra o pega tu imagen:** Haz una captura de pantalla de tu factura u hoja física de albarán, y pulsa **Ctrl+V** directamente sobre este panel para subirla.")
+        archivo_imagen = st.file_uploader("Sube, arrastra o pega (Ctrl+V) una foto de tu receta o factura (JPG/PNG)", type=['jpg', 'jpeg', 'png'])
+
+        if archivo_imagen:
+            if st.button("Escanear imagen con IA Vision", type="primary"):
+                bytes_img = archivo_imagen.read()
+                with st.spinner("Leyendo factura y asociando códigos de Supabase..."):
+                    nuevos = procesar_con_openai(bytes_imagen=bytes_img, mime_type=archivo_imagen.type)
+                    if incorporar_ingredientes_ia(nuevos):
+                        st.rerun()
+
+
+    st.divider()
+    st.subheader("Ingredientes de la receta activa")
+    if st.session_state['ingredientes']:
         st.subheader("🛒 Lista de Ingredientes de la Receta Activa")
 
         # Preparamos DataFrame de representación visual
@@ -1447,94 +1369,21 @@ if st.session_state['ingredientes']:
                     else:
                         st.caption("Sin coincidencias claras. Puedes crearlo como nuevo con el botón superior.")
 
-        ingredientes_vinculados = [
-            (idx, ing, str(ing.get("codigo", "")).strip().upper())
-            for idx, ing in enumerate(st.session_state['ingredientes'])
-            if str(ing.get("codigo", "")).strip().upper() in inventario_dict
-        ]
-        if ingredientes_vinculados:
-            st.markdown("#### 🧾 Ficha editable del ingrediente seleccionado")
-            opciones_ficha = [f"{idx}|{codigo}" for idx, _, codigo in ingredientes_vinculados]
-            etiquetas_ficha = {
-                f"{idx}|{codigo}": f"{idx + 1}. {codigo} · {inventario_dict[codigo].get('descripcion', '')}"
-                for idx, _, codigo in ingredientes_vinculados
-            }
-            seleccion_ficha = st.selectbox(
-                "Ingrediente vinculado a BBDD",
-                opciones_ficha,
-                format_func=lambda opcion: etiquetas_ficha.get(opcion, opcion),
-                key="selector_ficha_ingrediente_activo"
-            )
-            idx_ficha = int(seleccion_ficha.split("|", 1)[0])
-            codigo_ficha = seleccion_ficha.split("|", 1)[1]
-            ficha_bd = inventario_dict[codigo_ficha]
 
-            with st.form(f"ficha_inventario_seleccionada_{codigo_ficha}_{idx_ficha}"):
-                st.caption(f"Código: {codigo_ficha}")
-                f1, f2 = st.columns([2, 1])
-                descripcion_ficha = f1.text_input("Descripción", value=str(ficha_bd.get("descripcion", "")))
-                familia_ficha = f2.text_input("Familia", value=str(ficha_bd.get("familia", "SIN CLASIFICAR")))
-                unidades_validas = ["kg", "l", "ud", "sobre", "botella", "lata", "paquete", "caja", "bandeja", "hoja"]
-                unidad_actual = str(ficha_bd.get("unidad_medida", "kg")).strip() or "kg"
-                f3, f4, f5 = st.columns(3)
-                unidad_ficha = f3.selectbox(
-                    "Unidad base",
-                    unidades_validas,
-                    index=unidades_validas.index(unidad_actual) if unidad_actual in unidades_validas else 0
-                )
-                merma_ficha = f4.number_input(
-                    "% Merma",
-                    min_value=0.0,
-                    max_value=100.0,
-                    step=0.01,
-                    value=float(ficha_bd.get("merma", 0.0))
-                )
-                precio_ficha = f5.number_input(
-                    "Precio Unidad (€)",
-                    min_value=0.0,
-                    step=0.01,
-                    value=float(ficha_bd.get("precio_unidad", 0.0))
-                )
+    else:
+        st.info("Empieza agregando ingredientes usando entrada manual, texto o imagen.")
 
-                t1, t2, t3 = st.columns(3)
-                t1.text_input("Proveedor precio", value=str(ficha_bd.get("proveedor_precio", "")), disabled=True)
-                t2.text_input("Formato compra", value=str(ficha_bd.get("formato_compra", "")), disabled=True)
-                t3.text_input("Fecha precio", value=str(ficha_bd.get("fecha_precio", "")), disabled=True)
-                t4, t5, t6 = st.columns(3)
-                t4.text_input("Cantidad formato", value="" if pd.isna(ficha_bd.get("cantidad_formato_compra", None)) else str(ficha_bd.get("cantidad_formato_compra", "")), disabled=True)
-                t5.text_input("Unidad formato", value=str(ficha_bd.get("unidad_formato_compra", "")), disabled=True)
-                t6.text_input("Precio formato", value="" if pd.isna(ficha_bd.get("precio_formato_compra", None)) else str(ficha_bd.get("precio_formato_compra", "")), disabled=True)
-                st.text_input("URL precio", value=str(ficha_bd.get("url_precio", "")), disabled=True)
-                st.text_area("Observaciones precio", value=str(ficha_bd.get("observaciones_precio", "")), disabled=True, height=80)
+with main_tab_costes:
+    st.subheader("Costes y exportacion")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        costes_indirectos_pct = st.number_input("Costes Indirectos (%)", min_value=0.0, key="costes_indirectos_pct")
+    with c2:
+        margen_beneficio_pct = st.number_input("Margen Beneficio (%)", min_value=0.0, max_value=99.9, key="margen_beneficio_pct")
+    with c3:
+        iva_pct = st.number_input("IVA Evento (%)", min_value=0.0, max_value=100.0, step=1.0, key="iva_pct")
 
-                if st.form_submit_button("Guardar cambios en BBDD"):
-                    if not supabase_disponible:
-                        st.error("Supabase no está conectado correctamente.")
-                    else:
-                        datos_ficha = {
-                            "codigo": codigo_ficha,
-                            "familia": familia_ficha,
-                            "descripcion": descripcion_ficha,
-                            "unidad_medida": unidad_ficha,
-                            "merma": float(merma_ficha),
-                            "precio_unidad": float(precio_ficha)
-                        }
-                        try:
-                            supabase.table("inventario").upsert(datos_ficha).execute()
-                            st.session_state['ingredientes'][idx_ficha].update({
-                                "descripcion": descripcion_ficha,
-                                "unidad_medida": unidad_ficha,
-                                "merma": float(merma_ficha),
-                                "precio_unidad": float(precio_ficha)
-                            })
-                            st.session_state['db_trigger'] += 1
-                            marcar_receta_modificada_manualmente()
-                            st.success(f"Ficha {codigo_ficha} actualizada.")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Error al guardar la ficha en Supabase: {e}")
-
-    with resumen_col:
+    if st.session_state['ingredientes']:
         st.subheader(f"📊 Costes: {nombre_plato}")
         subtotal_ing = sum(float(ing.get('cantidad_bruta', 0.0)) * float(ing.get('precio_unidad', 0.0)) for ing in st.session_state['ingredientes'])
 
@@ -1561,106 +1410,6 @@ if st.session_state['ingredientes']:
         r4.metric("PVP Total", f"{pvp_final:.2f} €")
         st.metric("PVP por ración", f"{pvp_por_racion:.2f} €")
 
-        st.divider()
-        st.subheader("Guardar receta")
-        if not supabase_disponible:
-            st.warning("Supabase no está disponible. No se puede guardar la receta ahora.")
-        if st.session_state.get("receta_id_cargada"):
-            st.caption(f"Receta cargada para actualizar: {st.session_state.get('codigo_receta_cargada', 'sin código')}")
-
-        with st.form("form_guardar_receta_nueva"):
-            nombre_receta_guardar = st.text_input("Nombre de receta", value=nombre_plato)
-            categoria_receta = st.text_input("Categoría", key="receta_categoria")
-            tipo_plato_receta = st.text_input("Tipo de plato", key="receta_tipo_plato")
-            raciones_base_receta = st.number_input(
-                "Raciones base",
-                min_value=0.0,
-                step=1.0,
-                value=float(st.session_state.get('raciones_base', 1.0))
-            )
-            observaciones_receta = st.text_area("Descripción / observaciones", key="receta_observaciones", height=90)
-
-            guardar_col, actualizar_col, duplicar_col = st.columns(3)
-            with guardar_col:
-                guardar_nueva = st.form_submit_button("Guardar como nueva receta", type="primary", use_container_width=True)
-            with actualizar_col:
-                actualizar_existente = st.form_submit_button("Actualizar receta seleccionada", use_container_width=True)
-            with duplicar_col:
-                duplicar_existente = st.form_submit_button("Duplicar receta seleccionada", use_container_width=True)
-
-            if guardar_nueva or actualizar_existente or duplicar_existente:
-                nombre_limpio = nombre_receta_guardar.strip()
-                receta_id_cargada = st.session_state.get("receta_id_cargada")
-                codigo_receta_cargada = st.session_state.get("codigo_receta_cargada", "")
-                if not supabase_disponible or supabase is None:
-                    st.error("Supabase no está conectado correctamente.")
-                elif not nombre_limpio:
-                    st.error("Indica un nombre de receta antes de guardar.")
-                elif not st.session_state.get("ingredientes"):
-                    st.error("Añade al menos un ingrediente antes de guardar la receta.")
-                elif actualizar_existente and not receta_id_cargada:
-                    st.warning("Carga una receta guardada antes de actualizarla.")
-                elif duplicar_existente and not receta_id_cargada:
-                    st.warning("Carga una receta guardada antes de duplicarla.")
-                else:
-                    codigo_receta = codigo_receta_cargada if actualizar_existente else generar_codigo_receta()
-                    datos_receta = {
-                        "user_id": None,
-                        "codigo_receta": codigo_receta,
-                        "nombre": nombre_limpio,
-                        "categoria": categoria_receta.strip(),
-                        "tipo_plato": tipo_plato_receta.strip(),
-                        "raciones_base": float(raciones_base_receta),
-                        "unidad_servicio": "racion",
-                        "descripcion": observaciones_receta.strip(),
-                        "observaciones": observaciones_receta.strip(),
-                        "costes_indirectos_pct": float(ci_val),
-                        "margen_beneficio_pct": float(mb_val),
-                        "iva_pct": float(iva_val),
-                        "coste_total": float(coste_total),
-                        "precio_venta_sin_iva": float(pvp_neto),
-                        "precio_venta_con_iva": float(pvp_final),
-                        "activa": True
-                    }
-                    if actualizar_existente:
-                        ok, mensaje = actualizar_receta_supabase(
-                            receta_id_cargada,
-                            datos_receta,
-                            st.session_state["ingredientes"]
-                        )
-                        if ok:
-                            st.session_state["codigo_receta_cargada"] = codigo_receta
-                            st.success(f"Receta actualizada correctamente con código {codigo_receta}.")
-                        else:
-                            st.error(mensaje)
-                    elif duplicar_existente:
-                        ok, mensaje, receta_guardada = duplicar_receta_supabase(
-                            datos_receta,
-                            st.session_state["ingredientes"]
-                        )
-                        if ok:
-                            nuevo_codigo = receta_guardada.get("codigo_receta", "")
-                            nuevo_nombre = receta_guardada.get("nombre", nombre_limpio)
-                            st.session_state["receta_id_cargada"] = receta_guardada.get("id")
-                            st.session_state["codigo_receta_cargada"] = nuevo_codigo
-                            st.session_state["nombre_plato"] = nuevo_nombre
-                            st.session_state["mensaje_receta_cargada"] = f"Receta duplicada correctamente con código {nuevo_codigo}."
-                            st.rerun()
-                        else:
-                            st.error(mensaje)
-                    else:
-                        ok, mensaje, receta_guardada = guardar_receta_nueva_supabase(
-                            datos_receta,
-                            st.session_state["ingredientes"]
-                        )
-                        if ok:
-                            codigo_mostrado = receta_guardada.get("codigo_receta", codigo_receta)
-                            st.session_state["receta_id_cargada"] = receta_guardada.get("id")
-                            st.session_state["codigo_receta_cargada"] = codigo_mostrado
-                            st.success(f"Receta guardada correctamente con código {codigo_mostrado}.")
-                        else:
-                            st.error(mensaje)
-
         excel_virtual = generar_excel(
             nombre_plato,
             st.session_state['ingredientes'],
@@ -1679,5 +1428,281 @@ if st.session_state['ingredientes']:
             type="primary",
             use_container_width=True
         )
-else:
-    st.info("💡 Empieza agregando ingredientes usando cualquiera de las pestañas de entrada superiores.")
+    else:
+        st.info("Anade ingredientes para ver costes y exportar la ficha.")
+
+with main_tab_guardadas:
+    st.subheader("Cargar receta guardada")
+    mensaje_receta_cargada = st.session_state.pop("mensaje_receta_cargada", None)
+    if mensaje_receta_cargada:
+        st.success(mensaje_receta_cargada)
+
+    if not supabase_disponible:
+        st.warning("Supabase no está disponible. No se pueden cargar recetas guardadas ahora.")
+    else:
+        recetas_guardadas_df = cargar_recetas_supabase()
+        if recetas_guardadas_df.empty:
+            st.info("Todavía no hay recetas guardadas en Supabase.")
+        else:
+            recetas_guardadas_df = recetas_guardadas_df.copy()
+            recetas_guardadas_df["etiqueta_selector"] = recetas_guardadas_df.apply(
+                lambda row: f"{row.get('codigo_receta', '')} · {row.get('nombre', '')}".strip(" ·"),
+                axis=1
+            )
+            opciones_recetas = recetas_guardadas_df["id"].dropna().astype(str).tolist()
+            recetas_por_id = {
+                str(row.get("id")): row.to_dict()
+                for _, row in recetas_guardadas_df.iterrows()
+                if row.get("id")
+            }
+
+            if not opciones_recetas:
+                st.info("Hay recetas guardadas, pero no se pudo leer su identificador.")
+            else:
+                cargar_col1, cargar_col2 = st.columns([3, 1])
+                with cargar_col1:
+                    receta_id_seleccionada = st.selectbox(
+                        "Recetas guardadas",
+                        opciones_recetas,
+                        format_func=lambda receta_id: recetas_por_id.get(str(receta_id), {}).get("etiqueta_selector", str(receta_id)),
+                        key="selector_receta_guardada"
+                    )
+                with cargar_col2:
+                    st.write("")
+                    st.write("")
+                    cargar_receta_btn = st.button("Cargar receta", use_container_width=True)
+
+                if cargar_receta_btn:
+                    cabecera, ingredientes_df = cargar_receta_detalle_supabase(receta_id_seleccionada)
+                    ingredientes_cargados = preparar_ingredientes_receta_para_sesion(ingredientes_df)
+                    if not cabecera:
+                        st.error("No se pudo cargar la cabecera de la receta seleccionada.")
+                    elif not ingredientes_cargados:
+                        st.warning("La receta seleccionada no tiene ingredientes guardados.")
+                    else:
+                        raciones_cargadas = numero_seguro(cabecera.get("raciones_base", 1.0), 1.0)
+                        st.session_state["ingredientes"] = ingredientes_cargados
+                        st.session_state["ingredientes_base_raciones"] = [dict(ing) for ing in ingredientes_cargados]
+                        st.session_state["factor_raciones"] = 1.0
+                        st.session_state["raciones_base"] = raciones_cargadas
+                        st.session_state["raciones_deseadas"] = raciones_cargadas
+                        st.session_state["raciones_base_aplicadas"] = raciones_cargadas
+                        st.session_state["raciones_deseadas_aplicadas"] = raciones_cargadas
+                        st.session_state["input_raciones_base"] = raciones_cargadas
+                        st.session_state["input_raciones_deseadas"] = raciones_cargadas
+                        st.session_state["sincronizar_inputs_raciones"] = True
+                        st.session_state["nombre_plato"] = str(cabecera.get("nombre", "") or "Mi Receta")
+                        st.session_state["receta_categoria"] = str(cabecera.get("categoria", "") or "")
+                        st.session_state["receta_tipo_plato"] = str(cabecera.get("tipo_plato", "") or "")
+                        st.session_state["receta_observaciones"] = str(
+                            cabecera.get("observaciones") or cabecera.get("descripcion") or ""
+                        )
+                        codigo_cargado = str(cabecera.get("codigo_receta", "") or "").strip()
+                        nombre_cargado = str(cabecera.get("nombre", "") or "receta").strip()
+                        st.session_state["receta_id_cargada"] = str(cabecera.get("id", receta_id_seleccionada))
+                        st.session_state["codigo_receta_cargada"] = codigo_cargado
+                        st.session_state["mensaje_receta_cargada"] = f"Receta cargada: {nombre_cargado} ({codigo_cargado})."
+                        st.rerun()
+
+
+    if st.session_state['ingredientes']:
+        subtotal_ing_guardado = sum(float(ing.get('cantidad_bruta', 0.0)) * float(ing.get('precio_unidad', 0.0)) for ing in st.session_state['ingredientes'])
+        ci_val = float(st.session_state.get('costes_indirectos_pct', 0.0))
+        mb_val = float(st.session_state.get('margen_beneficio_pct', 0.0))
+        iva_val = float(st.session_state.get('iva_pct', 0.0))
+        costes_ind_guardado = subtotal_ing_guardado * (ci_val / 100)
+        coste_total = subtotal_ing_guardado + costes_ind_guardado
+        factor_margen_guardado = (1 - (mb_val / 100))
+        pvp_neto = coste_total / factor_margen_guardado if factor_margen_guardado > 0 else 0.0
+        pvp_final = pvp_neto + (pvp_neto * (iva_val / 100))
+    else:
+        ci_val = float(st.session_state.get('costes_indirectos_pct', 0.0))
+        mb_val = float(st.session_state.get('margen_beneficio_pct', 0.0))
+        iva_val = float(st.session_state.get('iva_pct', 0.0))
+        coste_total = 0.0
+        pvp_neto = 0.0
+        pvp_final = 0.0
+    st.divider()
+    st.subheader("Guardar receta")
+    if not supabase_disponible:
+        st.warning("Supabase no está disponible. No se puede guardar la receta ahora.")
+    if st.session_state.get("receta_id_cargada"):
+        st.caption(f"Receta cargada para actualizar: {st.session_state.get('codigo_receta_cargada', 'sin código')}")
+
+    with st.form("form_guardar_receta_nueva"):
+        nombre_receta_guardar = st.text_input("Nombre de receta", value=nombre_plato)
+        categoria_receta = st.text_input("Categoría", key="receta_categoria")
+        tipo_plato_receta = st.text_input("Tipo de plato", key="receta_tipo_plato")
+        raciones_base_receta = st.number_input(
+            "Raciones base",
+            min_value=0.0,
+            step=1.0,
+            value=float(st.session_state.get('raciones_base', 1.0))
+        )
+        observaciones_receta = st.text_area("Descripción / observaciones", key="receta_observaciones", height=90)
+
+        guardar_col, actualizar_col, duplicar_col = st.columns(3)
+        with guardar_col:
+            guardar_nueva = st.form_submit_button("Guardar como nueva receta", type="primary", use_container_width=True)
+        with actualizar_col:
+            actualizar_existente = st.form_submit_button("Actualizar receta seleccionada", use_container_width=True)
+        with duplicar_col:
+            duplicar_existente = st.form_submit_button("Duplicar receta seleccionada", use_container_width=True)
+
+        if guardar_nueva or actualizar_existente or duplicar_existente:
+            nombre_limpio = nombre_receta_guardar.strip()
+            receta_id_cargada = st.session_state.get("receta_id_cargada")
+            codigo_receta_cargada = st.session_state.get("codigo_receta_cargada", "")
+            if not supabase_disponible or supabase is None:
+                st.error("Supabase no está conectado correctamente.")
+            elif not nombre_limpio:
+                st.error("Indica un nombre de receta antes de guardar.")
+            elif not st.session_state.get("ingredientes"):
+                st.error("Añade al menos un ingrediente antes de guardar la receta.")
+            elif actualizar_existente and not receta_id_cargada:
+                st.warning("Carga una receta guardada antes de actualizarla.")
+            elif duplicar_existente and not receta_id_cargada:
+                st.warning("Carga una receta guardada antes de duplicarla.")
+            else:
+                codigo_receta = codigo_receta_cargada if actualizar_existente else generar_codigo_receta()
+                datos_receta = {
+                    "user_id": None,
+                    "codigo_receta": codigo_receta,
+                    "nombre": nombre_limpio,
+                    "categoria": categoria_receta.strip(),
+                    "tipo_plato": tipo_plato_receta.strip(),
+                    "raciones_base": float(raciones_base_receta),
+                    "unidad_servicio": "racion",
+                    "descripcion": observaciones_receta.strip(),
+                    "observaciones": observaciones_receta.strip(),
+                    "costes_indirectos_pct": float(ci_val),
+                    "margen_beneficio_pct": float(mb_val),
+                    "iva_pct": float(iva_val),
+                    "coste_total": float(coste_total),
+                    "precio_venta_sin_iva": float(pvp_neto),
+                    "precio_venta_con_iva": float(pvp_final),
+                    "activa": True
+                }
+                if actualizar_existente:
+                    ok, mensaje = actualizar_receta_supabase(
+                        receta_id_cargada,
+                        datos_receta,
+                        st.session_state["ingredientes"]
+                    )
+                    if ok:
+                        st.session_state["codigo_receta_cargada"] = codigo_receta
+                        st.success(f"Receta actualizada correctamente con código {codigo_receta}.")
+                    else:
+                        st.error(mensaje)
+                elif duplicar_existente:
+                    ok, mensaje, receta_guardada = duplicar_receta_supabase(
+                        datos_receta,
+                        st.session_state["ingredientes"]
+                    )
+                    if ok:
+                        nuevo_codigo = receta_guardada.get("codigo_receta", "")
+                        nuevo_nombre = receta_guardada.get("nombre", nombre_limpio)
+                        st.session_state["receta_id_cargada"] = receta_guardada.get("id")
+                        st.session_state["codigo_receta_cargada"] = nuevo_codigo
+                        st.session_state["nombre_plato"] = nuevo_nombre
+                        st.session_state["mensaje_receta_cargada"] = f"Receta duplicada correctamente con código {nuevo_codigo}."
+                        st.rerun()
+                    else:
+                        st.error(mensaje)
+                else:
+                    ok, mensaje, receta_guardada = guardar_receta_nueva_supabase(
+                        datos_receta,
+                        st.session_state["ingredientes"]
+                    )
+                    if ok:
+                        codigo_mostrado = receta_guardada.get("codigo_receta", codigo_receta)
+                        st.session_state["receta_id_cargada"] = receta_guardada.get("id")
+                        st.session_state["codigo_receta_cargada"] = codigo_mostrado
+                        st.success(f"Receta guardada correctamente con código {codigo_mostrado}.")
+                    else:
+                        st.error(mensaje)
+
+
+
+with main_tab_base:
+    st.subheader("🎒 Catálogo Relacional de Ingredientes en Supabase")
+    st.markdown("Busca, añade, modifica o elimina productos de tu base de datos en la nube. **Los cambios realizados aquí se sincronizarán directamente en Postgres.**")
+
+    if not inventario_df.empty:
+        # Buscador ágil en la base de datos para no colapsar el rendimiento de la web
+        busqueda = st.text_input("🔍 Buscar ingrediente por Código, Descripción o Familia:")
+        df_filtrado = inventario_df.copy()
+
+        if busqueda:
+            df_filtrado = df_filtrado[
+                df_filtrado["codigo"].str.contains(busqueda, case=False, na=False) |
+                df_filtrado["descripcion"].str.contains(busqueda, case=False, na=False) |
+                df_filtrado["familia"].str.contains(busqueda, case=False, na=False)
+            ]
+
+        # Grid editable conectado al catálogo
+        catalogo_editado = st.data_editor(
+            df_filtrado,
+            num_rows="dynamic",
+            use_container_width=True,
+            column_config={
+                "codigo": st.column_config.TextColumn("Código", help="ID único de Supabase", required=True),
+                "familia": st.column_config.TextColumn("Familia / Categoría", help="Ej: CARNES, PESCADOS..."),
+                "descripcion": st.column_config.TextColumn("Descripción / Ingrediente", required=True),
+                "unidad_medida": st.column_config.TextColumn("Unidad Base", help="kg, l, ud, sobre..."),
+                "merma": st.column_config.NumberColumn("% Merma Estándar", format="%.2f %%", min_value=0.0, max_value=100.0),
+                "precio_unidad": st.column_config.NumberColumn("Precio Proveedor (€)", format="%.2f €", min_value=0.0)
+            },
+            key="db_editor_component"
+        )
+
+        # Guardar cambios aplicados en el editor interactivo directo a Supabase
+        if st.button("💾 Guardar Cambios en Supabase", type="primary"):
+            editor_state = st.session_state.get("db_editor_component")
+            if editor_state and supabase_disponible:
+                with st.spinner("Sincronizando catálogo con Supabase..."):
+                    try:
+                        # 1. Procesar modificaciones de filas existentes
+                        for row_idx_str, edits in editor_state.get("edited_rows", {}).items():
+                            row_idx = int(row_idx_str)
+                            fila_original = df_filtrado.iloc[row_idx]
+                            original_code = fila_original["codigo"]
+
+                            datos_actualizados = {
+                                "codigo": original_code,
+                                "familia": edits.get("familia", fila_original.get("familia", "VARIOS")),
+                                "descripcion": edits.get("descripcion", fila_original.get("descripcion", "")),
+                                "unidad_medida": edits.get("unidad_medida", fila_original.get("unidad_medida", "kg")),
+                                "merma": float(edits.get("merma", fila_original.get("merma", 0.0))),
+                                "precio_unidad": float(edits.get("precio_unidad", fila_original.get("precio_unidad", 0.0)))
+                            }
+                            supabase.table("inventario").upsert(datos_actualizados).execute()
+
+                        # 2. Procesar inserciones de ingredientes nuevos
+                        for nueva_fila in editor_state.get("added_rows", []):
+                            if "codigo" in nueva_fila and nueva_fila["codigo"]:
+                                datos_nuevos = {
+                                    "codigo": str(nueva_fila["codigo"]).strip().upper(),
+                                    "familia": nueva_fila.get("familia", "VARIOS"),
+                                    "descripcion": nueva_fila.get("descripcion", "Ingrediente Nuevo"),
+                                    "unidad_medida": nueva_fila.get("unidad_medida", "kg"),
+                                    "merma": float(nueva_fila.get("merma", 0.0)),
+                                    "precio_unidad": float(nueva_fila.get("precio_unidad", 0.0))
+                                }
+                                supabase.table("inventario").upsert(datos_nuevos).execute()
+
+                        # 3. Procesar eliminaciones de ingredientes
+                        for row_idx in editor_state.get("deleted_rows", []):
+                            fila_original = df_filtrado.iloc[row_idx]
+                            original_code = fila_original["codigo"]
+                            supabase.table("inventario").delete().eq("codigo", original_code).execute()
+
+                        st.success("¡Base de datos de Supabase actualizada con éxito! 🚀")
+                        st.session_state['db_trigger'] += 1  # Forzar actualización de caché
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error al sincronizar datos con Supabase: {e}")
+            elif not supabase_disponible:
+                st.error("❌ Supabase no está conectado correctamente.")
+    else:
+        st.info("💡 Tu tabla 'inventario' en Supabase está vacía o cargando datos...")
