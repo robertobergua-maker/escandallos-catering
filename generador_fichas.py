@@ -429,6 +429,30 @@ def generar_excel(
 
 
 # --- INTERFAZ GRÁFICA DE STREAMLIT ---
+st.markdown(
+    """
+    <style>
+    .block-container {
+        padding-top: 1.25rem;
+        padding-bottom: 1.5rem;
+    }
+    div[data-testid="stMetric"] {
+        background: #f8fafc;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        padding: 0.55rem 0.7rem;
+    }
+    div[data-testid="stMetric"] label {
+        white-space: normal;
+    }
+    div[data-testid="stTabs"] [data-baseweb="tab-list"] {
+        gap: 0.35rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
 st.title("👨‍🍳 Gestor de Escandallos Inteligente con Supabase PostgreSQL")
 
 # Panel lateral indicador de conexiones activas
@@ -702,97 +726,99 @@ st.divider()
 # 🛒 LISTA DE INGREDIENTES ACTIVA EN EL ESCANDALLO (EDITABLE AL VUELO)
 # =============================================================================
 if st.session_state['ingredientes']:
-    st.subheader("🛒 Lista de Ingredientes de la Receta Activa")
-    
-    # Preparamos DataFrame de representación visual
-    df_display = pd.DataFrame(st.session_state['ingredientes'])
-    
-    # Garantizar que existan las 5 columnas estructurales
-    for col in ["codigo", "descripcion", "cantidad_bruta", "merma", "precio_unidad"]:
-        if col not in df_display.columns:
-            df_display[col] = 0.0 if col in ["cantidad_bruta", "merma", "precio_unidad"] else "S/C"
-            
-    df_display = df_display[["codigo", "descripcion", "cantidad_bruta", "merma", "precio_unidad"]]
+    lista_col, resumen_col = st.columns([2.35, 1], gap="large")
 
-    # Lanzamos el editor interactivo de la receta activa
-    ingredientes_editados = st.data_editor(
-        df_display,
-        num_rows="dynamic",
-        use_container_width=True,
-        column_config={
-            "codigo": st.column_config.TextColumn("Código", help="Código único del inventario", width="small"),
-            "descripcion": st.column_config.TextColumn("Ingrediente", help="Descripción del producto", width="large"),
-            "cantidad_bruta": st.column_config.NumberColumn("Cantidad Bruta (kg/l)", format="%.3f", min_value=0.0),
-            "merma": st.column_config.NumberColumn("% Merma", format="%.2f %%", min_value=0.0, max_value=100.0),
-            "precio_unidad": st.column_config.NumberColumn("Precio Unidad (€)", format="%.2f €", min_value=0.0)
-        },
-        key="editor_receta_activa"
-    )
-    
-    # Casteo numérico robusto para que la suma de costes no falle nunca con floats
-    for col in ["cantidad_bruta", "merma", "precio_unidad"]:
-        ingredientes_editados[col] = pd.to_numeric(ingredientes_editados[col]).fillna(0.0)
-        
-    ingredientes_lista = ingredientes_editados.to_dict(orient='records')
-    
-    # Sincronizar el estado al vuelo
-    if ingredientes_lista != st.session_state['ingredientes']:
-        st.session_state['ingredientes'] = ingredientes_lista
-        marcar_receta_modificada_manualmente()
-        st.rerun()
-        
-    if st.button("Limpiar toda la receta"):
-        st.session_state['ingredientes'] = []
-        st.session_state['ingredientes_base_raciones'] = None
-        st.session_state['factor_raciones'] = 1.0
-        st.rerun()
+    with lista_col:
+        st.subheader("🛒 Lista de Ingredientes de la Receta Activa")
 
-    st.divider()
+        # Preparamos DataFrame de representación visual
+        df_display = pd.DataFrame(st.session_state['ingredientes'])
 
-    # MÉTRIQUES FINANCIERAS EN TIEMPO REAL
-    st.subheader(f"📊 Métricas y Estructuración de Costes: {nombre_plato}")
-    subtotal_ing = sum(float(ing.get('cantidad_bruta', 0.0)) * float(ing.get('precio_unidad', 0.0)) for ing in st.session_state['ingredientes'])
-    
-    ci_val = costes_indirectos_pct if costes_indirectos_pct is not None else 0.0
-    mb_val = margen_beneficio_pct if margen_beneficio_pct is not None else 0.0
-    iva_val = iva_pct if iva_pct is not None else 0.0
+        # Garantizar que existan las 5 columnas estructurales
+        for col in ["codigo", "descripcion", "cantidad_bruta", "merma", "precio_unidad"]:
+            if col not in df_display.columns:
+                df_display[col] = 0.0 if col in ["cantidad_bruta", "merma", "precio_unidad"] else "S/C"
 
-    costes_ind = subtotal_ing * (ci_val / 100)
-    coste_total = subtotal_ing + costes_ind
-    
-    factor_margen = (1 - (mb_val / 100))
-    pvp_neto = coste_total / factor_margen if factor_margen > 0 else 0.0
-    monto_iva = pvp_neto * (iva_val / 100)
-    pvp_final = pvp_neto + monto_iva
-    raciones_deseadas_metricas = pd.to_numeric(st.session_state.get('raciones_deseadas', 0.0), errors='coerce')
-    raciones_deseadas_metricas = 0.0 if pd.isna(raciones_deseadas_metricas) else float(raciones_deseadas_metricas)
-    pvp_por_racion = pvp_final / raciones_deseadas_metricas if raciones_deseadas_metricas > 0 else 0.0
+        df_display = df_display[["codigo", "descripcion", "cantidad_bruta", "merma", "precio_unidad"]]
 
-    v1, v2, v3, v4, v5 = st.columns(5)
-    v1.metric("Materia Prima", f"{subtotal_ing:.2f} €")
-    v2.metric("Costes Ind.", f"{costes_ind:.2f} €")
-    v3.metric("COSTE TOTAL", f"{coste_total:.2f} €")
-    v4.metric("PVP Total", f"{pvp_final:.2f} €")
-    v5.metric("PVP por ración", f"{pvp_por_racion:.2f} €")
+        # Lanzamos el editor interactivo de la receta activa
+        ingredientes_editados = st.data_editor(
+            df_display,
+            num_rows="dynamic",
+            use_container_width=True,
+            height=360,
+            column_config={
+                "codigo": st.column_config.TextColumn("Código", help="Código único del inventario", width="small"),
+                "descripcion": st.column_config.TextColumn("Ingrediente", help="Descripción del producto", width="large"),
+                "cantidad_bruta": st.column_config.NumberColumn("Cantidad Bruta (kg/l)", format="%.3f", min_value=0.0),
+                "merma": st.column_config.NumberColumn("% Merma", format="%.2f %%", min_value=0.0, max_value=100.0),
+                "precio_unidad": st.column_config.NumberColumn("Precio Unidad (€)", format="%.2f €", min_value=0.0)
+            },
+            key="editor_receta_activa"
+        )
 
-    st.divider()
-    
-    excel_virtual = generar_excel(
-        nombre_plato,
-        st.session_state['ingredientes'],
-        ci_val,
-        mb_val,
-        iva_val,
-        st.session_state['raciones_base'],
-        st.session_state['raciones_deseadas'],
-        st.session_state['factor_raciones']
-    )
-    st.download_button(
-        label=f"📥 DESCARGAR FICHA EXCEL",
-        data=excel_virtual,
-        file_name=f"Ficha_{nombre_plato.replace(' ', '_')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="primary"
-    )
+        # Casteo numérico robusto para que la suma de costes no falle nunca con floats
+        for col in ["cantidad_bruta", "merma", "precio_unidad"]:
+            ingredientes_editados[col] = pd.to_numeric(ingredientes_editados[col]).fillna(0.0)
+
+        ingredientes_lista = ingredientes_editados.to_dict(orient='records')
+
+        # Sincronizar el estado al vuelo
+        if ingredientes_lista != st.session_state['ingredientes']:
+            st.session_state['ingredientes'] = ingredientes_lista
+            marcar_receta_modificada_manualmente()
+            st.rerun()
+
+        if st.button("Limpiar toda la receta"):
+            st.session_state['ingredientes'] = []
+            st.session_state['ingredientes_base_raciones'] = None
+            st.session_state['factor_raciones'] = 1.0
+            st.rerun()
+
+    with resumen_col:
+        st.subheader(f"📊 Costes: {nombre_plato}")
+        subtotal_ing = sum(float(ing.get('cantidad_bruta', 0.0)) * float(ing.get('precio_unidad', 0.0)) for ing in st.session_state['ingredientes'])
+
+        ci_val = costes_indirectos_pct if costes_indirectos_pct is not None else 0.0
+        mb_val = margen_beneficio_pct if margen_beneficio_pct is not None else 0.0
+        iva_val = iva_pct if iva_pct is not None else 0.0
+
+        costes_ind = subtotal_ing * (ci_val / 100)
+        coste_total = subtotal_ing + costes_ind
+
+        factor_margen = (1 - (mb_val / 100))
+        pvp_neto = coste_total / factor_margen if factor_margen > 0 else 0.0
+        monto_iva = pvp_neto * (iva_val / 100)
+        pvp_final = pvp_neto + monto_iva
+        raciones_deseadas_metricas = pd.to_numeric(st.session_state.get('raciones_deseadas', 0.0), errors='coerce')
+        raciones_deseadas_metricas = 0.0 if pd.isna(raciones_deseadas_metricas) else float(raciones_deseadas_metricas)
+        pvp_por_racion = pvp_final / raciones_deseadas_metricas if raciones_deseadas_metricas > 0 else 0.0
+
+        r1, r2 = st.columns(2)
+        r1.metric("Materia Prima", f"{subtotal_ing:.2f} €")
+        r2.metric("Costes Ind.", f"{costes_ind:.2f} €")
+        r3, r4 = st.columns(2)
+        r3.metric("Coste Total", f"{coste_total:.2f} €")
+        r4.metric("PVP Total", f"{pvp_final:.2f} €")
+        st.metric("PVP por ración", f"{pvp_por_racion:.2f} €")
+
+        excel_virtual = generar_excel(
+            nombre_plato,
+            st.session_state['ingredientes'],
+            ci_val,
+            mb_val,
+            iva_val,
+            st.session_state['raciones_base'],
+            st.session_state['raciones_deseadas'],
+            st.session_state['factor_raciones']
+        )
+        st.download_button(
+            label=f"📥 DESCARGAR FICHA EXCEL",
+            data=excel_virtual,
+            file_name=f"Ficha_{nombre_plato.replace(' ', '_')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+            use_container_width=True
+        )
 else:
     st.info("💡 Empieza agregando ingredientes usando cualquiera de las pestañas de entrada superiores.")
