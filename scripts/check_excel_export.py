@@ -12,7 +12,12 @@ def cargar_funciones_excel():
     module = ast.parse(source)
     func_nodes = [
         node for node in module.body
-        if isinstance(node, ast.FunctionDef) and node.name in {"ajustar_ingredientes_por_raciones", "generar_excel"}
+        if isinstance(node, ast.FunctionDef) and node.name in {
+            "ajustar_ingredientes_por_raciones",
+            "calcular_ajuste_raciones",
+            "normalizar_respuesta_ingredientes_ia",
+            "generar_excel",
+        }
     ]
     compiled = compile(ast.Module(body=func_nodes, type_ignores=[]), "generador_fichas.py", "exec")
     namespace = {
@@ -25,10 +30,15 @@ def cargar_funciones_excel():
         "pd": __import__("pandas"),
     }
     exec(compiled, namespace)
-    return namespace["ajustar_ingredientes_por_raciones"], namespace["generar_excel"]
+    return (
+        namespace["ajustar_ingredientes_por_raciones"],
+        namespace["calcular_ajuste_raciones"],
+        namespace["normalizar_respuesta_ingredientes_ia"],
+        namespace["generar_excel"],
+    )
 
 
-def comprobar_ajuste_raciones(ajustar_ingredientes_por_raciones):
+def comprobar_ajuste_raciones(ajustar_ingredientes_por_raciones, calcular_ajuste_raciones):
     ingredientes = [
         {"codigo": "ACE-01", "descripcion": "Aceite", "cantidad_bruta": 2.0, "merma": 5.0, "precio_unidad": 1.69},
         {"codigo": "HAR-01", "descripcion": "Harina", "cantidad_bruta": 4.0, "merma": 10.0, "precio_unidad": 1.1128},
@@ -46,10 +56,40 @@ def comprobar_ajuste_raciones(ajustar_ingredientes_por_raciones):
     assert duplicados[0]["codigo"] == ingredientes[0]["codigo"]
     assert duplicados[1]["descripcion"] == ingredientes[1]["descripcion"]
 
+    factor_12, ajustados_12 = calcular_ajuste_raciones(ingredientes, 6, 12)
+    factor_3, ajustados_3 = calcular_ajuste_raciones(ingredientes, 6, 3)
+    factor_18, ajustados_18 = calcular_ajuste_raciones(ingredientes, 6, 18)
+    assert factor_12 == 2.0
+    assert ajustados_12[0]["cantidad_bruta"] == 4.0
+    assert factor_3 == 0.5
+    assert ajustados_3[0]["cantidad_bruta"] == 1.0
+    assert factor_18 == 3.0
+    assert ajustados_18[0]["cantidad_bruta"] == 6.0
+
+
+def comprobar_normalizacion_ia(normalizar_respuesta_ingredientes_ia):
+    ingrediente = {"codigo": "ING-0001", "descripcion": "TOMATE PERA", "cantidad_bruta": 1.0, "merma": 0, "precio_unidad": 2.5}
+    raciones, ingredientes = normalizar_respuesta_ingredientes_ia([ingrediente])
+    assert raciones is None
+    assert ingredientes == [ingrediente]
+
+    raciones, ingredientes = normalizar_respuesta_ingredientes_ia({
+        "raciones_base": 6,
+        "ingredientes": [ingrediente],
+    })
+    assert raciones == 6.0
+    assert ingredientes == [ingrediente]
+
 
 def main():
-    ajustar_ingredientes_por_raciones, generar_excel = cargar_funciones_excel()
-    comprobar_ajuste_raciones(ajustar_ingredientes_por_raciones)
+    (
+        ajustar_ingredientes_por_raciones,
+        calcular_ajuste_raciones,
+        normalizar_respuesta_ingredientes_ia,
+        generar_excel,
+    ) = cargar_funciones_excel()
+    comprobar_ajuste_raciones(ajustar_ingredientes_por_raciones, calcular_ajuste_raciones)
+    comprobar_normalizacion_ia(normalizar_respuesta_ingredientes_ia)
     ingredientes = [
         {"codigo": "ACE-01", "descripcion": "Aceite", "cantidad_bruta": 2.0, "merma": 0.0, "precio_unidad": 1.69},
         {"codigo": "HAR-01", "descripcion": "Harina", "cantidad_bruta": 3.0, "merma": 5.0, "precio_unidad": 1.1128},

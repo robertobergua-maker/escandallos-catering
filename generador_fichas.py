@@ -43,8 +43,8 @@ if 'raciones_deseadas' not in st.session_state:
 if 'factor_raciones' not in st.session_state:
     st.session_state['factor_raciones'] = 1.0
 
-if 'ingredientes_originales_raciones' not in st.session_state:
-    st.session_state['ingredientes_originales_raciones'] = None
+if 'ingredientes_base_raciones' not in st.session_state:
+    st.session_state['ingredientes_base_raciones'] = st.session_state.get('ingredientes_originales_raciones', None)
 
 # Trigger para invalidar caché de Supabase al editar el catálogo
 if 'db_trigger' not in st.session_state:
@@ -143,9 +143,18 @@ INSTRUCCIONES CRÍTICAS:
 1. Compara semánticamente cada ingrediente detectado con el catálogo de referencia. Si encuentras una coincidencia clara (por ejemplo, "pollo" con "CUARTO POLLO ASADO" o "aceite oliva" con "ACEITE OLIVA"), asigna exactamente su "codigo" (parámetro "c") y usa su "descripcion", "merma" y "precio_unidad" correspondientes del catálogo.
 2. Si el ingrediente analizado NO existe en el catálogo, invéntale un código único y nuevo corto que comience por "ING-" seguido de 4 números lógicos, asigna su descripción extraída y sus precios o mermas correspondientes.
 3. Si el texto o la imagen presenta mermas implícitas (por ejemplo, Peso Bruto: 0.350, Peso Neto: 0.300), calcula la merma porcentual de forma precisa: ((bruto - neto)/bruto)*100.
-4. Ignora títulos de columnas de cabecera de Excel, importes totales o subtotales de facturas.
+4. Si detectas raciones de receta en expresiones como "6 porciones", "6 raciones", "para 6 personas", "serves 6" o "6 servings", devuelve ese número como "raciones_base".
+5. Ignora títulos de columnas de cabecera de Excel, importes totales o subtotales de facturas.
 
-REQUISITO EXCLUSIVO DE RESPUESTA: Devuelve ÚNICAMENTE un array de formato JSON puro sin bloques de código markdown de tipo ```json y sin explicaciones adicionales:
+REQUISITO EXCLUSIVO DE RESPUESTA: Devuelve ÚNICAMENTE JSON puro sin bloques de código markdown de tipo ```json y sin explicaciones adicionales.
+Si detectas raciones base, devuelve un objeto:
+{{
+  "raciones_base": 6,
+  "ingredientes": [
+    {{"codigo": "ING-0019", "descripcion": "PECHUGA POLLO ENTERA FRESCA", "cantidad_bruta": 0.35, "merma": 14.29, "precio_unidad": 5.15}}
+  ]
+}}
+Si no detectas raciones base, puedes devolver el array antiguo:
 [
   {{"codigo": "ING-0019", "descripcion": "PECHUGA POLLO ENTERA FRESCA", "cantidad_bruta": 0.35, "merma": 14.29, "precio_unidad": 5.15}}
 ]'''
@@ -190,6 +199,41 @@ REQUISITO EXCLUSIVO DE RESPUESTA: Devuelve ÚNICAMENTE un array de formato JSON 
         st.error(f"⚠️ Error al conectar con la Inteligencia Artificial de OpenAI: {str(e)}")
         return []
 
+
+def normalizar_respuesta_ingredientes_ia(respuesta_ia):
+    """
+    Acepta el formato antiguo (lista) y el nuevo objeto con raciones_base.
+    """
+    if isinstance(respuesta_ia, list):
+        return None, respuesta_ia
+    if isinstance(respuesta_ia, dict):
+        ingredientes = respuesta_ia.get("ingredientes", [])
+        raciones_base = pd.to_numeric(respuesta_ia.get("raciones_base"), errors="coerce")
+        raciones_base = None if pd.isna(raciones_base) or float(raciones_base) <= 0 else float(raciones_base)
+        return raciones_base, ingredientes if isinstance(ingredientes, list) else []
+    return None, []
+
+
+def incorporar_ingredientes_ia(respuesta_ia):
+    raciones_base_detectadas, nuevos = normalizar_respuesta_ingredientes_ia(respuesta_ia)
+    if not nuevos:
+        return False
+
+    st.session_state['ingredientes'].extend(nuevos)
+    st.session_state['ingredientes_base_raciones'] = [dict(ing) for ing in st.session_state['ingredientes']]
+    st.session_state['factor_raciones'] = 1.0
+
+    if raciones_base_detectadas is not None:
+        st.session_state['raciones_base'] = raciones_base_detectadas
+        st.session_state['raciones_deseadas'] = raciones_base_detectadas
+
+    return True
+
+
+def marcar_receta_modificada_manualmente():
+    st.session_state['ingredientes_base_raciones'] = None
+    st.session_state['factor_raciones'] = 1.0
+
 # =============================================================================
 # 📊 GENERADOR DE EXCEL CON FÓRMULAS CONSOLIDADAS
 # =============================================================================
@@ -205,6 +249,15 @@ def ajustar_ingredientes_por_raciones(ingredientes, factor):
         ing_ajustado['cantidad_bruta'] = cantidad * factor
         ingredientes_ajustados.append(ing_ajustado)
     return ingredientes_ajustados
+
+
+def calcular_ajuste_raciones(ingredientes_base, raciones_base, raciones_deseadas):
+    raciones_base_num = pd.to_numeric(raciones_base, errors='coerce')
+    raciones_deseadas_num = pd.to_numeric(raciones_deseadas, errors='coerce')
+    if pd.isna(raciones_base_num) or pd.isna(raciones_deseadas_num) or float(raciones_base_num) <= 0 or float(raciones_deseadas_num) <= 0:
+        raise ValueError("Las raciones base y deseadas deben ser mayores que 0.")
+    factor = float(raciones_deseadas_num) / float(raciones_base_num)
+    return factor, ajustar_ingredientes_por_raciones(ingredientes_base, factor)
 
 
 def generar_excel(
@@ -372,17 +425,15 @@ with col_r1:
     raciones_base = st.number_input(
         "🍽️ Raciones base",
         min_value=0.0,
-        value=float(st.session_state['raciones_base']),
         step=1.0,
-        key="input_raciones_base"
+        key="raciones_base"
     )
 with col_r2:
     raciones_deseadas = st.number_input(
         "🎯 Raciones deseadas",
         min_value=0.0,
-        value=float(st.session_state['raciones_deseadas']),
         step=1.0,
-        key="input_raciones_deseadas"
+        key="raciones_deseadas"
     )
 
 factor_raciones_preview = raciones_deseadas / raciones_base if raciones_base > 0 and raciones_deseadas > 0 else 0.0
@@ -394,31 +445,30 @@ with col_r3:
         elif not st.session_state['ingredientes']:
             st.warning("Añade ingredientes antes de ajustar el escandallo.")
         else:
-            if st.session_state['ingredientes_originales_raciones'] is None:
-                st.session_state['ingredientes_originales_raciones'] = [dict(ing) for ing in st.session_state['ingredientes']]
-            ingredientes_base_ajuste = st.session_state['ingredientes_originales_raciones']
-            factor_raciones = raciones_deseadas / raciones_base
-            st.session_state['ingredientes'] = ajustar_ingredientes_por_raciones(
+            if st.session_state['ingredientes_base_raciones'] is None:
+                st.session_state['ingredientes_base_raciones'] = [dict(ing) for ing in st.session_state['ingredientes']]
+            ingredientes_base_ajuste = st.session_state['ingredientes_base_raciones']
+            factor_raciones, ingredientes_ajustados = calcular_ajuste_raciones(
                 ingredientes_base_ajuste,
-                factor_raciones
+                raciones_base,
+                raciones_deseadas
             )
-            st.session_state['raciones_base'] = float(raciones_base)
-            st.session_state['raciones_deseadas'] = float(raciones_deseadas)
+            st.session_state['ingredientes'] = ingredientes_ajustados
             st.session_state['factor_raciones'] = float(factor_raciones)
             st.success(f"Escandallo ajustado con factor {factor_raciones:.4f}.")
             st.rerun()
 with col_r4:
     st.write("")
     st.write("")
-    if st.button("Restablecer cantidades originales"):
-        if st.session_state['ingredientes_originales_raciones'] is not None:
-            st.session_state['ingredientes'] = [dict(ing) for ing in st.session_state['ingredientes_originales_raciones']]
-            st.session_state['ingredientes_originales_raciones'] = None
+    if st.button("Restablecer cantidades base"):
+        if st.session_state['ingredientes_base_raciones'] is not None:
+            st.session_state['ingredientes'] = [dict(ing) for ing in st.session_state['ingredientes_base_raciones']]
+            st.session_state['ingredientes_base_raciones'] = None
             st.session_state['factor_raciones'] = 1.0
-            st.success("Cantidades originales restablecidas.")
+            st.success("Cantidades base restablecidas.")
             st.rerun()
         else:
-            st.info("No hay cantidades originales guardadas para restablecer.")
+            st.info("No hay cantidades base guardadas para restablecer.")
 
 st.divider()
 
@@ -474,6 +524,7 @@ with tab1:
                     'merma': merma_man if merma_man is not None else 0.0,
                     'precio_unidad': precio_man if precio_man is not None else 0.0
                 })
+            marcar_receta_modificada_manualmente()
             st.rerun()
 
 # -----------------------------------------------------------------------------
@@ -487,8 +538,7 @@ with tab2:
         if texto_pegado:
             with st.spinner("La IA está leyendo y cruzando los datos con tu Supabase..."):
                 nuevos = procesar_con_openai(texto_plano=texto_pegado)
-                if nuevos:
-                    st.session_state['ingredientes'].extend(nuevos)
+                if incorporar_ingredientes_ia(nuevos):
                     st.rerun()
 
 # -----------------------------------------------------------------------------
@@ -503,8 +553,7 @@ with tab3:
             bytes_img = archivo_imagen.read()
             with st.spinner("Leyendo factura y asociando códigos de Supabase..."):
                 nuevos = procesar_con_openai(bytes_imagen=bytes_img, mime_type=archivo_imagen.type)
-                if nuevos:
-                    st.session_state['ingredientes'].extend(nuevos)
+                if incorporar_ingredientes_ia(nuevos):
                     st.rerun()
 
 # -----------------------------------------------------------------------------
@@ -632,10 +681,13 @@ if st.session_state['ingredientes']:
     # Sincronizar el estado al vuelo
     if ingredientes_lista != st.session_state['ingredientes']:
         st.session_state['ingredientes'] = ingredientes_lista
+        marcar_receta_modificada_manualmente()
         st.rerun()
         
     if st.button("Limpiar toda la receta"):
         st.session_state['ingredientes'] = []
+        st.session_state['ingredientes_base_raciones'] = None
+        st.session_state['factor_raciones'] = 1.0
         st.rerun()
 
     st.divider()
