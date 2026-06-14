@@ -329,6 +329,35 @@ def generar_codigo_receta():
         return "REC-0001"
 
 
+def generar_nombre_copia_receta(nombre_original):
+    """
+    Genera un nombre de copia evitando duplicados sencillos.
+    """
+    nombre_base = str(nombre_original or "Receta").strip() or "Receta"
+    if not supabase_disponible or supabase is None:
+        return f"{nombre_base} copia"
+
+    try:
+        recetas_df = cargar_recetas_supabase()
+        nombres_existentes = {
+            str(nombre).strip().lower()
+            for nombre in recetas_df.get("nombre", [])
+            if str(nombre).strip()
+        }
+        candidato = f"{nombre_base} copia"
+        if candidato.lower() not in nombres_existentes:
+            return candidato
+
+        contador = 2
+        while True:
+            candidato = f"{nombre_base} copia {contador}"
+            if candidato.lower() not in nombres_existentes:
+                return candidato
+            contador += 1
+    except Exception:
+        return f"{nombre_base} copia"
+
+
 def calcular_datos_ingrediente_receta(ing, orden=0):
     """
     Convierte un ingrediente de la app al formato de public.receta_ingredientes.
@@ -516,6 +545,23 @@ def actualizar_receta_supabase(receta_id, datos_receta, ingredientes):
         return True, "Receta actualizada correctamente."
     except Exception as e:
         return False, f"Error al actualizar la receta en Supabase: {e}"
+
+
+def duplicar_receta_supabase(datos_receta, ingredientes):
+    """
+    Duplica una receta cargada como una receta nueva con codigo y nombre nuevos.
+    """
+    if not supabase_disponible or supabase is None:
+        return False, "Supabase no está conectado correctamente.", None
+    if not ingredientes:
+        return False, "No hay ingredientes para duplicar.", None
+
+    datos_copia = dict(datos_receta)
+    datos_copia["user_id"] = None
+    datos_copia["codigo_receta"] = generar_codigo_receta()
+    datos_copia["nombre"] = generar_nombre_copia_receta(datos_receta.get("nombre", "Receta"))
+
+    return guardar_receta_nueva_supabase(datos_copia, ingredientes)
 
 
 def preparar_ingredientes_receta_para_sesion(ingredientes_df):
@@ -1534,13 +1580,15 @@ if st.session_state['ingredientes']:
             )
             observaciones_receta = st.text_area("Descripción / observaciones", key="receta_observaciones", height=90)
 
-            guardar_col, actualizar_col = st.columns(2)
+            guardar_col, actualizar_col, duplicar_col = st.columns(3)
             with guardar_col:
                 guardar_nueva = st.form_submit_button("Guardar como nueva receta", type="primary", use_container_width=True)
             with actualizar_col:
                 actualizar_existente = st.form_submit_button("Actualizar receta seleccionada", use_container_width=True)
+            with duplicar_col:
+                duplicar_existente = st.form_submit_button("Duplicar receta seleccionada", use_container_width=True)
 
-            if guardar_nueva or actualizar_existente:
+            if guardar_nueva or actualizar_existente or duplicar_existente:
                 nombre_limpio = nombre_receta_guardar.strip()
                 receta_id_cargada = st.session_state.get("receta_id_cargada")
                 codigo_receta_cargada = st.session_state.get("codigo_receta_cargada", "")
@@ -1552,6 +1600,8 @@ if st.session_state['ingredientes']:
                     st.error("Añade al menos un ingrediente antes de guardar la receta.")
                 elif actualizar_existente and not receta_id_cargada:
                     st.warning("Carga una receta guardada antes de actualizarla.")
+                elif duplicar_existente and not receta_id_cargada:
+                    st.warning("Carga una receta guardada antes de duplicarla.")
                 else:
                     codigo_receta = codigo_receta_cargada if actualizar_existente else generar_codigo_receta()
                     datos_receta = {
@@ -1581,6 +1631,21 @@ if st.session_state['ingredientes']:
                         if ok:
                             st.session_state["codigo_receta_cargada"] = codigo_receta
                             st.success(f"Receta actualizada correctamente con código {codigo_receta}.")
+                        else:
+                            st.error(mensaje)
+                    elif duplicar_existente:
+                        ok, mensaje, receta_guardada = duplicar_receta_supabase(
+                            datos_receta,
+                            st.session_state["ingredientes"]
+                        )
+                        if ok:
+                            nuevo_codigo = receta_guardada.get("codigo_receta", "")
+                            nuevo_nombre = receta_guardada.get("nombre", nombre_limpio)
+                            st.session_state["receta_id_cargada"] = receta_guardada.get("id")
+                            st.session_state["codigo_receta_cargada"] = nuevo_codigo
+                            st.session_state["nombre_plato"] = nuevo_nombre
+                            st.session_state["mensaje_receta_cargada"] = f"Receta duplicada correctamente con código {nuevo_codigo}."
+                            st.rerun()
                         else:
                             st.error(mensaje)
                     else:
