@@ -113,6 +113,7 @@ def main():
         "G15": "=G12/(1-(30.0/100))",
         "G16": "=G15*(10.0/100)",
         "G17": "=G15+G16",
+        "G18": "=IF($E$2>0,G17/$E$2,0)",
     }
     for cell, formula in expected.items():
         value = ws[cell].value

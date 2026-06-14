@@ -404,6 +404,12 @@ def generar_excel(
     pvp_total.font = Font(bold=True)
     pvp_total.fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
 
+    ws.cell(row=res+8, column=6, value="PRECIO POR RACIÓN:").font = Font(bold=True)
+    precio_racion = ws.cell(row=res+8, column=total_col, value=f"=IF($E$2>0,{total_col_letter}{res+7}/$E$2,0)")
+    precio_racion.number_format = '#,##0.00 €'
+    precio_racion.font = Font(bold=True)
+    precio_racion.fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+
     # Ajuste automático del ancho de las celdas para que no salgan truncadas (###)
     for col in ws.columns:
         max_len = 0
@@ -758,12 +764,16 @@ if st.session_state['ingredientes']:
     pvp_neto = coste_total / factor_margen if factor_margen > 0 else 0.0
     monto_iva = pvp_neto * (iva_val / 100)
     pvp_final = pvp_neto + monto_iva
+    raciones_deseadas_metricas = pd.to_numeric(st.session_state.get('raciones_deseadas', 0.0), errors='coerce')
+    raciones_deseadas_metricas = 0.0 if pd.isna(raciones_deseadas_metricas) else float(raciones_deseadas_metricas)
+    pvp_por_racion = pvp_final / raciones_deseadas_metricas if raciones_deseadas_metricas > 0 else 0.0
 
-    v1, v2, v3, v4 = st.columns(4)
+    v1, v2, v3, v4, v5 = st.columns(5)
     v1.metric("Materia Prima", f"{subtotal_ing:.2f} €")
     v2.metric("Costes Ind.", f"{costes_ind:.2f} €")
     v3.metric("COSTE TOTAL", f"{coste_total:.2f} €")
-    v4.metric("PVP Sugerido (Con IVA)", f"{pvp_final:.2f} €")
+    v4.metric("PVP Total", f"{pvp_final:.2f} €")
+    v5.metric("PVP por ración", f"{pvp_por_racion:.2f} €")
 
     st.divider()
     
