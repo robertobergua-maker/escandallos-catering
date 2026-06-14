@@ -77,14 +77,14 @@ def cargar_inventario_supabase(trigger):
     Trae el listado de ingredientes de Supabase de forma segura.
     Se invalida automáticamente al cambiar el 'trigger'.
     """
-    cols_deseadas = ["codigo", "familia", "descripcion", "merma", "precio_unidad"]
+    cols_deseadas = ["codigo", "familia", "descripcion", "unidad_medida", "merma", "precio_unidad"]
     if not supabase_disponible or supabase is None:
         return pd.DataFrame(columns=cols_deseadas)
     try:
         respuesta = (
             supabase
             .table("inventario")
-            .select("codigo,familia,descripcion,merma,precio_unidad")
+            .select("codigo,familia,descripcion,unidad_medida,merma,precio_unidad")
             .execute()
         )
         df = pd.DataFrame(respuesta.data)
@@ -101,6 +101,7 @@ def cargar_inventario_supabase(trigger):
         df["codigo"] = df["codigo"].fillna("").astype(str).str.strip().str.upper()
         df["familia"] = df["familia"].fillna("").astype(str).str.strip()
         df["descripcion"] = df["descripcion"].fillna("").astype(str).str.strip()
+        df["unidad_medida"] = df["unidad_medida"].fillna("kg").astype(str).str.strip().replace("", "kg")
         df["merma"] = pd.to_numeric(df["merma"], errors="coerce").fillna(0.0)
         df["precio_unidad"] = pd.to_numeric(df["precio_unidad"], errors="coerce").fillna(0.0)
         df = df.sort_values(by="descripcion")
@@ -122,6 +123,7 @@ if not inventario_df.empty:
             inventario_dict[codigo_str] = {
                 "familia": row.get("familia", "VARIOS"),
                 "descripcion": row.get("descripcion", ""),
+                "unidad_medida": row.get("unidad_medida", "kg"),
                 "merma": float(row.get("merma", 0.0)) if pd.notna(row.get("merma")) else 0.0,
                 "precio_unidad": float(row.get("precio_unidad", 0.0)) if pd.notna(row.get("precio_unidad")) else 0.0
             }
@@ -135,14 +137,38 @@ def normalizar_texto_busqueda(texto):
     return re.sub(r"\s+", " ", texto).strip()
 
 
+PALABRAS_NO_ALIMENTARIAS = {
+    "PAPEL", "ENVOLVER", "ENVOLTORIO", "CAJA", "BOLSA", "BANDEJA", "SERVILLETA",
+    "VASO", "PLATO", "CUBIERTO", "GUANTE", "FILM", "ALUMINIO", "ETIQUETA"
+}
+
+
+def parece_material_no_alimentario(descripcion):
+    palabras = set(normalizar_texto_busqueda(descripcion).split())
+    return bool(palabras & PALABRAS_NO_ALIMENTARIAS)
+
+
+def descripcion_generica_ingrediente(descripcion):
+    texto = normalizar_texto_busqueda(descripcion)
+    palabras_descartables = {
+        "FRESCO", "FRESCA", "CONGELADO", "CONGELADA", "ECO", "ECOLOGICO", "ECOLOGICA",
+        "BIO", "MARCA", "BOLSA", "LATA", "CAJA", "BANDEJA", "PAQUETE", "GARRAFA",
+        "BOTELLA", "SACO", "MONODOSIS", "APROX", "SIN", "CON"
+    }
+    palabras = [p for p in texto.split() if not p.isdigit() and p not in palabras_descartables]
+    return " ".join(palabras[:4]) or texto
+
+
 def sugerir_ingredientes_similares(descripcion, inventario, limite=3, umbral=0.35):
-    objetivo = normalizar_texto_busqueda(descripcion)
+    objetivo = descripcion_generica_ingrediente(descripcion)
     if not objetivo or inventario.empty:
         return []
 
     sugerencias = []
     for _, row in inventario.iterrows():
         desc_bd = str(row.get("descripcion", ""))
+        if parece_material_no_alimentario(desc_bd) and not parece_material_no_alimentario(objetivo):
+            continue
         desc_norm = normalizar_texto_busqueda(desc_bd)
         if not desc_norm:
             continue
@@ -155,6 +181,7 @@ def sugerir_ingredientes_similares(descripcion, inventario, limite=3, umbral=0.3
             sugerencias.append({
                 "codigo": str(row.get("codigo", "")).strip().upper(),
                 "descripcion": desc_bd,
+                "unidad_medida": str(row.get("unidad_medida", "kg")).strip() or "kg",
                 "merma": float(row.get("merma", 0.0)) if pd.notna(row.get("merma")) else 0.0,
                 "precio_unidad": float(row.get("precio_unidad", 0.0)) if pd.notna(row.get("precio_unidad")) else 0.0,
                 "score": score
@@ -189,6 +216,7 @@ def preparar_fila_inventario_desde_ingrediente(ingrediente, codigo=None):
         "codigo": str(codigo_final).strip().upper(),
         "familia": ingrediente.get("familia", "VARIOS"),
         "descripcion": str(ingrediente.get("descripcion", "")).strip() or "Ingrediente Nuevo",
+        "unidad_medida": str(ingrediente.get("unidad_medida", "kg")).strip() or "kg",
         "merma": 0.0 if pd.isna(merma) else float(merma),
         "precio_unidad": 0.0 if pd.isna(precio) else float(precio)
     }
@@ -214,6 +242,7 @@ def procesar_con_openai(texto_plano=None, bytes_imagen=None, mime_type=None):
             catalogo_reducido.append({
                 "c": codigo,
                 "d": data["descripcion"],
+                "u": data.get("unidad_medida", "kg"),
                 "m": data["merma"],
                 "p": data["precio_unidad"]
             })
@@ -227,22 +256,23 @@ Dispones del catálogo completo de ingredientes reales de nuestra cocina en form
 
 INSTRUCCIONES CRÍTICAS:
 1. Compara semánticamente cada ingrediente detectado con el catálogo de referencia. Si encuentras una coincidencia clara (por ejemplo, "pollo" con "CUARTO POLLO ASADO" o "aceite oliva" con "ACEITE OLIVA"), asigna exactamente su "codigo" (parámetro "c") y usa su "descripcion", "merma" y "precio_unidad" correspondientes del catálogo.
-2. Si el ingrediente analizado NO existe en el catálogo, invéntale un código único y nuevo corto que comience por "ING-" seguido de 4 números lógicos, asigna su descripción extraída y sus precios o mermas correspondientes.
-3. Si el texto o la imagen presenta mermas implícitas (por ejemplo, Peso Bruto: 0.350, Peso Neto: 0.300), calcula la merma porcentual de forma precisa: ((bruto - neto)/bruto)*100.
-4. Si detectas raciones de receta en expresiones como "6 porciones", "6 raciones", "para 6 personas", "serves 6" o "6 servings", devuelve ese número como "raciones_base".
-5. Ignora títulos de columnas de cabecera de Excel, importes totales o subtotales de facturas.
+2. Trabaja con ingredientes genéricos de cocina: AGUA, TOMATE, PEPINO, PIMIENTO, HARINA, ACEITE, etc. Evita marcas, envases, materiales y textos de embalaje como papel, caja, bolsa o etiqueta salvo que sean realmente un producto alimentario.
+3. Si el ingrediente analizado NO existe en el catálogo, invéntale un código único y nuevo corto que comience por "ING-" seguido de 4 números lógicos, asigna una descripción genérica del ingrediente y sus precios o mermas correspondientes.
+4. Si el texto o la imagen presenta mermas implícitas (por ejemplo, Peso Bruto: 0.350, Peso Neto: 0.300), calcula la merma porcentual de forma precisa: ((bruto - neto)/bruto)*100.
+5. Si detectas raciones de receta en expresiones como "6 porciones", "6 raciones", "para 6 personas", "serves 6" o "6 servings", devuelve ese número como "raciones_base".
+6. Ignora títulos de columnas de cabecera de Excel, importes totales o subtotales de facturas.
 
 REQUISITO EXCLUSIVO DE RESPUESTA: Devuelve ÚNICAMENTE JSON puro sin bloques de código markdown de tipo ```json y sin explicaciones adicionales.
 Si detectas raciones base, devuelve un objeto:
 {{
   "raciones_base": 6,
   "ingredientes": [
-    {{"codigo": "ING-0019", "descripcion": "PECHUGA POLLO ENTERA FRESCA", "cantidad_bruta": 0.35, "merma": 14.29, "precio_unidad": 5.15}}
+    {{"codigo": "ING-0019", "descripcion": "POLLO", "unidad_medida": "kg", "cantidad_bruta": 0.35, "merma": 14.29, "precio_unidad": 5.15}}
   ]
 }}
 Si no detectas raciones base, puedes devolver el array antiguo:
 [
-  {{"codigo": "ING-0019", "descripcion": "PECHUGA POLLO ENTERA FRESCA", "cantidad_bruta": 0.35, "merma": 14.29, "precio_unidad": 5.15}}
+  {{"codigo": "ING-0019", "descripcion": "POLLO", "unidad_medida": "kg", "cantidad_bruta": 0.35, "merma": 14.29, "precio_unidad": 5.15}}
 ]'''
 
         contenido_usuario = []
@@ -381,7 +411,7 @@ def generar_excel(
     ws.title = "Ficha Técnica"
 
     # Título Principal Estilizado en Azul Marino
-    ws.merge_cells('A1:G1')
+    ws.merge_cells('A1:H1')
     titulo_cell = ws['A1']
     titulo_cell.value = f"FICHA TÉCNICA: {nombre_plato.upper()}"
     titulo_cell.font = Font(bold=True, size=14, color="FFFFFF")
@@ -403,7 +433,7 @@ def generar_excel(
     ws['B3'].number_format = '#,##0.0000'
 
     # Cabeceras alineadas con la nueva columna Código
-    headers = ['Código', 'Ingrediente', 'Cantidad Bruta (kg/l)', '% Merma', 'Peso Neto Real (kg/l)', 'Precio Unidad (€)', 'Coste Total (€)']
+    headers = ['Código', 'Ingrediente', 'Unidad', 'Cantidad Bruta', '% Merma', 'Cantidad Neta', 'Precio Unidad (€)', 'Coste Total (€)']
     header_row = 5
     start_row = 6
     for col_num, header in enumerate(headers, 1):
@@ -423,18 +453,19 @@ def generar_excel(
         row = start_row + i
         ws.cell(row=row, column=col_idx['Código'], value=ing.get('codigo', 'S/C'))
         ws.cell(row=row, column=col_idx['Ingrediente'], value=ing.get('descripcion', ''))
-        ws.cell(row=row, column=col_idx['Cantidad Bruta (kg/l)'], value=float(ing.get('cantidad_bruta', 0.0))).number_format = '#,##0.000'
+        ws.cell(row=row, column=col_idx['Unidad'], value=ing.get('unidad_medida', 'kg'))
+        ws.cell(row=row, column=col_idx['Cantidad Bruta'], value=float(ing.get('cantidad_bruta', 0.0))).number_format = '#,##0.000'
         ws.cell(row=row, column=col_idx['% Merma'], value=float(ing.get('merma', 0.0))/100).number_format = '0.00%'
         ws.cell(
             row=row,
-            column=col_idx['Peso Neto Real (kg/l)'],
-            value=f"={col_letras['Cantidad Bruta (kg/l)']}{row}*(1-{col_letras['% Merma']}{row})",
+            column=col_idx['Cantidad Neta'],
+            value=f"={col_letras['Cantidad Bruta']}{row}*(1-{col_letras['% Merma']}{row})",
         ).number_format = '#,##0.000'
         ws.cell(row=row, column=col_idx['Precio Unidad (€)'], value=float(ing.get('precio_unidad', 0.0))).number_format = '#,##0.00 €'
         ws.cell(
             row=row,
             column=col_idx['Coste Total (€)'],
-            value=f"={col_letras['Cantidad Bruta (kg/l)']}{row}*{col_letras['Precio Unidad (€)']}{row}",
+            value=f"={col_letras['Cantidad Bruta']}{row}*{col_letras['Precio Unidad (€)']}{row}",
         ).number_format = '#,##0.00 €'
 
     last_row = start_row + len(ingredientes) - 1 if ingredientes else start_row
@@ -641,7 +672,7 @@ with tab1:
     opciones_codigo = [""] + list(inventario_dict.keys())
     
     with st.form("form_ingrediente", clear_on_submit=True):
-        c_m0, c_m1, c_m2, c_m3, c_m4 = st.columns(5)
+        c_m0, c_m1, c_m2, c_m3, c_m4, c_m5 = st.columns(6)
         
         # Desplegable predictivo de ingredientes
         cod_select = c_m0.selectbox(
@@ -652,8 +683,9 @@ with tab1:
         
         desc_man = c_m1.text_input("Ingrediente (Nuevo)", placeholder="Ej: Cebolla tierna")
         cant_man = c_m2.number_input("Cant. Bruta (kg/l)", min_value=0.0, step=0.001, format="%.3f", value=None, placeholder="0.000")
-        merma_man = c_m3.number_input("% Merma", min_value=0.0, max_value=100.0, step=0.01, value=None, placeholder="0.00%")
-        precio_man = c_m4.number_input("Precio Unidad (€)", min_value=0.0, step=0.01, format="%.2f", value=None, placeholder="0.00 €")
+        unidad_man = c_m3.selectbox("Unidad", ["kg", "l", "ud", "sobre", "botella", "lata", "paquete", "caja", "bandeja", "hoja"])
+        merma_man = c_m4.number_input("% Merma", min_value=0.0, max_value=100.0, step=0.01, value=None, placeholder="0.00%")
+        precio_man = c_m5.number_input("Precio Unidad (€)", min_value=0.0, step=0.01, format="%.2f", value=None, placeholder="0.00 €")
         
         if st.form_submit_button("Añadir al Escandallo"):
             # Si el usuario seleccionó un código del desplegable
@@ -662,6 +694,7 @@ with tab1:
                 st.session_state['ingredientes'].append({
                     'codigo': cod_select,
                     'descripcion': info_bd['descripcion'],
+                    'unidad_medida': info_bd.get('unidad_medida', 'kg'),
                     'cantidad_bruta': cant_man if cant_man is not None else 0.0,
                     'merma': info_bd['merma'],
                     'precio_unidad': info_bd['precio_unidad']
@@ -672,6 +705,7 @@ with tab1:
                 st.session_state['ingredientes'].append({
                     'codigo': "S/C",
                     'descripcion': desc_man if desc_man else "Ingrediente nuevo",
+                    'unidad_medida': unidad_man,
                     'cantidad_bruta': cant_man if cant_man is not None else 0.0,
                     'merma': merma_man if merma_man is not None else 0.0,
                     'precio_unidad': precio_man if precio_man is not None else 0.0
@@ -736,6 +770,7 @@ with tab4:
                 "codigo": st.column_config.TextColumn("Código", help="ID único de Supabase", required=True),
                 "familia": st.column_config.TextColumn("Familia / Categoría", help="Ej: CARNES, PESCADOS..."),
                 "descripcion": st.column_config.TextColumn("Descripción / Ingrediente", required=True),
+                "unidad_medida": st.column_config.TextColumn("Unidad Base", help="kg, l, ud, sobre..."),
                 "merma": st.column_config.NumberColumn("% Merma Estándar", format="%.2f %%", min_value=0.0, max_value=100.0),
                 "precio_unidad": st.column_config.NumberColumn("Precio Proveedor (€)", format="%.2f €", min_value=0.0)
             },
@@ -758,6 +793,7 @@ with tab4:
                                 "codigo": original_code,
                                 "familia": edits.get("familia", fila_original.get("familia", "VARIOS")),
                                 "descripcion": edits.get("descripcion", fila_original.get("descripcion", "")),
+                                "unidad_medida": edits.get("unidad_medida", fila_original.get("unidad_medida", "kg")),
                                 "merma": float(edits.get("merma", fila_original.get("merma", 0.0))),
                                 "precio_unidad": float(edits.get("precio_unidad", fila_original.get("precio_unidad", 0.0)))
                             }
@@ -770,6 +806,7 @@ with tab4:
                                     "codigo": str(nueva_fila["codigo"]).strip().upper(),
                                     "familia": nueva_fila.get("familia", "VARIOS"),
                                     "descripcion": nueva_fila.get("descripcion", "Ingrediente Nuevo"),
+                                    "unidad_medida": nueva_fila.get("unidad_medida", "kg"),
                                     "merma": float(nueva_fila.get("merma", 0.0)),
                                     "precio_unidad": float(nueva_fila.get("precio_unidad", 0.0))
                                 }
@@ -806,11 +843,16 @@ if st.session_state['ingredientes']:
         df_display = pd.DataFrame(st.session_state['ingredientes'])
 
         # Garantizar que existan las 5 columnas estructurales
-        for col in ["codigo", "descripcion", "cantidad_bruta", "merma", "precio_unidad"]:
+        for col in ["codigo", "descripcion", "unidad_medida", "cantidad_bruta", "merma", "precio_unidad"]:
             if col not in df_display.columns:
                 df_display[col] = 0.0 if col in ["cantidad_bruta", "merma", "precio_unidad"] else "S/C"
+        df_display["unidad_medida"] = df_display["unidad_medida"].replace("S/C", "kg").fillna("kg")
+        df_display["cantidad_bruta"] = pd.to_numeric(df_display["cantidad_bruta"], errors="coerce").fillna(0.0)
+        df_display["merma"] = pd.to_numeric(df_display["merma"], errors="coerce").fillna(0.0)
+        df_display["precio_unidad"] = pd.to_numeric(df_display["precio_unidad"], errors="coerce").fillna(0.0)
+        df_display["cantidad_neta"] = df_display["cantidad_bruta"] * (1 - (df_display["merma"] / 100))
 
-        df_display = df_display[["codigo", "descripcion", "cantidad_bruta", "merma", "precio_unidad"]]
+        df_display = df_display[["codigo", "descripcion", "unidad_medida", "cantidad_bruta", "merma", "cantidad_neta", "precio_unidad"]]
 
         # Lanzamos el editor interactivo de la receta activa
         ingredientes_editados = st.data_editor(
@@ -821,18 +863,22 @@ if st.session_state['ingredientes']:
             column_config={
                 "codigo": st.column_config.TextColumn("Código", help="Código único del inventario", width="small"),
                 "descripcion": st.column_config.TextColumn("Ingrediente", help="Descripción del producto", width="large"),
-                "cantidad_bruta": st.column_config.NumberColumn("Cantidad Bruta (kg/l)", format="%.3f", min_value=0.0),
+                "unidad_medida": st.column_config.SelectboxColumn("Unidad", options=["kg", "l", "ud", "sobre", "botella", "lata", "paquete", "caja", "bandeja", "hoja"], width="small"),
+                "cantidad_bruta": st.column_config.NumberColumn("Cantidad Bruta", format="%.3f", min_value=0.0),
                 "merma": st.column_config.NumberColumn("% Merma", format="%.2f %%", min_value=0.0, max_value=100.0),
+                "cantidad_neta": st.column_config.NumberColumn("Cantidad Neta", format="%.3f", min_value=0.0),
                 "precio_unidad": st.column_config.NumberColumn("Precio Unidad (€)", format="%.2f €", min_value=0.0)
             },
+            disabled=["cantidad_neta"],
             key="editor_receta_activa"
         )
 
         # Casteo numérico robusto para que la suma de costes no falle nunca con floats
         for col in ["cantidad_bruta", "merma", "precio_unidad"]:
             ingredientes_editados[col] = pd.to_numeric(ingredientes_editados[col]).fillna(0.0)
+        ingredientes_editados["cantidad_neta"] = ingredientes_editados["cantidad_bruta"] * (1 - (ingredientes_editados["merma"] / 100))
 
-        ingredientes_lista = ingredientes_editados.to_dict(orient='records')
+        ingredientes_lista = ingredientes_editados.drop(columns=["cantidad_neta"], errors="ignore").to_dict(orient='records')
 
         # Sincronizar el estado al vuelo
         if ingredientes_lista != st.session_state['ingredientes']:
@@ -930,6 +976,7 @@ if st.session_state['ingredientes']:
                                 ingrediente_actualizado.update({
                                     "codigo": sugerencia["codigo"],
                                     "descripcion": sugerencia["descripcion"],
+                                    "unidad_medida": sugerencia["unidad_medida"],
                                     "merma": sugerencia["merma"],
                                     "precio_unidad": sugerencia["precio_unidad"]
                                 })
@@ -938,6 +985,77 @@ if st.session_state['ingredientes']:
                                 st.rerun()
                     else:
                         st.caption("Sin coincidencias claras. Puedes crearlo como nuevo con el botón superior.")
+
+        ingredientes_vinculados = [
+            (idx, ing, str(ing.get("codigo", "")).strip().upper())
+            for idx, ing in enumerate(st.session_state['ingredientes'])
+            if str(ing.get("codigo", "")).strip().upper() in inventario_dict
+        ]
+        if ingredientes_vinculados:
+            with st.expander("🧾 Fichas editables de BBDD vinculadas", expanded=False):
+                for idx, ing, codigo in ingredientes_vinculados:
+                    ficha_bd = inventario_dict[codigo]
+                    with st.form(f"ficha_inventario_{codigo}_{idx}"):
+                        st.markdown(f"**{codigo}** · {ficha_bd.get('descripcion', ing.get('descripcion', ''))}")
+                        f1, f2 = st.columns([2, 1])
+                        descripcion_ficha = f1.text_input(
+                            "Descripción BBDD",
+                            value=str(ficha_bd.get("descripcion", ing.get("descripcion", ""))),
+                            key=f"desc_ficha_{codigo}_{idx}"
+                        )
+                        familia_ficha = f2.text_input(
+                            "Familia",
+                            value=str(ficha_bd.get("familia", ing.get("familia", "VARIOS"))),
+                            key=f"familia_ficha_{codigo}_{idx}"
+                        )
+                        f3, f4, f5 = st.columns(3)
+                        unidad_ficha = f3.selectbox(
+                            "Unidad base",
+                            ["kg", "l", "ud", "sobre", "botella", "lata", "paquete", "caja", "bandeja", "hoja"],
+                            index=["kg", "l", "ud", "sobre", "botella", "lata", "paquete", "caja", "bandeja", "hoja"].index(str(ficha_bd.get("unidad_medida", "kg")).strip() or "kg") if str(ficha_bd.get("unidad_medida", "kg")).strip() in ["kg", "l", "ud", "sobre", "botella", "lata", "paquete", "caja", "bandeja", "hoja"] else 0,
+                            key=f"unidad_ficha_{codigo}_{idx}"
+                        )
+                        merma_ficha = f4.number_input(
+                            "% Merma BBDD",
+                            min_value=0.0,
+                            max_value=100.0,
+                            step=0.01,
+                            value=float(ficha_bd.get("merma", ing.get("merma", 0.0))),
+                            key=f"merma_ficha_{codigo}_{idx}"
+                        )
+                        precio_ficha = f5.number_input(
+                            "Precio Unidad (€)",
+                            min_value=0.0,
+                            step=0.01,
+                            value=float(ficha_bd.get("precio_unidad", ing.get("precio_unidad", 0.0))),
+                            key=f"precio_ficha_{codigo}_{idx}"
+                        )
+                        if st.form_submit_button("Guardar ficha y actualizar receta"):
+                            if not supabase_disponible:
+                                st.error("Supabase no está conectado correctamente.")
+                            else:
+                                datos_ficha = {
+                                    "codigo": codigo,
+                                    "familia": familia_ficha,
+                                    "descripcion": descripcion_ficha,
+                                    "unidad_medida": unidad_ficha,
+                                    "merma": float(merma_ficha),
+                                    "precio_unidad": float(precio_ficha)
+                                }
+                                try:
+                                    supabase.table("inventario").upsert(datos_ficha).execute()
+                                    st.session_state['ingredientes'][idx].update({
+                                        "descripcion": descripcion_ficha,
+                                        "unidad_medida": unidad_ficha,
+                                        "merma": float(merma_ficha),
+                                        "precio_unidad": float(precio_ficha)
+                                    })
+                                    st.session_state['db_trigger'] += 1
+                                    marcar_receta_modificada_manualmente()
+                                    st.success(f"Ficha {codigo} actualizada.")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Error al guardar la ficha en Supabase: {e}")
 
     with resumen_col:
         st.subheader(f"📊 Costes: {nombre_plato}")
