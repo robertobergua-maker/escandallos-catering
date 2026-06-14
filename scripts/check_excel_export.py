@@ -7,14 +7,14 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 
-def cargar_generar_excel():
+def cargar_funciones_excel():
     source = Path("generador_fichas.py").read_text(encoding="utf-8")
     module = ast.parse(source)
-    func_node = next(
+    func_nodes = [
         node for node in module.body
-        if isinstance(node, ast.FunctionDef) and node.name == "generar_excel"
-    )
-    compiled = compile(ast.Module(body=[func_node], type_ignores=[]), "generador_fichas.py", "exec")
+        if isinstance(node, ast.FunctionDef) and node.name in {"ajustar_ingredientes_por_raciones", "generar_excel"}
+    ]
+    compiled = compile(ast.Module(body=func_nodes, type_ignores=[]), "generador_fichas.py", "exec")
     namespace = {
         "openpyxl": openpyxl,
         "Font": Font,
@@ -22,23 +22,47 @@ def cargar_generar_excel():
         "PatternFill": PatternFill,
         "get_column_letter": get_column_letter,
         "io": io,
+        "pd": __import__("pandas"),
     }
     exec(compiled, namespace)
-    return namespace["generar_excel"]
+    return namespace["ajustar_ingredientes_por_raciones"], namespace["generar_excel"]
+
+
+def comprobar_ajuste_raciones(ajustar_ingredientes_por_raciones):
+    ingredientes = [
+        {"codigo": "ACE-01", "descripcion": "Aceite", "cantidad_bruta": 2.0, "merma": 5.0, "precio_unidad": 1.69},
+        {"codigo": "HAR-01", "descripcion": "Harina", "cantidad_bruta": 4.0, "merma": 10.0, "precio_unidad": 1.1128},
+    ]
+
+    duplicados = ajustar_ingredientes_por_raciones(ingredientes, 20 / 10)
+    reducidos = ajustar_ingredientes_por_raciones(ingredientes, 5 / 10)
+
+    assert duplicados[0]["cantidad_bruta"] == 4.0
+    assert duplicados[1]["cantidad_bruta"] == 8.0
+    assert reducidos[0]["cantidad_bruta"] == 1.0
+    assert reducidos[1]["cantidad_bruta"] == 2.0
+    assert duplicados[0]["precio_unidad"] == ingredientes[0]["precio_unidad"]
+    assert duplicados[1]["merma"] == ingredientes[1]["merma"]
+    assert duplicados[0]["codigo"] == ingredientes[0]["codigo"]
+    assert duplicados[1]["descripcion"] == ingredientes[1]["descripcion"]
 
 
 def main():
-    generar_excel = cargar_generar_excel()
+    ajustar_ingredientes_por_raciones, generar_excel = cargar_funciones_excel()
+    comprobar_ajuste_raciones(ajustar_ingredientes_por_raciones)
     ingredientes = [
         {"codigo": "ACE-01", "descripcion": "Aceite", "cantidad_bruta": 2.0, "merma": 0.0, "precio_unidad": 1.69},
         {"codigo": "HAR-01", "descripcion": "Harina", "cantidad_bruta": 3.0, "merma": 5.0, "precio_unidad": 1.1128},
         {"codigo": "HUE-01", "descripcion": "Huevos", "cantidad_bruta": 12.0, "merma": 0.0, "precio_unidad": 0.25},
     ]
-    workbook_bytes = generar_excel("Prueba", ingredientes, 10.0, 30.0, 10.0)
+    workbook_bytes = generar_excel("Prueba", ingredientes, 10.0, 30.0, 10.0, 10.0, 25.0, 2.5)
     wb = openpyxl.load_workbook(workbook_bytes, data_only=False)
     ws = wb["Ficha Técnica"]
 
     expected = {
+        "B2": 10.0,
+        "E2": 25.0,
+        "B3": 2.5,
         "E6": "=C6*(1-D6)",
         "G6": "=C6*F6",
         "E7": "=C7*(1-D7)",

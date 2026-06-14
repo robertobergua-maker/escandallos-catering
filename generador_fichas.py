@@ -34,6 +34,18 @@ if supabase_disponible:
 if 'ingredientes' not in st.session_state:
     st.session_state['ingredientes'] = []
 
+if 'raciones_base' not in st.session_state:
+    st.session_state['raciones_base'] = 1.0
+
+if 'raciones_deseadas' not in st.session_state:
+    st.session_state['raciones_deseadas'] = 1.0
+
+if 'factor_raciones' not in st.session_state:
+    st.session_state['factor_raciones'] = 1.0
+
+if 'ingredientes_originales_raciones' not in st.session_state:
+    st.session_state['ingredientes_originales_raciones'] = None
+
 # Trigger para invalidar caché de Supabase al editar el catálogo
 if 'db_trigger' not in st.session_state:
     st.session_state['db_trigger'] = 0
@@ -181,7 +193,30 @@ REQUISITO EXCLUSIVO DE RESPUESTA: Devuelve ÚNICAMENTE un array de formato JSON 
 # =============================================================================
 # 📊 GENERADOR DE EXCEL CON FÓRMULAS CONSOLIDADAS
 # =============================================================================
-def generar_excel(nombre_plato, ingredientes, costes_indirectos_pct, margen_beneficio_pct, iva_pct):
+def ajustar_ingredientes_por_raciones(ingredientes, factor):
+    """
+    Devuelve una copia de ingredientes ajustando solo la cantidad bruta.
+    """
+    ingredientes_ajustados = []
+    for ing in ingredientes:
+        ing_ajustado = dict(ing)
+        cantidad = pd.to_numeric(ing_ajustado.get('cantidad_bruta', 0.0), errors='coerce')
+        cantidad = 0.0 if pd.isna(cantidad) else float(cantidad)
+        ing_ajustado['cantidad_bruta'] = cantidad * factor
+        ingredientes_ajustados.append(ing_ajustado)
+    return ingredientes_ajustados
+
+
+def generar_excel(
+    nombre_plato,
+    ingredientes,
+    costes_indirectos_pct,
+    margen_beneficio_pct,
+    iva_pct,
+    raciones_base=1.0,
+    raciones_deseadas=1.0,
+    factor_raciones=1.0
+):
     wb = openpyxl.Workbook()
     wb.calculation.fullCalcOnLoad = True
     wb.calculation.forceFullCalc = True
@@ -197,6 +232,19 @@ def generar_excel(nombre_plato, ingredientes, costes_indirectos_pct, margen_bene
     titulo_cell.fill = PatternFill(start_color="1F497D", end_color="1F497D", fill_type="solid")
     titulo_cell.alignment = Alignment(horizontal='center', vertical='center')
     ws.row_dimensions[1].height = 40
+
+    # Datos de raciones usados para escalar la receta
+    ws['A2'] = "Raciones base:"
+    ws['B2'] = float(raciones_base)
+    ws['D2'] = "Raciones calculadas / deseadas:"
+    ws['E2'] = float(raciones_deseadas)
+    ws['A3'] = "Factor de ajuste:"
+    ws['B3'] = float(factor_raciones)
+    for cell_ref in ['A2', 'D2', 'A3']:
+        ws[cell_ref].font = Font(bold=True)
+    ws['B2'].number_format = '#,##0.00'
+    ws['E2'].number_format = '#,##0.00'
+    ws['B3'].number_format = '#,##0.0000'
 
     # Cabeceras alineadas con la nueva columna Código
     headers = ['Código', 'Ingrediente', 'Cantidad Bruta (kg/l)', '% Merma', 'Peso Neto Real (kg/l)', 'Precio Unidad (€)', 'Coste Total (€)']
@@ -318,6 +366,59 @@ with col3:
     margen_beneficio_pct = st.number_input("💰 Margen Beneficio (%)", min_value=0.0, max_value=99.9, value=30.0)
 with col4:
     iva_pct = st.number_input("📊 IVA Evento (%)", min_value=0.0, max_value=100.0, value=10.0, step=1.0)
+
+col_r1, col_r2, col_r3, col_r4 = st.columns([1, 1, 1, 1])
+with col_r1:
+    raciones_base = st.number_input(
+        "🍽️ Raciones base",
+        min_value=0.0,
+        value=float(st.session_state['raciones_base']),
+        step=1.0,
+        key="input_raciones_base"
+    )
+with col_r2:
+    raciones_deseadas = st.number_input(
+        "🎯 Raciones deseadas",
+        min_value=0.0,
+        value=float(st.session_state['raciones_deseadas']),
+        step=1.0,
+        key="input_raciones_deseadas"
+    )
+
+factor_raciones_preview = raciones_deseadas / raciones_base if raciones_base > 0 and raciones_deseadas > 0 else 0.0
+with col_r3:
+    st.markdown(f"**Factor de ajuste:** {factor_raciones_preview:.4f}")
+    if st.button("Ajustar escandallo a raciones"):
+        if raciones_base <= 0 or raciones_deseadas <= 0:
+            st.error("Las raciones base y deseadas deben ser mayores que 0.")
+        elif not st.session_state['ingredientes']:
+            st.warning("Añade ingredientes antes de ajustar el escandallo.")
+        else:
+            if st.session_state['ingredientes_originales_raciones'] is None:
+                st.session_state['ingredientes_originales_raciones'] = [dict(ing) for ing in st.session_state['ingredientes']]
+            ingredientes_base_ajuste = st.session_state['ingredientes_originales_raciones']
+            factor_raciones = raciones_deseadas / raciones_base
+            st.session_state['ingredientes'] = ajustar_ingredientes_por_raciones(
+                ingredientes_base_ajuste,
+                factor_raciones
+            )
+            st.session_state['raciones_base'] = float(raciones_base)
+            st.session_state['raciones_deseadas'] = float(raciones_deseadas)
+            st.session_state['factor_raciones'] = float(factor_raciones)
+            st.success(f"Escandallo ajustado con factor {factor_raciones:.4f}.")
+            st.rerun()
+with col_r4:
+    st.write("")
+    st.write("")
+    if st.button("Restablecer cantidades originales"):
+        if st.session_state['ingredientes_originales_raciones'] is not None:
+            st.session_state['ingredientes'] = [dict(ing) for ing in st.session_state['ingredientes_originales_raciones']]
+            st.session_state['ingredientes_originales_raciones'] = None
+            st.session_state['factor_raciones'] = 1.0
+            st.success("Cantidades originales restablecidas.")
+            st.rerun()
+        else:
+            st.info("No hay cantidades originales guardadas para restablecer.")
 
 st.divider()
 
@@ -563,7 +664,16 @@ if st.session_state['ingredientes']:
 
     st.divider()
     
-    excel_virtual = generar_excel(nombre_plato, st.session_state['ingredientes'], ci_val, mb_val, iva_val)
+    excel_virtual = generar_excel(
+        nombre_plato,
+        st.session_state['ingredientes'],
+        ci_val,
+        mb_val,
+        iva_val,
+        st.session_state['raciones_base'],
+        st.session_state['raciones_deseadas'],
+        st.session_state['factor_raciones']
+    )
     st.download_button(
         label=f"📥 DESCARGAR FICHA EXCEL",
         data=excel_virtual,
