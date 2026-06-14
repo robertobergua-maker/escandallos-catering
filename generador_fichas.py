@@ -6,6 +6,9 @@ from openpyxl.utils import get_column_letter
 import io
 import base64
 import json
+import re
+import unicodedata
+from difflib import SequenceMatcher
 from openai import OpenAI
 from supabase import create_client, Client
 
@@ -122,6 +125,74 @@ if not inventario_df.empty:
                 "merma": float(row.get("merma", 0.0)) if pd.notna(row.get("merma")) else 0.0,
                 "precio_unidad": float(row.get("precio_unidad", 0.0)) if pd.notna(row.get("precio_unidad")) else 0.0
             }
+
+
+def normalizar_texto_busqueda(texto):
+    texto = "" if texto is None else str(texto)
+    texto = unicodedata.normalize("NFKD", texto)
+    texto = "".join(ch for ch in texto if not unicodedata.combining(ch))
+    texto = re.sub(r"[^A-Za-z0-9 ]+", " ", texto.upper())
+    return re.sub(r"\s+", " ", texto).strip()
+
+
+def sugerir_ingredientes_similares(descripcion, inventario, limite=3, umbral=0.35):
+    objetivo = normalizar_texto_busqueda(descripcion)
+    if not objetivo or inventario.empty:
+        return []
+
+    sugerencias = []
+    for _, row in inventario.iterrows():
+        desc_bd = str(row.get("descripcion", ""))
+        desc_norm = normalizar_texto_busqueda(desc_bd)
+        if not desc_norm:
+            continue
+        score = SequenceMatcher(None, objetivo, desc_norm).ratio()
+        palabras_objetivo = set(objetivo.split())
+        palabras_bd = set(desc_norm.split())
+        if palabras_objetivo and palabras_bd:
+            score = max(score, len(palabras_objetivo & palabras_bd) / len(palabras_objetivo | palabras_bd))
+        if score >= umbral:
+            sugerencias.append({
+                "codigo": str(row.get("codigo", "")).strip().upper(),
+                "descripcion": desc_bd,
+                "merma": float(row.get("merma", 0.0)) if pd.notna(row.get("merma")) else 0.0,
+                "precio_unidad": float(row.get("precio_unidad", 0.0)) if pd.notna(row.get("precio_unidad")) else 0.0,
+                "score": score
+            })
+
+    return sorted(sugerencias, key=lambda item: item["score"], reverse=True)[:limite]
+
+
+def codigo_ingrediente_valido(codigo):
+    codigo = "" if codigo is None else str(codigo).strip().upper()
+    return codigo and codigo not in ["S/C", "SC", "SIN CODIGO", "SIN CÓDIGO"]
+
+
+def generar_codigo_ingrediente_nuevo(descripcion, existentes):
+    base = normalizar_texto_busqueda(descripcion)
+    prefijo = "".join(palabra[:3] for palabra in base.split()[:2])[:6] or "ING"
+    prefijo = re.sub(r"[^A-Z0-9]", "", prefijo) or "ING"
+    candidato = f"ING-{prefijo}"
+    contador = 1
+    while candidato in existentes:
+        contador += 1
+        candidato = f"ING-{prefijo}-{contador:02d}"
+    existentes.add(candidato)
+    return candidato
+
+
+def preparar_fila_inventario_desde_ingrediente(ingrediente, codigo=None):
+    codigo_final = codigo if codigo is not None else ingrediente.get("codigo", "")
+    merma = pd.to_numeric(ingrediente.get("merma", 0.0), errors="coerce")
+    precio = pd.to_numeric(ingrediente.get("precio_unidad", 0.0), errors="coerce")
+    return {
+        "codigo": str(codigo_final).strip().upper(),
+        "familia": ingrediente.get("familia", "VARIOS"),
+        "descripcion": str(ingrediente.get("descripcion", "")).strip() or "Ingrediente Nuevo",
+        "merma": 0.0 if pd.isna(merma) else float(merma),
+        "precio_unidad": 0.0 if pd.isna(precio) else float(precio)
+    }
+
 
 # =============================================================================
 # 🧠 PROCESAMIENTO INTELIGENTE CON OPENAI GPT-4o
@@ -769,11 +840,104 @@ if st.session_state['ingredientes']:
             marcar_receta_modificada_manualmente()
             st.rerun()
 
-        if st.button("Limpiar toda la receta"):
-            st.session_state['ingredientes'] = []
-            st.session_state['ingredientes_base_raciones'] = None
-            st.session_state['factor_raciones'] = 1.0
-            st.rerun()
+        ingredientes_no_encontrados = []
+        for idx, ing in enumerate(st.session_state['ingredientes']):
+            codigo_actual = str(ing.get("codigo", "")).strip().upper()
+            if not codigo_ingrediente_valido(codigo_actual) or codigo_actual not in inventario_dict:
+                sugerencias = sugerir_ingredientes_similares(ing.get("descripcion", ""), inventario_df)
+                ingredientes_no_encontrados.append((idx, ing, sugerencias))
+
+        acciones_db_col1, acciones_db_col2, acciones_db_col3 = st.columns([1, 1, 1])
+        with acciones_db_col1:
+            if st.button("Actualizar BBDD con códigos existentes", use_container_width=True):
+                if not supabase_disponible:
+                    st.error("Supabase no está conectado correctamente.")
+                else:
+                    filas_validas = [
+                        preparar_fila_inventario_desde_ingrediente(ing)
+                        for ing in st.session_state['ingredientes']
+                        if codigo_ingrediente_valido(ing.get("codigo")) and str(ing.get("codigo", "")).strip().upper() in inventario_dict
+                    ]
+                    if filas_validas:
+                        try:
+                            for fila in filas_validas:
+                                supabase.table("inventario").upsert(fila).execute()
+                            st.session_state['db_trigger'] += 1
+                            st.success(f"{len(filas_validas)} ingredientes actualizados en Supabase.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error al actualizar Supabase: {e}")
+                    else:
+                        st.info("No hay ingredientes con código existente para actualizar.")
+
+        with acciones_db_col2:
+            if st.button("Crear nuevos en BBDD", use_container_width=True):
+                if not supabase_disponible:
+                    st.error("Supabase no está conectado correctamente.")
+                else:
+                    existentes = set(inventario_dict.keys())
+                    ingredientes_actualizados = [dict(ing) for ing in st.session_state['ingredientes']]
+                    filas_nuevas = []
+                    for idx, ing in enumerate(ingredientes_actualizados):
+                        codigo_actual = str(ing.get("codigo", "")).strip().upper()
+                        if not codigo_ingrediente_valido(codigo_actual) or codigo_actual not in inventario_dict:
+                            nuevo_codigo = codigo_actual if codigo_ingrediente_valido(codigo_actual) else generar_codigo_ingrediente_nuevo(ing.get("descripcion", ""), existentes)
+                            existentes.add(nuevo_codigo)
+                            ing["codigo"] = nuevo_codigo
+                            filas_nuevas.append(preparar_fila_inventario_desde_ingrediente(ing, codigo=nuevo_codigo))
+                    if filas_nuevas:
+                        try:
+                            for fila in filas_nuevas:
+                                supabase.table("inventario").upsert(fila).execute()
+                            st.session_state['ingredientes'] = ingredientes_actualizados
+                            st.session_state['db_trigger'] += 1
+                            marcar_receta_modificada_manualmente()
+                            st.success(f"{len(filas_nuevas)} ingredientes nuevos creados en Supabase.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error al crear ingredientes en Supabase: {e}")
+                    else:
+                        st.info("No hay ingredientes nuevos pendientes de crear.")
+
+        with acciones_db_col3:
+            if st.button("Limpiar toda la receta", use_container_width=True):
+                st.session_state['ingredientes'] = []
+                st.session_state['ingredientes_base_raciones'] = None
+                st.session_state['factor_raciones'] = 1.0
+                st.rerun()
+
+        if ingredientes_no_encontrados:
+            with st.expander("🔎 Ingredientes no encontrados en BBDD y sugerencias", expanded=True):
+                for idx, ing, sugerencias in ingredientes_no_encontrados:
+                    st.markdown(f"**Fila {idx + 1}:** {ing.get('descripcion', 'Sin descripción')} · Código actual: `{ing.get('codigo', 'S/C')}`")
+                    if sugerencias:
+                        opciones = [s["codigo"] for s in sugerencias]
+                        etiquetas = {
+                            s["codigo"]: f"{s['codigo']} · {s['descripcion']} · {s['score']:.0%}"
+                            for s in sugerencias
+                        }
+                        sel_col, btn_col = st.columns([3, 1])
+                        seleccion = sel_col.selectbox(
+                            "Sugerencia parecida",
+                            opciones,
+                            format_func=lambda codigo: etiquetas.get(codigo, codigo),
+                            key=f"sugerencia_codigo_{idx}"
+                        )
+                        if btn_col.button("Usar", key=f"usar_sugerencia_{idx}", use_container_width=True):
+                            sugerencia = next((s for s in sugerencias if s["codigo"] == seleccion), None)
+                            if sugerencia:
+                                ingrediente_actualizado = dict(st.session_state['ingredientes'][idx])
+                                ingrediente_actualizado.update({
+                                    "codigo": sugerencia["codigo"],
+                                    "descripcion": sugerencia["descripcion"],
+                                    "merma": sugerencia["merma"],
+                                    "precio_unidad": sugerencia["precio_unidad"]
+                                })
+                                st.session_state['ingredientes'][idx] = ingrediente_actualizado
+                                marcar_receta_modificada_manualmente()
+                                st.rerun()
+                    else:
+                        st.caption("Sin coincidencias claras. Puedes crearlo como nuevo con el botón superior.")
 
     with resumen_col:
         st.subheader(f"📊 Costes: {nombre_plato}")
