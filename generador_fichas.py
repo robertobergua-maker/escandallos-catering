@@ -44,59 +44,40 @@ if 'db_trigger' not in st.session_state:
 @st.cache_data(ttl=600)
 def cargar_inventario_supabase(trigger):
     """
-    Trae todo el listado de ingredientes de Supabase de forma segura.
+    Trae el listado de ingredientes de Supabase de forma segura.
     Se invalida automáticamente al cambiar el 'trigger'.
-    Incluye normalización ultra-defensiva de columnas contra errores de formato (BOM, mayúsculas, etc).
     """
+    cols_deseadas = ["codigo", "familia", "descripcion", "merma", "precio_unidad"]
     if not supabase_disponible or supabase is None:
-        return pd.DataFrame(columns=["codigo", "familia", "descripcion", "merma", "precio_unidad"])
+        return pd.DataFrame(columns=cols_deseadas)
     try:
-        # Petición masiva a la tabla 'inventario'
-        respuesta = supabase.table("inventario").select("*").execute()
+        respuesta = (
+            supabase
+            .table("inventario")
+            .select("codigo,familia,descripcion,merma,precio_unidad")
+            .execute()
+        )
         df = pd.DataFrame(respuesta.data)
-        
-        if not df.empty:
-            # 1. Normalización de nombres de columnas (eliminar BOM, comillas, mayúsculas y espacios laterales)
-            df.columns = [
-                str(c).lower().strip().replace('\ufeff', '').replace('"', '').replace("'", "") 
-                for c in df.columns
-            ]
-            
-            # 2. Mapeo semántico de columnas por aproximación (por si se importaron con nombres parecidos)
-            mapeo = {}
-            for col in df.columns:
-                if 'cod' in col:
-                    mapeo[col] = 'codigo'
-                elif 'fam' in col:
-                    mapeo[col] = 'familia'
-                elif 'desc' in col or 'art' in col or 'nom' in col:
-                    mapeo[col] = 'descripcion'
-                elif 'merm' in col or 'rend' in col:
-                    mapeo[col] = 'merma'
-                elif 'prec' in col or 'cost' in col or 'val' in col:
-                    mapeo[col] = 'precio_unidad'
-            
-            df = df.rename(columns=mapeo)
-            
-            # 3. Garantizar que existan todas las columnas requeridas (si faltan, se crean vacías)
-            cols_deseadas = ["codigo", "familia", "descripcion", "merma", "precio_unidad"]
-            for col in cols_deseadas:
-                if col not in df.columns:
-                    df[col] = 0.0 if col in ["merma", "precio_unidad"] else ""
-            
-            # 4. Asegurar tipos numéricos correctos
-            df["merma"] = pd.to_numeric(df["merma"], errors='coerce').fillna(0.0)
-            df["precio_unidad"] = pd.to_numeric(df["precio_unidad"], errors='coerce').fillna(0.0)
-            
-            df = df[cols_deseadas]
-            # Ordenar alfabéticamente por descripción
-            df = df.sort_values(by="descripcion")
-        else:
-            df = pd.DataFrame(columns=["codigo", "familia", "descripcion", "merma", "precio_unidad"])
+
+        if df.empty:
+            return pd.DataFrame(columns=cols_deseadas)
+
+        df = df.loc[:, ~df.columns.duplicated()].copy()
+        for col in cols_deseadas:
+            if col not in df.columns:
+                df[col] = 0.0 if col in ["merma", "precio_unidad"] else ""
+
+        df = df[cols_deseadas].copy()
+        df["codigo"] = df["codigo"].fillna("").astype(str).str.strip().str.upper()
+        df["familia"] = df["familia"].fillna("").astype(str).str.strip()
+        df["descripcion"] = df["descripcion"].fillna("").astype(str).str.strip()
+        df["merma"] = pd.to_numeric(df["merma"], errors="coerce").fillna(0.0)
+        df["precio_unidad"] = pd.to_numeric(df["precio_unidad"], errors="coerce").fillna(0.0)
+        df = df.sort_values(by="descripcion")
         return df
     except Exception as e:
         st.error(f"Error al leer de Supabase: {e}")
-        return pd.DataFrame(columns=["codigo", "familia", "descripcion", "merma", "precio_unidad"])
+        return pd.DataFrame(columns=cols_deseadas)
 
 # Cargar inventario actual para autocompletado y contexto IA
 inventario_df = cargar_inventario_supabase(st.session_state['db_trigger'])
