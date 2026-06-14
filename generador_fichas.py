@@ -55,6 +55,12 @@ if 'input_raciones_deseadas' not in st.session_state:
 if 'sincronizar_inputs_raciones' not in st.session_state:
     st.session_state['sincronizar_inputs_raciones'] = False
 
+if 'raciones_base_aplicadas' not in st.session_state:
+    st.session_state['raciones_base_aplicadas'] = float(st.session_state['raciones_base'])
+
+if 'raciones_deseadas_aplicadas' not in st.session_state:
+    st.session_state['raciones_deseadas_aplicadas'] = float(st.session_state['raciones_deseadas'])
+
 # Trigger para invalidar caché de Supabase al editar el catálogo
 if 'db_trigger' not in st.session_state:
     st.session_state['db_trigger'] = 0
@@ -249,6 +255,8 @@ def sincronizar_inputs_raciones():
     if st.session_state.get('sincronizar_inputs_raciones', False):
         st.session_state['input_raciones_base'] = float(st.session_state['raciones_base'])
         st.session_state['input_raciones_deseadas'] = float(st.session_state['raciones_deseadas'])
+        st.session_state['raciones_base_aplicadas'] = float(st.session_state['raciones_base'])
+        st.session_state['raciones_deseadas_aplicadas'] = float(st.session_state['raciones_deseadas'])
         st.session_state['sincronizar_inputs_raciones'] = False
 
 # =============================================================================
@@ -275,6 +283,13 @@ def calcular_ajuste_raciones(ingredientes_base, raciones_base, raciones_deseadas
         raise ValueError("Las raciones base y deseadas deben ser mayores que 0.")
     factor = float(raciones_deseadas_num) / float(raciones_base_num)
     return factor, ajustar_ingredientes_por_raciones(ingredientes_base, factor)
+
+
+def raciones_han_cambiado(raciones_base, raciones_deseadas, raciones_base_aplicadas, raciones_deseadas_aplicadas):
+    return (
+        float(raciones_base) != float(raciones_base_aplicadas)
+        or float(raciones_deseadas) != float(raciones_deseadas_aplicadas)
+    )
 
 
 def generar_excel(
@@ -461,24 +476,7 @@ st.session_state['raciones_deseadas'] = float(raciones_deseadas)
 factor_raciones_preview = raciones_deseadas / raciones_base if raciones_base > 0 and raciones_deseadas > 0 else 0.0
 with col_r3:
     st.markdown(f"**Factor de ajuste:** {factor_raciones_preview:.4f}")
-    if st.button("Ajustar escandallo a raciones"):
-        if raciones_base <= 0 or raciones_deseadas <= 0:
-            st.error("Las raciones base y deseadas deben ser mayores que 0.")
-        elif not st.session_state['ingredientes']:
-            st.warning("Añade ingredientes antes de ajustar el escandallo.")
-        else:
-            if st.session_state['ingredientes_base_raciones'] is None:
-                st.session_state['ingredientes_base_raciones'] = [dict(ing) for ing in st.session_state['ingredientes']]
-            ingredientes_base_ajuste = st.session_state['ingredientes_base_raciones']
-            factor_raciones, ingredientes_ajustados = calcular_ajuste_raciones(
-                ingredientes_base_ajuste,
-                raciones_base,
-                raciones_deseadas
-            )
-            st.session_state['ingredientes'] = ingredientes_ajustados
-            st.session_state['factor_raciones'] = float(factor_raciones)
-            st.success(f"Escandallo ajustado con factor {factor_raciones:.4f}.")
-            st.rerun()
+    st.caption("Se aplica automáticamente a la receta activa.")
 with col_r4:
     st.write("")
     st.write("")
@@ -487,10 +485,41 @@ with col_r4:
             st.session_state['ingredientes'] = [dict(ing) for ing in st.session_state['ingredientes_base_raciones']]
             st.session_state['ingredientes_base_raciones'] = None
             st.session_state['factor_raciones'] = 1.0
+            st.session_state['raciones_base_aplicadas'] = float(raciones_base)
+            st.session_state['raciones_deseadas_aplicadas'] = float(raciones_base)
+            st.session_state['raciones_deseadas'] = float(raciones_base)
+            st.session_state['sincronizar_inputs_raciones'] = True
             st.success("Cantidades base restablecidas.")
             st.rerun()
         else:
             st.info("No hay cantidades base guardadas para restablecer.")
+
+if raciones_base <= 0 or raciones_deseadas <= 0:
+    st.error("Las raciones base y deseadas deben ser mayores que 0.")
+elif st.session_state['ingredientes']:
+    if raciones_han_cambiado(
+        raciones_base,
+        raciones_deseadas,
+        st.session_state['raciones_base_aplicadas'],
+        st.session_state['raciones_deseadas_aplicadas']
+    ):
+        if st.session_state['ingredientes_base_raciones'] is None:
+            st.session_state['ingredientes_base_raciones'] = [dict(ing) for ing in st.session_state['ingredientes']]
+
+        factor_raciones, ingredientes_ajustados = calcular_ajuste_raciones(
+            st.session_state['ingredientes_base_raciones'],
+            raciones_base,
+            raciones_deseadas
+        )
+        st.session_state['ingredientes'] = ingredientes_ajustados
+        st.session_state['factor_raciones'] = float(factor_raciones)
+        st.session_state['raciones_base_aplicadas'] = float(raciones_base)
+        st.session_state['raciones_deseadas_aplicadas'] = float(raciones_deseadas)
+        st.rerun()
+    else:
+        st.session_state['factor_raciones'] = float(factor_raciones_preview)
+else:
+    st.session_state['factor_raciones'] = float(factor_raciones_preview)
 
 st.divider()
 
