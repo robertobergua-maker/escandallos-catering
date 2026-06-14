@@ -77,14 +77,19 @@ def cargar_inventario_supabase(trigger):
     Trae el listado de ingredientes de Supabase de forma segura.
     Se invalida automáticamente al cambiar el 'trigger'.
     """
-    cols_deseadas = ["codigo", "familia", "descripcion", "unidad_medida", "merma", "precio_unidad"]
+    cols_deseadas = [
+        "codigo", "familia", "descripcion", "unidad_medida", "merma", "precio_unidad",
+        "proveedor_precio", "formato_compra", "cantidad_formato_compra",
+        "unidad_formato_compra", "precio_formato_compra", "fecha_precio",
+        "url_precio", "observaciones_precio"
+    ]
     if not supabase_disponible or supabase is None:
         return pd.DataFrame(columns=cols_deseadas)
     try:
         respuesta = (
             supabase
             .table("inventario")
-            .select("codigo,familia,descripcion,unidad_medida,merma,precio_unidad")
+            .select(",".join(cols_deseadas))
             .execute()
         )
         df = pd.DataFrame(respuesta.data)
@@ -95,7 +100,7 @@ def cargar_inventario_supabase(trigger):
         df = df.loc[:, ~df.columns.duplicated()].copy()
         for col in cols_deseadas:
             if col not in df.columns:
-                df[col] = 0.0 if col in ["merma", "precio_unidad"] else ""
+                df[col] = 0.0 if col in ["merma", "precio_unidad", "cantidad_formato_compra", "precio_formato_compra"] else ""
 
         df = df[cols_deseadas].copy()
         df["codigo"] = df["codigo"].fillna("").astype(str).str.strip().str.upper()
@@ -104,6 +109,8 @@ def cargar_inventario_supabase(trigger):
         df["unidad_medida"] = df["unidad_medida"].fillna("kg").astype(str).str.strip().replace("", "kg")
         df["merma"] = pd.to_numeric(df["merma"], errors="coerce").fillna(0.0)
         df["precio_unidad"] = pd.to_numeric(df["precio_unidad"], errors="coerce").fillna(0.0)
+        df["cantidad_formato_compra"] = pd.to_numeric(df["cantidad_formato_compra"], errors="coerce")
+        df["precio_formato_compra"] = pd.to_numeric(df["precio_formato_compra"], errors="coerce")
         df = df.sort_values(by="descripcion")
         return df
     except Exception as e:
@@ -125,7 +132,15 @@ if not inventario_df.empty:
                 "descripcion": row.get("descripcion", ""),
                 "unidad_medida": row.get("unidad_medida", "kg"),
                 "merma": float(row.get("merma", 0.0)) if pd.notna(row.get("merma")) else 0.0,
-                "precio_unidad": float(row.get("precio_unidad", 0.0)) if pd.notna(row.get("precio_unidad")) else 0.0
+                "precio_unidad": float(row.get("precio_unidad", 0.0)) if pd.notna(row.get("precio_unidad")) else 0.0,
+                "proveedor_precio": row.get("proveedor_precio", ""),
+                "formato_compra": row.get("formato_compra", ""),
+                "cantidad_formato_compra": row.get("cantidad_formato_compra", None),
+                "unidad_formato_compra": row.get("unidad_formato_compra", ""),
+                "precio_formato_compra": row.get("precio_formato_compra", None),
+                "fecha_precio": row.get("fecha_precio", ""),
+                "url_precio": row.get("url_precio", ""),
+                "observaciones_precio": row.get("observaciones_precio", "")
             }
 
 
@@ -139,7 +154,8 @@ def normalizar_texto_busqueda(texto):
 
 PALABRAS_NO_ALIMENTARIAS = {
     "PAPEL", "ENVOLVER", "ENVOLTORIO", "CAJA", "BOLSA", "BANDEJA", "SERVILLETA",
-    "VASO", "PLATO", "CUBIERTO", "GUANTE", "FILM", "ALUMINIO", "ETIQUETA"
+    "VASO", "PLATO", "CUBIERTO", "GUANTE", "FILM", "ALUMINIO", "ETIQUETA",
+    "PACKAGING", "CUCHARA", "TENEDOR", "CUCHILLO", "MOLDE", "BLONDA", "TAPA"
 }
 
 
@@ -153,15 +169,16 @@ def descripcion_generica_ingrediente(descripcion):
     palabras_descartables = {
         "FRESCO", "FRESCA", "CONGELADO", "CONGELADA", "ECO", "ECOLOGICO", "ECOLOGICA",
         "BIO", "MARCA", "BOLSA", "LATA", "CAJA", "BANDEJA", "PAQUETE", "GARRAFA",
-        "BOTELLA", "SACO", "MONODOSIS", "APROX", "SIN", "CON"
+        "BOTELLA", "SACO", "MONODOSIS", "APROX", "SIN", "CON", "NATURAL", "PACK", "UNIDAD",
+        "UD", "UDS", "GR", "G", "KG", "ML", "CL", "L"
     }
     palabras = [p for p in texto.split() if not p.isdigit() and p not in palabras_descartables]
     return " ".join(palabras[:4]) or texto
 
 
-def sugerir_ingredientes_similares(descripcion, inventario, limite=3, umbral=0.35):
+def sugerir_ingredientes_similares(descripcion, inventario, limite=8, umbral=0.30):
     objetivo = descripcion_generica_ingrediente(descripcion)
-    if not objetivo or inventario.empty:
+    if not objetivo or inventario.empty or parece_material_no_alimentario(objetivo):
         return []
 
     sugerencias = []
@@ -177,9 +194,13 @@ def sugerir_ingredientes_similares(descripcion, inventario, limite=3, umbral=0.3
         palabras_bd = set(desc_norm.split())
         if palabras_objetivo and palabras_bd:
             score = max(score, len(palabras_objetivo & palabras_bd) / len(palabras_objetivo | palabras_bd))
+            palabra_principal = objetivo.split()[0] if objetivo.split() else ""
+            if palabra_principal and palabra_principal in palabras_bd:
+                score += 0.35
         if score >= umbral:
             sugerencias.append({
                 "codigo": str(row.get("codigo", "")).strip().upper(),
+                "familia": str(row.get("familia", "")).strip(),
                 "descripcion": desc_bd,
                 "unidad_medida": str(row.get("unidad_medida", "kg")).strip() or "kg",
                 "merma": float(row.get("merma", 0.0)) if pd.notna(row.get("merma")) else 0.0,
@@ -193,6 +214,17 @@ def sugerir_ingredientes_similares(descripcion, inventario, limite=3, umbral=0.3
 def codigo_ingrediente_valido(codigo):
     codigo = "" if codigo is None else str(codigo).strip().upper()
     return codigo and codigo not in ["S/C", "SC", "SIN CODIGO", "SIN CÓDIGO"]
+
+
+def inferir_unidad_medida(descripcion):
+    texto = normalizar_texto_busqueda(descripcion)
+    if any(p in texto.split() for p in ["AGUA", "CALDO", "VINO", "ZUMO", "LECHE", "NATA", "ACEITE", "VINAGRE"]):
+        return "l"
+    if any(p in texto.split() for p in ["HUEVO", "HUEVOS"]):
+        return "ud"
+    if "SOBRE" in texto or "SOBRES" in texto:
+        return "sobre"
+    return "kg"
 
 
 def generar_codigo_ingrediente_nuevo(descripcion, existentes):
@@ -214,9 +246,9 @@ def preparar_fila_inventario_desde_ingrediente(ingrediente, codigo=None):
     precio = pd.to_numeric(ingrediente.get("precio_unidad", 0.0), errors="coerce")
     return {
         "codigo": str(codigo_final).strip().upper(),
-        "familia": ingrediente.get("familia", "VARIOS"),
+        "familia": ingrediente.get("familia", "SIN CLASIFICAR"),
         "descripcion": str(ingrediente.get("descripcion", "")).strip() or "Ingrediente Nuevo",
-        "unidad_medida": str(ingrediente.get("unidad_medida", "kg")).strip() or "kg",
+        "unidad_medida": str(ingrediente.get("unidad_medida", "")).strip() or inferir_unidad_medida(ingrediente.get("descripcion", "")),
         "merma": 0.0 if pd.isna(merma) else float(merma),
         "precio_unidad": 0.0 if pd.isna(precio) else float(precio)
     }
@@ -256,11 +288,13 @@ Dispones del catálogo completo de ingredientes reales de nuestra cocina en form
 
 INSTRUCCIONES CRÍTICAS:
 1. Compara semánticamente cada ingrediente detectado con el catálogo de referencia. Si encuentras una coincidencia clara (por ejemplo, "pollo" con "CUARTO POLLO ASADO" o "aceite oliva" con "ACEITE OLIVA"), asigna exactamente su "codigo" (parámetro "c") y usa su "descripcion", "merma" y "precio_unidad" correspondientes del catálogo.
-2. Trabaja con ingredientes genéricos de cocina: AGUA, TOMATE, PEPINO, PIMIENTO, HARINA, ACEITE, etc. Evita marcas, envases, materiales y textos de embalaje como papel, caja, bolsa o etiqueta salvo que sean realmente un producto alimentario.
+2. Trabaja con ingredientes genéricos de cocina: AGUA, TOMATE, PEPINO, PIMIENTO, CEBOLLA, AJO, ACEITE OLIVA, VINAGRE, SAL, PAN, HARINA, etc. Evita marcas, formatos comerciales y productos demasiado específicos salvo que el catálogo tenga una coincidencia clara.
 3. Si el ingrediente analizado NO existe en el catálogo, invéntale un código único y nuevo corto que comience por "ING-" seguido de 4 números lógicos, asigna una descripción genérica del ingrediente y sus precios o mermas correspondientes.
-4. Si el texto o la imagen presenta mermas implícitas (por ejemplo, Peso Bruto: 0.350, Peso Neto: 0.300), calcula la merma porcentual de forma precisa: ((bruto - neto)/bruto)*100.
-5. Si detectas raciones de receta en expresiones como "6 porciones", "6 raciones", "para 6 personas", "serves 6" o "6 servings", devuelve ese número como "raciones_base".
-6. Ignora títulos de columnas de cabecera de Excel, importes totales o subtotales de facturas.
+4. Devuelve ingredientes comestibles, no envases ni utensilios. Descarta explícitamente PAPEL, ENVOLVER, ENVOLTORIO, BANDEJA, CAJA, ETIQUETA, PACKAGING, SERVILLETA, PLATO, VASO, CUCHARA, TENEDOR, CUCHILLO y MOLDE.
+5. Si no conoces el precio, usa precio_unidad 0 y deja que la app lo vincule a BBDD.
+6. Si el texto o la imagen presenta mermas implícitas (por ejemplo, Peso Bruto: 0.350, Peso Neto: 0.300), calcula la merma porcentual de forma precisa: ((bruto - neto)/bruto)*100.
+7. Si detectas raciones de receta en expresiones como "6 porciones", "6 raciones", "para 6 personas", "serves 6" o "6 servings", devuelve ese número como "raciones_base".
+8. Ignora títulos de columnas de cabecera de Excel, importes totales o subtotales de facturas.
 
 REQUISITO EXCLUSIVO DE RESPUESTA: Devuelve ÚNICAMENTE JSON puro sin bloques de código markdown de tipo ```json y sin explicaciones adicionales.
 Si detectas raciones base, devuelve un objeto:
@@ -321,13 +355,29 @@ def normalizar_respuesta_ingredientes_ia(respuesta_ia):
     Acepta el formato antiguo (lista) y el nuevo objeto con raciones_base.
     """
     if isinstance(respuesta_ia, list):
-        return None, respuesta_ia
+        ingredientes = respuesta_ia
+        raciones_base = None
     if isinstance(respuesta_ia, dict):
         ingredientes = respuesta_ia.get("ingredientes", [])
         raciones_base = pd.to_numeric(respuesta_ia.get("raciones_base"), errors="coerce")
         raciones_base = None if pd.isna(raciones_base) or float(raciones_base) <= 0 else float(raciones_base)
-        return raciones_base, ingredientes if isinstance(ingredientes, list) else []
-    return None, []
+    elif not isinstance(respuesta_ia, list):
+        return None, []
+
+    ingredientes_limpios = []
+    for ing in ingredientes if isinstance(ingredientes, list) else []:
+        if not isinstance(ing, dict):
+            continue
+        descripcion = ing.get("descripcion", "")
+        if parece_material_no_alimentario(descripcion):
+            continue
+        ing_limpio = dict(ing)
+        ing_limpio["descripcion"] = descripcion_generica_ingrediente(descripcion) or str(descripcion).strip()
+        if not ing_limpio.get("unidad_medida"):
+            ing_limpio["unidad_medida"] = inferir_unidad_medida(ing_limpio["descripcion"])
+        ingredientes_limpios.append(ing_limpio)
+
+    return raciones_base, ingredientes_limpios
 
 
 def incorporar_ingredientes_ia(respuesta_ia):
@@ -433,7 +483,7 @@ def generar_excel(
     ws['B3'].number_format = '#,##0.0000'
 
     # Cabeceras alineadas con la nueva columna Código
-    headers = ['Código', 'Ingrediente', 'Unidad', 'Cantidad Bruta', '% Merma', 'Cantidad Neta', 'Precio Unidad (€)', 'Coste Total (€)']
+    headers = ['Código', 'Ingrediente', 'Cantidad Bruta', 'Unidad', '% Merma', 'Cantidad Neta', 'Precio Unidad (€)', 'Coste Total (€)']
     header_row = 5
     start_row = 6
     for col_num, header in enumerate(headers, 1):
@@ -453,8 +503,8 @@ def generar_excel(
         row = start_row + i
         ws.cell(row=row, column=col_idx['Código'], value=ing.get('codigo', 'S/C'))
         ws.cell(row=row, column=col_idx['Ingrediente'], value=ing.get('descripcion', ''))
-        ws.cell(row=row, column=col_idx['Unidad'], value=ing.get('unidad_medida', 'kg'))
         ws.cell(row=row, column=col_idx['Cantidad Bruta'], value=float(ing.get('cantidad_bruta', 0.0))).number_format = '#,##0.000'
+        ws.cell(row=row, column=col_idx['Unidad'], value=ing.get('unidad_medida', 'kg'))
         ws.cell(row=row, column=col_idx['% Merma'], value=float(ing.get('merma', 0.0))/100).number_format = '0.00%'
         ws.cell(
             row=row,
@@ -842,12 +892,18 @@ if st.session_state['ingredientes']:
         # Preparamos DataFrame de representación visual
         df_display = pd.DataFrame(st.session_state['ingredientes'])
 
-        # Garantizar que existan las 5 columnas estructurales
-        for col in ["codigo", "descripcion", "cantidad_bruta", "merma", "precio_unidad"]:
+        # Garantizar que existan las columnas estructurales
+        for col in ["codigo", "descripcion", "unidad_medida", "cantidad_bruta", "merma", "precio_unidad"]:
             if col not in df_display.columns:
                 df_display[col] = 0.0 if col in ["cantidad_bruta", "merma", "precio_unidad"] else "S/C"
+        df_display["unidad_medida"] = df_display["unidad_medida"].replace("S/C", "kg").fillna("kg")
+        df_display["cantidad_bruta"] = pd.to_numeric(df_display["cantidad_bruta"], errors="coerce").fillna(0.0)
+        df_display["merma"] = pd.to_numeric(df_display["merma"], errors="coerce").fillna(0.0)
+        df_display["precio_unidad"] = pd.to_numeric(df_display["precio_unidad"], errors="coerce").fillna(0.0)
+        df_display["cantidad_neta"] = df_display["cantidad_bruta"] * (1 - (df_display["merma"] / 100))
+        df_display["coste_total"] = df_display["cantidad_bruta"] * df_display["precio_unidad"]
 
-        df_display = df_display[["codigo", "descripcion", "cantidad_bruta", "merma", "precio_unidad"]]
+        df_display = df_display[["codigo", "descripcion", "cantidad_bruta", "unidad_medida", "merma", "cantidad_neta", "precio_unidad", "coste_total"]]
 
         # Lanzamos el editor interactivo de la receta activa
         ingredientes_editados = st.data_editor(
@@ -858,18 +914,24 @@ if st.session_state['ingredientes']:
             column_config={
                 "codigo": st.column_config.TextColumn("Código", help="Código único del inventario", width="small"),
                 "descripcion": st.column_config.TextColumn("Ingrediente", help="Descripción del producto", width="large"),
-                "cantidad_bruta": st.column_config.NumberColumn("Cantidad Bruta (kg/l)", format="%.3f", min_value=0.0),
+                "cantidad_bruta": st.column_config.NumberColumn("Cantidad Bruta", format="%.3f", min_value=0.0),
+                "unidad_medida": st.column_config.SelectboxColumn("Unidad", options=["kg", "l", "ud", "sobre", "botella", "lata", "paquete", "caja", "bandeja", "hoja"], width="small"),
                 "merma": st.column_config.NumberColumn("% Merma", format="%.2f %%", min_value=0.0, max_value=100.0),
-                "precio_unidad": st.column_config.NumberColumn("Precio Unidad (€)", format="%.2f €", min_value=0.0)
+                "cantidad_neta": st.column_config.NumberColumn("Cantidad Neta", format="%.3f", min_value=0.0),
+                "precio_unidad": st.column_config.NumberColumn("Precio Unidad (€)", format="%.2f €", min_value=0.0),
+                "coste_total": st.column_config.NumberColumn("Coste Total (€)", format="%.2f €", min_value=0.0)
             },
+            disabled=["cantidad_neta", "coste_total"],
             key="editor_receta_activa"
         )
 
         # Casteo numérico robusto para que la suma de costes no falle nunca con floats
         for col in ["cantidad_bruta", "merma", "precio_unidad"]:
             ingredientes_editados[col] = pd.to_numeric(ingredientes_editados[col]).fillna(0.0)
+        ingredientes_editados["cantidad_neta"] = ingredientes_editados["cantidad_bruta"] * (1 - (ingredientes_editados["merma"] / 100))
+        ingredientes_editados["coste_total"] = ingredientes_editados["cantidad_bruta"] * ingredientes_editados["precio_unidad"]
 
-        ingredientes_lista = ingredientes_editados.to_dict(orient='records')
+        ingredientes_lista = ingredientes_editados.drop(columns=["cantidad_neta", "coste_total"], errors="ignore").to_dict(orient='records')
 
         # Sincronizar el estado al vuelo
         if ingredientes_lista != st.session_state['ingredientes']:
@@ -950,7 +1012,7 @@ if st.session_state['ingredientes']:
                     if sugerencias:
                         opciones = [s["codigo"] for s in sugerencias]
                         etiquetas = {
-                            s["codigo"]: f"{s['codigo']} · {s['descripcion']} · {s['score']:.0%}"
+                            s["codigo"]: f"{s['codigo']} · {s['descripcion']} · {s.get('familia', '')} · {s.get('unidad_medida', 'kg')} · {s.get('precio_unidad', 0):.2f} € · {s['score']:.0%}"
                             for s in sugerencias
                         }
                         sel_col, btn_col = st.columns([3, 1])
@@ -966,7 +1028,9 @@ if st.session_state['ingredientes']:
                                 ingrediente_actualizado = dict(st.session_state['ingredientes'][idx])
                                 ingrediente_actualizado.update({
                                     "codigo": sugerencia["codigo"],
+                                    "familia": sugerencia.get("familia", "SIN CLASIFICAR"),
                                     "descripcion": sugerencia["descripcion"],
+                                    "unidad_medida": sugerencia.get("unidad_medida", "kg"),
                                     "merma": sugerencia["merma"],
                                     "precio_unidad": sugerencia["precio_unidad"]
                                 })
@@ -975,6 +1039,93 @@ if st.session_state['ingredientes']:
                                 st.rerun()
                     else:
                         st.caption("Sin coincidencias claras. Puedes crearlo como nuevo con el botón superior.")
+
+        ingredientes_vinculados = [
+            (idx, ing, str(ing.get("codigo", "")).strip().upper())
+            for idx, ing in enumerate(st.session_state['ingredientes'])
+            if str(ing.get("codigo", "")).strip().upper() in inventario_dict
+        ]
+        if ingredientes_vinculados:
+            st.markdown("#### 🧾 Ficha editable del ingrediente seleccionado")
+            opciones_ficha = [f"{idx}|{codigo}" for idx, _, codigo in ingredientes_vinculados]
+            etiquetas_ficha = {
+                f"{idx}|{codigo}": f"{idx + 1}. {codigo} · {inventario_dict[codigo].get('descripcion', '')}"
+                for idx, _, codigo in ingredientes_vinculados
+            }
+            seleccion_ficha = st.selectbox(
+                "Ingrediente vinculado a BBDD",
+                opciones_ficha,
+                format_func=lambda opcion: etiquetas_ficha.get(opcion, opcion),
+                key="selector_ficha_ingrediente_activo"
+            )
+            idx_ficha = int(seleccion_ficha.split("|", 1)[0])
+            codigo_ficha = seleccion_ficha.split("|", 1)[1]
+            ficha_bd = inventario_dict[codigo_ficha]
+
+            with st.form(f"ficha_inventario_seleccionada_{codigo_ficha}_{idx_ficha}"):
+                st.caption(f"Código: {codigo_ficha}")
+                f1, f2 = st.columns([2, 1])
+                descripcion_ficha = f1.text_input("Descripción", value=str(ficha_bd.get("descripcion", "")))
+                familia_ficha = f2.text_input("Familia", value=str(ficha_bd.get("familia", "SIN CLASIFICAR")))
+                unidades_validas = ["kg", "l", "ud", "sobre", "botella", "lata", "paquete", "caja", "bandeja", "hoja"]
+                unidad_actual = str(ficha_bd.get("unidad_medida", "kg")).strip() or "kg"
+                f3, f4, f5 = st.columns(3)
+                unidad_ficha = f3.selectbox(
+                    "Unidad base",
+                    unidades_validas,
+                    index=unidades_validas.index(unidad_actual) if unidad_actual in unidades_validas else 0
+                )
+                merma_ficha = f4.number_input(
+                    "% Merma",
+                    min_value=0.0,
+                    max_value=100.0,
+                    step=0.01,
+                    value=float(ficha_bd.get("merma", 0.0))
+                )
+                precio_ficha = f5.number_input(
+                    "Precio Unidad (€)",
+                    min_value=0.0,
+                    step=0.01,
+                    value=float(ficha_bd.get("precio_unidad", 0.0))
+                )
+
+                t1, t2, t3 = st.columns(3)
+                t1.text_input("Proveedor precio", value=str(ficha_bd.get("proveedor_precio", "")), disabled=True)
+                t2.text_input("Formato compra", value=str(ficha_bd.get("formato_compra", "")), disabled=True)
+                t3.text_input("Fecha precio", value=str(ficha_bd.get("fecha_precio", "")), disabled=True)
+                t4, t5, t6 = st.columns(3)
+                t4.text_input("Cantidad formato", value="" if pd.isna(ficha_bd.get("cantidad_formato_compra", None)) else str(ficha_bd.get("cantidad_formato_compra", "")), disabled=True)
+                t5.text_input("Unidad formato", value=str(ficha_bd.get("unidad_formato_compra", "")), disabled=True)
+                t6.text_input("Precio formato", value="" if pd.isna(ficha_bd.get("precio_formato_compra", None)) else str(ficha_bd.get("precio_formato_compra", "")), disabled=True)
+                st.text_input("URL precio", value=str(ficha_bd.get("url_precio", "")), disabled=True)
+                st.text_area("Observaciones precio", value=str(ficha_bd.get("observaciones_precio", "")), disabled=True, height=80)
+
+                if st.form_submit_button("Guardar cambios en BBDD"):
+                    if not supabase_disponible:
+                        st.error("Supabase no está conectado correctamente.")
+                    else:
+                        datos_ficha = {
+                            "codigo": codigo_ficha,
+                            "familia": familia_ficha,
+                            "descripcion": descripcion_ficha,
+                            "unidad_medida": unidad_ficha,
+                            "merma": float(merma_ficha),
+                            "precio_unidad": float(precio_ficha)
+                        }
+                        try:
+                            supabase.table("inventario").upsert(datos_ficha).execute()
+                            st.session_state['ingredientes'][idx_ficha].update({
+                                "descripcion": descripcion_ficha,
+                                "unidad_medida": unidad_ficha,
+                                "merma": float(merma_ficha),
+                                "precio_unidad": float(precio_ficha)
+                            })
+                            st.session_state['db_trigger'] += 1
+                            marcar_receta_modificada_manualmente()
+                            st.success(f"Ficha {codigo_ficha} actualizada.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error al guardar la ficha en Supabase: {e}")
 
     with resumen_col:
         st.subheader(f"📊 Costes: {nombre_plato}")

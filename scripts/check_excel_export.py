@@ -1,8 +1,12 @@
 import ast
 import io
+import re
+import unicodedata
+from difflib import SequenceMatcher
 from pathlib import Path
 
 import openpyxl
+import pandas as pd
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
@@ -10,16 +14,26 @@ from openpyxl.utils import get_column_letter
 def cargar_funciones_excel():
     source = Path("generador_fichas.py").read_text(encoding="utf-8")
     module = ast.parse(source)
-    func_nodes = [
+    needed_assigns = {"PALABRAS_NO_ALIMENTARIAS"}
+    nodes = [
         node for node in module.body
-        if isinstance(node, ast.FunctionDef) and node.name in {
+        if (
+            isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id in needed_assigns for target in node.targets)
+        )
+        or isinstance(node, ast.FunctionDef) and node.name in {
+            "normalizar_texto_busqueda",
+            "parece_material_no_alimentario",
+            "descripcion_generica_ingrediente",
+            "sugerir_ingredientes_similares",
+            "inferir_unidad_medida",
             "ajustar_ingredientes_por_raciones",
             "calcular_ajuste_raciones",
             "normalizar_respuesta_ingredientes_ia",
             "generar_excel",
         }
     ]
-    compiled = compile(ast.Module(body=func_nodes, type_ignores=[]), "generador_fichas.py", "exec")
+    compiled = compile(ast.Module(body=nodes, type_ignores=[]), "generador_fichas.py", "exec")
     namespace = {
         "openpyxl": openpyxl,
         "Font": Font,
@@ -27,13 +41,18 @@ def cargar_funciones_excel():
         "PatternFill": PatternFill,
         "get_column_letter": get_column_letter,
         "io": io,
-        "pd": __import__("pandas"),
+        "pd": pd,
+        "re": re,
+        "unicodedata": unicodedata,
+        "SequenceMatcher": SequenceMatcher,
     }
     exec(compiled, namespace)
     return (
         namespace["ajustar_ingredientes_por_raciones"],
         namespace["calcular_ajuste_raciones"],
         namespace["normalizar_respuesta_ingredientes_ia"],
+        namespace["parece_material_no_alimentario"],
+        namespace["sugerir_ingredientes_similares"],
         namespace["generar_excel"],
     )
 
@@ -71,14 +90,38 @@ def comprobar_normalizacion_ia(normalizar_respuesta_ingredientes_ia):
     ingrediente = {"codigo": "ING-0001", "descripcion": "TOMATE PERA", "cantidad_bruta": 1.0, "merma": 0, "precio_unidad": 2.5}
     raciones, ingredientes = normalizar_respuesta_ingredientes_ia([ingrediente])
     assert raciones is None
-    assert ingredientes == [ingrediente]
+    assert ingredientes[0]["descripcion"] == "TOMATE PERA"
+    assert ingredientes[0]["unidad_medida"] == "kg"
 
     raciones, ingredientes = normalizar_respuesta_ingredientes_ia({
         "raciones_base": 6,
         "ingredientes": [ingrediente],
     })
     assert raciones == 6.0
-    assert ingredientes == [ingrediente]
+    assert ingredientes[0]["descripcion"] == "TOMATE PERA"
+    assert ingredientes[0]["unidad_medida"] == "kg"
+
+    raciones, ingredientes = normalizar_respuesta_ingredientes_ia([
+        {"codigo": "X", "descripcion": "PAPEL ENVOLVER polvorones", "cantidad_bruta": 1}
+    ])
+    assert raciones is None
+    assert ingredientes == []
+
+
+def comprobar_sugerencias(parece_material_no_alimentario, sugerir_ingredientes_similares):
+    assert parece_material_no_alimentario("PAPEL ENVOLVER polvorones")
+    inventario = pd.DataFrame([
+        {"codigo": "TOM-01", "familia": "VERDURAS", "descripcion": "TOMATE PERA", "unidad_medida": "kg", "merma": 0, "precio_unidad": 2.5},
+        {"codigo": "TOM-02", "familia": "VERDURAS", "descripcion": "TOMATE CHERRY", "unidad_medida": "kg", "merma": 0, "precio_unidad": 3.2},
+        {"codigo": "PEP-01", "familia": "VERDURAS", "descripcion": "PEPINO", "unidad_medida": "kg", "merma": 0, "precio_unidad": 1.8},
+        {"codigo": "MAT-01", "familia": "MATERIAL", "descripcion": "PAPEL ENVOLVER POLVORONES", "unidad_medida": "ud", "merma": 0, "precio_unidad": 0.1},
+    ])
+    sugerencias_tomate = sugerir_ingredientes_similares("tomate pera", inventario)
+    sugerencias_pepino = sugerir_ingredientes_similares("pepino", inventario)
+    assert len(sugerencias_tomate) >= 2
+    assert any("TOMATE" in s["descripcion"] for s in sugerencias_tomate)
+    assert any("PEPINO" in s["descripcion"] for s in sugerencias_pepino)
+    assert not sugerir_ingredientes_similares("tomate", inventario)[0]["descripcion"].startswith("PAPEL")
 
 
 def main():
@@ -86,10 +129,13 @@ def main():
         ajustar_ingredientes_por_raciones,
         calcular_ajuste_raciones,
         normalizar_respuesta_ingredientes_ia,
+        parece_material_no_alimentario,
+        sugerir_ingredientes_similares,
         generar_excel,
     ) = cargar_funciones_excel()
     comprobar_ajuste_raciones(ajustar_ingredientes_por_raciones, calcular_ajuste_raciones)
     comprobar_normalizacion_ia(normalizar_respuesta_ingredientes_ia)
+    comprobar_sugerencias(parece_material_no_alimentario, sugerir_ingredientes_similares)
     ingredientes = [
         {"codigo": "ACE-01", "descripcion": "Aceite", "cantidad_bruta": 2.0, "merma": 0.0, "precio_unidad": 1.69},
         {"codigo": "HAR-01", "descripcion": "Harina", "cantidad_bruta": 3.0, "merma": 5.0, "precio_unidad": 1.1128},
@@ -103,17 +149,17 @@ def main():
         "B2": 10.0,
         "E2": 25.0,
         "B3": 2.5,
-        "E6": "=C6*(1-D6)",
-        "G6": "=C6*F6",
-        "E7": "=C7*(1-D7)",
-        "G7": "=C7*F7",
-        "G10": "=SUM(G6:G8)",
-        "G11": "=G10*(10.0/100)",
-        "G12": "=G10+G11",
-        "G15": "=G12/(1-(30.0/100))",
-        "G16": "=G15*(10.0/100)",
-        "G17": "=G15+G16",
-        "G18": "=IF($E$2>0,G17/$E$2,0)",
+        "F6": "=C6*(1-E6)",
+        "H6": "=C6*G6",
+        "F7": "=C7*(1-E7)",
+        "H7": "=C7*G7",
+        "H10": "=SUM(H6:H8)",
+        "H11": "=H10*(10.0/100)",
+        "H12": "=H10+H11",
+        "H15": "=H12/(1-(30.0/100))",
+        "H16": "=H15*(10.0/100)",
+        "H17": "=H15+H16",
+        "H18": "=IF($E$2>0,H17/$E$2,0)",
     }
     for cell, formula in expected.items():
         value = ws[cell].value
