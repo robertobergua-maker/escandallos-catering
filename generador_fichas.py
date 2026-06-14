@@ -46,6 +46,15 @@ if 'factor_raciones' not in st.session_state:
 if 'ingredientes_base_raciones' not in st.session_state:
     st.session_state['ingredientes_base_raciones'] = st.session_state.get('ingredientes_originales_raciones', None)
 
+if 'input_raciones_base' not in st.session_state:
+    st.session_state['input_raciones_base'] = float(st.session_state['raciones_base'])
+
+if 'input_raciones_deseadas' not in st.session_state:
+    st.session_state['input_raciones_deseadas'] = float(st.session_state['raciones_deseadas'])
+
+if 'sincronizar_inputs_raciones' not in st.session_state:
+    st.session_state['sincronizar_inputs_raciones'] = False
+
 # Trigger para invalidar caché de Supabase al editar el catálogo
 if 'db_trigger' not in st.session_state:
     st.session_state['db_trigger'] = 0
@@ -226,6 +235,7 @@ def incorporar_ingredientes_ia(respuesta_ia):
     if raciones_base_detectadas is not None:
         st.session_state['raciones_base'] = raciones_base_detectadas
         st.session_state['raciones_deseadas'] = raciones_base_detectadas
+        st.session_state['sincronizar_inputs_raciones'] = True
 
     return True
 
@@ -233,6 +243,13 @@ def incorporar_ingredientes_ia(respuesta_ia):
 def marcar_receta_modificada_manualmente():
     st.session_state['ingredientes_base_raciones'] = None
     st.session_state['factor_raciones'] = 1.0
+
+
+def sincronizar_inputs_raciones():
+    if st.session_state.get('sincronizar_inputs_raciones', False):
+        st.session_state['input_raciones_base'] = float(st.session_state['raciones_base'])
+        st.session_state['input_raciones_deseadas'] = float(st.session_state['raciones_deseadas'])
+        st.session_state['sincronizar_inputs_raciones'] = False
 
 # =============================================================================
 # 📊 GENERADOR DE EXCEL CON FÓRMULAS CONSOLIDADAS
@@ -420,21 +437,26 @@ with col3:
 with col4:
     iva_pct = st.number_input("📊 IVA Evento (%)", min_value=0.0, max_value=100.0, value=10.0, step=1.0)
 
+sincronizar_inputs_raciones()
+
 col_r1, col_r2, col_r3, col_r4 = st.columns([1, 1, 1, 1])
 with col_r1:
     raciones_base = st.number_input(
         "🍽️ Raciones base",
         min_value=0.0,
         step=1.0,
-        key="raciones_base"
+        key="input_raciones_base"
     )
 with col_r2:
     raciones_deseadas = st.number_input(
         "🎯 Raciones deseadas",
         min_value=0.0,
         step=1.0,
-        key="raciones_deseadas"
+        key="input_raciones_deseadas"
     )
+
+st.session_state['raciones_base'] = float(raciones_base)
+st.session_state['raciones_deseadas'] = float(raciones_deseadas)
 
 factor_raciones_preview = raciones_deseadas / raciones_base if raciones_base > 0 and raciones_deseadas > 0 else 0.0
 with col_r3:
