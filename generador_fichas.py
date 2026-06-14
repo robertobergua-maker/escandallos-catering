@@ -254,6 +254,159 @@ def preparar_fila_inventario_desde_ingrediente(ingrediente, codigo=None):
     }
 
 
+RECETAS_COLUMNAS = [
+    "id", "user_id", "codigo_receta", "nombre", "categoria", "tipo_plato",
+    "raciones_base", "unidad_servicio", "descripcion", "elaboracion",
+    "observaciones", "costes_indirectos_pct", "margen_beneficio_pct",
+    "iva_pct", "coste_total", "precio_venta_sin_iva",
+    "precio_venta_con_iva", "activa", "created_at", "updated_at"
+]
+
+RECETA_INGREDIENTES_COLUMNAS = [
+    "id", "receta_id", "codigo_ingrediente", "descripcion_ingrediente",
+    "cantidad_bruta", "unidad_medida", "merma", "cantidad_neta",
+    "precio_unidad", "coste_total", "orden", "es_temporal",
+    "created_at", "updated_at"
+]
+
+
+def numero_seguro(valor, defecto=0.0):
+    numero = pd.to_numeric(valor, errors="coerce")
+    return float(defecto) if pd.isna(numero) else float(numero)
+
+
+def generar_codigo_receta():
+    """
+    Genera el siguiente codigo REC-0001, REC-0002... leyendo public.recetas.
+    Si Supabase no esta disponible, devuelve un codigo inicial seguro.
+    """
+    if not supabase_disponible or supabase is None:
+        return "REC-0001"
+
+    try:
+        respuesta = (
+            supabase
+            .table("recetas")
+            .select("codigo_receta")
+            .execute()
+        )
+        codigos_existentes = {
+            str(fila.get("codigo_receta", "")).strip().upper()
+            for fila in (respuesta.data or [])
+            if fila.get("codigo_receta")
+        }
+        ultimo_numero = 0
+        for codigo in codigos_existentes:
+            coincidencia = re.fullmatch(r"REC-(\d+)", codigo)
+            if coincidencia:
+                ultimo_numero = max(ultimo_numero, int(coincidencia.group(1)))
+
+        siguiente = ultimo_numero + 1
+        candidato = f"REC-{siguiente:04d}"
+        while candidato in codigos_existentes:
+            siguiente += 1
+            candidato = f"REC-{siguiente:04d}"
+        return candidato
+    except Exception:
+        return "REC-0001"
+
+
+def calcular_datos_ingrediente_receta(ing, orden=0):
+    """
+    Convierte un ingrediente de la app al formato de public.receta_ingredientes.
+    """
+    codigo = str(ing.get("codigo", "")).strip().upper()
+    cantidad_bruta = numero_seguro(ing.get("cantidad_bruta", 0.0))
+    merma = numero_seguro(ing.get("merma", 0.0))
+    precio_unidad = numero_seguro(ing.get("precio_unidad", 0.0))
+    cantidad_neta = cantidad_bruta * (1 - merma / 100)
+    coste_total = cantidad_bruta * precio_unidad
+    es_temporal = not codigo_ingrediente_valido(codigo)
+
+    return {
+        "codigo_ingrediente": None if es_temporal else codigo,
+        "descripcion_ingrediente": str(
+            ing.get("descripcion_ingrediente", ing.get("descripcion", ""))
+        ).strip(),
+        "cantidad_bruta": cantidad_bruta,
+        "unidad_medida": str(ing.get("unidad_medida", "kg")).strip() or "kg",
+        "merma": merma,
+        "cantidad_neta": cantidad_neta,
+        "precio_unidad": precio_unidad,
+        "coste_total": coste_total,
+        "orden": int(numero_seguro(orden, 0)),
+        "es_temporal": es_temporal
+    }
+
+
+@st.cache_data(ttl=600)
+def cargar_recetas_supabase():
+    """
+    Lee public.recetas y devuelve un DataFrame seguro.
+    """
+    if not supabase_disponible or supabase is None:
+        return pd.DataFrame(columns=RECETAS_COLUMNAS)
+
+    try:
+        respuesta = (
+            supabase
+            .table("recetas")
+            .select(",".join(RECETAS_COLUMNAS))
+            .order("created_at", desc=True)
+            .execute()
+        )
+        df = pd.DataFrame(respuesta.data or [])
+        if df.empty:
+            return pd.DataFrame(columns=RECETAS_COLUMNAS)
+
+        for col in RECETAS_COLUMNAS:
+            if col not in df.columns:
+                df[col] = None
+        return df[RECETAS_COLUMNAS].copy()
+    except Exception:
+        return pd.DataFrame(columns=RECETAS_COLUMNAS)
+
+
+def cargar_receta_detalle_supabase(receta_id):
+    """
+    Lee cabecera de public.recetas e ingredientes de public.receta_ingredientes.
+    Devuelve una tupla: (cabecera_dict, ingredientes_df).
+    """
+    ingredientes_vacios = pd.DataFrame(columns=RECETA_INGREDIENTES_COLUMNAS)
+    if not receta_id or not supabase_disponible or supabase is None:
+        return {}, ingredientes_vacios
+
+    try:
+        respuesta_receta = (
+            supabase
+            .table("recetas")
+            .select(",".join(RECETAS_COLUMNAS))
+            .eq("id", receta_id)
+            .limit(1)
+            .execute()
+        )
+        cabecera = (respuesta_receta.data or [{}])[0] if respuesta_receta.data else {}
+
+        respuesta_ingredientes = (
+            supabase
+            .table("receta_ingredientes")
+            .select(",".join(RECETA_INGREDIENTES_COLUMNAS))
+            .eq("receta_id", receta_id)
+            .order("orden")
+            .execute()
+        )
+        ingredientes_df = pd.DataFrame(respuesta_ingredientes.data or [])
+        if ingredientes_df.empty:
+            return cabecera, ingredientes_vacios
+
+        for col in RECETA_INGREDIENTES_COLUMNAS:
+            if col not in ingredientes_df.columns:
+                ingredientes_df[col] = None
+        return cabecera, ingredientes_df[RECETA_INGREDIENTES_COLUMNAS].copy()
+    except Exception:
+        return {}, ingredientes_vacios
+
+
 # =============================================================================
 # 🧠 PROCESAMIENTO INTELIGENTE CON OPENAI GPT-4o
 # =============================================================================
