@@ -68,6 +68,18 @@ if 'raciones_deseadas_aplicadas' not in st.session_state:
 if 'db_trigger' not in st.session_state:
     st.session_state['db_trigger'] = 0
 
+if 'nombre_plato' not in st.session_state:
+    st.session_state['nombre_plato'] = "Mi Receta"
+
+if 'receta_categoria' not in st.session_state:
+    st.session_state['receta_categoria'] = ""
+
+if 'receta_tipo_plato' not in st.session_state:
+    st.session_state['receta_tipo_plato'] = ""
+
+if 'receta_observaciones' not in st.session_state:
+    st.session_state['receta_observaciones'] = ""
+
 # =============================================================================
 # 📥 FUNCIÓN CACHÉ PARA CARGAR INVENTARIO DESDE SUPABASE
 # =============================================================================
@@ -450,6 +462,27 @@ def guardar_receta_nueva_supabase(datos_receta, ingredientes):
         return False, f"Error al guardar la receta en Supabase: {e}", None
 
 
+def preparar_ingredientes_receta_para_sesion(ingredientes_df):
+    """
+    Adapta public.receta_ingredientes al formato interno de st.session_state.
+    """
+    if ingredientes_df is None or ingredientes_df.empty:
+        return []
+
+    ingredientes = []
+    for _, fila in ingredientes_df.iterrows():
+        codigo = str(fila.get("codigo_ingrediente", "") or "").strip().upper()
+        ingredientes.append({
+            "codigo": codigo if codigo else "S/C",
+            "descripcion": str(fila.get("descripcion_ingrediente", "") or "").strip(),
+            "cantidad_bruta": numero_seguro(fila.get("cantidad_bruta", 0.0)),
+            "unidad_medida": str(fila.get("unidad_medida", "kg") or "kg").strip() or "kg",
+            "merma": numero_seguro(fila.get("merma", 0.0)),
+            "precio_unidad": numero_seguro(fila.get("precio_unidad", 0.0))
+        })
+    return ingredientes
+
+
 # =============================================================================
 # 🧠 PROCESAMIENTO INTELIGENTE CON OPENAI GPT-4o
 # =============================================================================
@@ -819,10 +852,82 @@ with st.sidebar:
     st.divider()
     st.info("💡 Consejo: Al realizar modificaciones en la pestaña del Catálogo Supabase, haz clic en el botón 'Guardar Cambios en Supabase' para persistirlos en la nube de forma permanente.")
 
+st.subheader("Cargar receta guardada")
+mensaje_receta_cargada = st.session_state.pop("mensaje_receta_cargada", None)
+if mensaje_receta_cargada:
+    st.success(mensaje_receta_cargada)
+
+if not supabase_disponible:
+    st.warning("Supabase no está disponible. No se pueden cargar recetas guardadas ahora.")
+else:
+    recetas_guardadas_df = cargar_recetas_supabase()
+    if recetas_guardadas_df.empty:
+        st.info("Todavía no hay recetas guardadas en Supabase.")
+    else:
+        recetas_guardadas_df = recetas_guardadas_df.copy()
+        recetas_guardadas_df["etiqueta_selector"] = recetas_guardadas_df.apply(
+            lambda row: f"{row.get('codigo_receta', '')} · {row.get('nombre', '')}".strip(" ·"),
+            axis=1
+        )
+        opciones_recetas = recetas_guardadas_df["id"].dropna().astype(str).tolist()
+        recetas_por_id = {
+            str(row.get("id")): row.to_dict()
+            for _, row in recetas_guardadas_df.iterrows()
+            if row.get("id")
+        }
+
+        if not opciones_recetas:
+            st.info("Hay recetas guardadas, pero no se pudo leer su identificador.")
+        else:
+            cargar_col1, cargar_col2 = st.columns([3, 1])
+            with cargar_col1:
+                receta_id_seleccionada = st.selectbox(
+                    "Recetas guardadas",
+                    opciones_recetas,
+                    format_func=lambda receta_id: recetas_por_id.get(str(receta_id), {}).get("etiqueta_selector", str(receta_id)),
+                    key="selector_receta_guardada"
+                )
+            with cargar_col2:
+                st.write("")
+                st.write("")
+                cargar_receta_btn = st.button("Cargar receta", use_container_width=True)
+
+            if cargar_receta_btn:
+                cabecera, ingredientes_df = cargar_receta_detalle_supabase(receta_id_seleccionada)
+                ingredientes_cargados = preparar_ingredientes_receta_para_sesion(ingredientes_df)
+                if not cabecera:
+                    st.error("No se pudo cargar la cabecera de la receta seleccionada.")
+                elif not ingredientes_cargados:
+                    st.warning("La receta seleccionada no tiene ingredientes guardados.")
+                else:
+                    raciones_cargadas = numero_seguro(cabecera.get("raciones_base", 1.0), 1.0)
+                    st.session_state["ingredientes"] = ingredientes_cargados
+                    st.session_state["ingredientes_base_raciones"] = [dict(ing) for ing in ingredientes_cargados]
+                    st.session_state["factor_raciones"] = 1.0
+                    st.session_state["raciones_base"] = raciones_cargadas
+                    st.session_state["raciones_deseadas"] = raciones_cargadas
+                    st.session_state["raciones_base_aplicadas"] = raciones_cargadas
+                    st.session_state["raciones_deseadas_aplicadas"] = raciones_cargadas
+                    st.session_state["input_raciones_base"] = raciones_cargadas
+                    st.session_state["input_raciones_deseadas"] = raciones_cargadas
+                    st.session_state["sincronizar_inputs_raciones"] = True
+                    st.session_state["nombre_plato"] = str(cabecera.get("nombre", "") or "Mi Receta")
+                    st.session_state["receta_categoria"] = str(cabecera.get("categoria", "") or "")
+                    st.session_state["receta_tipo_plato"] = str(cabecera.get("tipo_plato", "") or "")
+                    st.session_state["receta_observaciones"] = str(
+                        cabecera.get("observaciones") or cabecera.get("descripcion") or ""
+                    )
+                    codigo_cargado = str(cabecera.get("codigo_receta", "") or "").strip()
+                    nombre_cargado = str(cabecera.get("nombre", "") or "receta").strip()
+                    st.session_state["mensaje_receta_cargada"] = f"Receta cargada: {nombre_cargado} ({codigo_cargado})."
+                    st.rerun()
+
+st.divider()
+
 # Inputs generales del plato
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    nombre_plato = st.text_input("📝 Nombre del Plato", value="Mi Receta")
+    nombre_plato = st.text_input("📝 Nombre del Plato", key="nombre_plato")
 with col2:
     costes_indirectos_pct = st.number_input("⚡ Costes Indirectos (%)", min_value=0.0, value=10.0)
 with col3:
@@ -1357,15 +1462,15 @@ if st.session_state['ingredientes']:
 
         with st.form("form_guardar_receta_nueva"):
             nombre_receta_guardar = st.text_input("Nombre de receta", value=nombre_plato)
-            categoria_receta = st.text_input("Categoría", value="")
-            tipo_plato_receta = st.text_input("Tipo de plato", value="")
+            categoria_receta = st.text_input("Categoría", key="receta_categoria")
+            tipo_plato_receta = st.text_input("Tipo de plato", key="receta_tipo_plato")
             raciones_base_receta = st.number_input(
                 "Raciones base",
                 min_value=0.0,
                 step=1.0,
                 value=float(st.session_state.get('raciones_base', 1.0))
             )
-            observaciones_receta = st.text_area("Descripción / observaciones", value="", height=90)
+            observaciones_receta = st.text_area("Descripción / observaciones", key="receta_observaciones", height=90)
 
             if st.form_submit_button("Guardar como nueva receta", type="primary", use_container_width=True):
                 nombre_limpio = nombre_receta_guardar.strip()
