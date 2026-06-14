@@ -183,6 +183,9 @@ REQUISITO EXCLUSIVO DE RESPUESTA: Devuelve ÚNICAMENTE un array de formato JSON 
 # =============================================================================
 def generar_excel(nombre_plato, ingredientes, costes_indirectos_pct, margen_beneficio_pct, iva_pct):
     wb = openpyxl.Workbook()
+    wb.calculation.fullCalcOnLoad = True
+    wb.calculation.forceFullCalc = True
+    wb.calculation.calcMode = "auto"
     ws = wb.active
     ws.title = "Ficha Técnica"
 
@@ -195,63 +198,75 @@ def generar_excel(nombre_plato, ingredientes, costes_indirectos_pct, margen_bene
     titulo_cell.alignment = Alignment(horizontal='center', vertical='center')
     ws.row_dimensions[1].height = 40
 
-    ws.append([])
-
     # Cabeceras alineadas con la nueva columna Código
     headers = ['Código', 'Ingrediente', 'Cantidad Bruta (kg/l)', '% Merma', 'Peso Neto Real (kg/l)', 'Precio Unidad (€)', 'Coste Total (€)']
-    ws.append(headers)
+    header_row = 5
+    start_row = 6
+    for col_num, header in enumerate(headers, 1):
+        ws.cell(row=header_row, column=col_num, value=header)
+    col_idx = {header: idx for idx, header in enumerate(headers, 1)}
+    col_letras = {header: get_column_letter(idx) for header, idx in col_idx.items()}
     
     for col_num, header in enumerate(headers, 1):
-        cell = ws.cell(row=3, column=col_num)
+        cell = ws.cell(row=header_row, column=col_num)
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill(start_color="2F75B5", end_color="2F75B5", fill_type="solid")
         cell.alignment = Alignment(horizontal='center', vertical='center')
-    ws.row_dimensions[3].height = 25
+    ws.row_dimensions[header_row].height = 25
 
     # Insertar registros y configurar fórmulas dinámicas
-    start_row = 4
     for i, ing in enumerate(ingredientes):
         row = start_row + i
-        ws.cell(row=row, column=1, value=ing.get('codigo', 'S/C'))
-        ws.cell(row=row, column=2, value=ing.get('descripcion', ''))
-        ws.cell(row=row, column=3, value=float(ing.get('cantidad_bruta', 0.0))).number_format = '#,##0.000'
-        ws.cell(row=row, column=4, value=float(ing.get('merma', 0.0))/100).number_format = '0.00%'
-        ws.cell(row=row, column=5, value=f"=C{row}*(1-D{row})").number_format = '#,##0.000'
-        ws.cell(row=row, column=6, value=float(ing.get('precio_unidad', 0.0))).number_format = '#,##0.00 €'
-        ws.cell(row=row, column=7, value=f"=C{row}*F{row}").number_format = '#,##0.00 €'
+        ws.cell(row=row, column=col_idx['Código'], value=ing.get('codigo', 'S/C'))
+        ws.cell(row=row, column=col_idx['Ingrediente'], value=ing.get('descripcion', ''))
+        ws.cell(row=row, column=col_idx['Cantidad Bruta (kg/l)'], value=float(ing.get('cantidad_bruta', 0.0))).number_format = '#,##0.000'
+        ws.cell(row=row, column=col_idx['% Merma'], value=float(ing.get('merma', 0.0))/100).number_format = '0.00%'
+        ws.cell(
+            row=row,
+            column=col_idx['Peso Neto Real (kg/l)'],
+            value=f"={col_letras['Cantidad Bruta (kg/l)']}{row}*(1-{col_letras['% Merma']}{row})",
+        ).number_format = '#,##0.000'
+        ws.cell(row=row, column=col_idx['Precio Unidad (€)'], value=float(ing.get('precio_unidad', 0.0))).number_format = '#,##0.00 €'
+        ws.cell(
+            row=row,
+            column=col_idx['Coste Total (€)'],
+            value=f"={col_letras['Cantidad Bruta (kg/l)']}{row}*{col_letras['Precio Unidad (€)']}{row}",
+        ).number_format = '#,##0.00 €'
 
     last_row = start_row + len(ingredientes) - 1 if ingredientes else start_row
     res = last_row + 2
+    total_col = col_idx['Coste Total (€)']
+    total_col_letter = col_letras['Coste Total (€)']
     
     # Cálculos Financieros del Escandallo
     ws.cell(row=res, column=6, value="Subtotal Ingredientes:").font = Font(bold=True)
-    ws.cell(row=res, column=7, value=f"=SUM(G4:G{last_row})").number_format = '#,##0.00 €'
+    ws.cell(row=res, column=total_col, value=f"=SUM({total_col_letter}{start_row}:{total_col_letter}{last_row})").number_format = '#,##0.00 €'
 
     ci = costes_indirectos_pct if costes_indirectos_pct is not None else 10.0
     mb = margen_beneficio_pct if margen_beneficio_pct is not None else 30.0
     iva = iva_pct if iva_pct is not None else 10.0
 
     ws.cell(row=res+1, column=6, value=f"Costes Indirectos ({ci}%):")
-    ws.cell(row=res+1, column=7, value=f"=G{res}*({ci}/100)").number_format = '#,##0.00 €'
+    ws.cell(row=res+1, column=total_col, value=f"={total_col_letter}{res}*({ci}/100)").number_format = '#,##0.00 €'
 
     ws.cell(row=res+2, column=6, value="COSTE TOTAL DEL PLATO:").font = Font(bold=True)
-    ws.cell(row=res+2, column=7, value=f"=G{res}+G{res+1}").number_format = '#,##0.00 €'
+    ws.cell(row=res+2, column=total_col, value=f"={total_col_letter}{res}+{total_col_letter}{res+1}").number_format = '#,##0.00 €'
 
     ws.cell(row=res+4, column=6, value=f"Margen Deseado ({mb}%):").font = Font(bold=True)
     
     ws.cell(row=res+5, column=6, value="PRECIO VENTA (SIN IVA):").font = Font(bold=True)
-    pvp_sin_iva = ws.cell(row=res+5, column=7, value=f"=G{res+2}/(1-({mb}/100))")
+    pvp_sin_iva = ws.cell(row=res+5, column=total_col, value=f"={total_col_letter}{res+2}/(1-({mb}/100))")
     pvp_sin_iva.number_format = '#,##0.00 €'
     pvp_sin_iva.font = Font(bold=True)
 
     ws.cell(row=res+6, column=6, value=f"IVA Aplicado ({iva}%):")
-    iva_calc = ws.cell(row=res+6, column=7, value=f"=G{res+5}*({iva}/100)")
+    iva_calc = ws.cell(row=res+6, column=total_col, value=f"={total_col_letter}{res+5}*({iva}/100)")
     iva_calc.number_format = '#,##0.00 €'
 
     ws.cell(row=res+7, column=6, value="PRECIO DE VENTA TOTAL (PVP):").font = Font(bold=True, color="FFFFFF")
     ws.cell(row=res+7, column=6).fill = PatternFill(start_color="375623", end_color="375623", fill_type="solid")
     
-    pvp_total = ws.cell(row=res+7, column=7, value=f"=G{res+5}+G{res+6}")
+    pvp_total = ws.cell(row=res+7, column=total_col, value=f"={total_col_letter}{res+5}+{total_col_letter}{res+6}")
     pvp_total.number_format = '#,##0.00 €'
     pvp_total.font = Font(bold=True)
     pvp_total.fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
