@@ -22,8 +22,10 @@ set cantidad_formato_compra = 11.55,
     unidad_medida = 'l'
 where cantidad_formato_compra is null
   and (
-    formato_compra ilike '%35%botellas%x%33%cl%'
-    or unidad_formato_compra ilike '%35%botellas%x%33%cl%'
+    formato_compra ilike '35 botellas x 33 cl%'
+    or formato_compra ilike '% 35 botellas x 33 cl%'
+    or unidad_formato_compra ilike '35 botellas x 33 cl%'
+    or unidad_formato_compra ilike '% 35 botellas x 33 cl%'
   )
   and coalesce(formato_compra, '') not ilike '%pieza aprox%'
   and coalesce(unidad_formato_compra, '') not ilike '%pieza aprox%';
@@ -35,8 +37,10 @@ set cantidad_formato_compra = 10,
     unidad_medida = 'l'
 where cantidad_formato_compra is null
   and (
-    formato_compra ilike '%20%botellas%x%50%cl%'
-    or unidad_formato_compra ilike '%20%botellas%x%50%cl%'
+    formato_compra ilike '20 botellas x 50 cl%'
+    or formato_compra ilike '% 20 botellas x 50 cl%'
+    or unidad_formato_compra ilike '20 botellas x 50 cl%'
+    or unidad_formato_compra ilike '% 20 botellas x 50 cl%'
   )
   and coalesce(formato_compra, '') not ilike '%pieza aprox%'
   and coalesce(unidad_formato_compra, '') not ilike '%pieza aprox%';
@@ -48,8 +52,10 @@ set cantidad_formato_compra = 1.44,
     unidad_medida = 'l'
 where cantidad_formato_compra is null
   and (
-    formato_compra ilike '%144%monodosis%x%10%ml%'
-    or unidad_formato_compra ilike '%144%monodosis%x%10%ml%'
+    formato_compra ilike '144 monodosis x 10 ml%'
+    or formato_compra ilike '% 144 monodosis x 10 ml%'
+    or unidad_formato_compra ilike '144 monodosis x 10 ml%'
+    or unidad_formato_compra ilike '% 144 monodosis x 10 ml%'
   )
   and coalesce(formato_compra, '') not ilike '%pieza aprox%'
   and coalesce(unidad_formato_compra, '') not ilike '%pieza aprox%';
@@ -61,8 +67,10 @@ set cantidad_formato_compra = 0.15,
     unidad_medida = 'kg'
 where cantidad_formato_compra is null
   and (
-    formato_compra ilike '%3%x%50%g%'
-    or unidad_formato_compra ilike '%3%x%50%g%'
+    formato_compra ilike '3 x 50 g%'
+    or formato_compra ilike '% 3 x 50 g%'
+    or unidad_formato_compra ilike '3 x 50 g%'
+    or unidad_formato_compra ilike '% 3 x 50 g%'
   )
   and coalesce(formato_compra, '') not ilike '%pieza aprox%'
   and coalesce(unidad_formato_compra, '') not ilike '%pieza aprox%';
@@ -78,8 +86,10 @@ set cantidad_formato_compra = 0.33,
     unidad_medida = 'l'
 where cantidad_formato_compra is null
   and (
-    formato_compra ilike '%33 cl%'
-    or unidad_formato_compra ilike '%33 cl%'
+    formato_compra ilike '33 cl%'
+    or formato_compra ilike '% 33 cl%'
+    or unidad_formato_compra ilike '33 cl%'
+    or unidad_formato_compra ilike '% 33 cl%'
   )
   and coalesce(formato_compra, '') not ilike '%pieza aprox%'
   and coalesce(unidad_formato_compra, '') not ilike '%pieza aprox%';
@@ -91,8 +101,10 @@ set cantidad_formato_compra = 0.50,
     unidad_medida = 'l'
 where cantidad_formato_compra is null
   and (
-    formato_compra ilike '%50 cl%'
-    or unidad_formato_compra ilike '%50 cl%'
+    formato_compra ilike '50 cl%'
+    or formato_compra ilike '% 50 cl%'
+    or unidad_formato_compra ilike '50 cl%'
+    or unidad_formato_compra ilike '% 50 cl%'
   )
   and coalesce(formato_compra, '') not ilike '%pieza aprox%'
   and coalesce(unidad_formato_compra, '') not ilike '%pieza aprox%';
@@ -104,8 +116,10 @@ set cantidad_formato_compra = 0.70,
     unidad_medida = 'l'
 where cantidad_formato_compra is null
   and (
-    formato_compra ilike '%70 cl%'
-    or unidad_formato_compra ilike '%70 cl%'
+    formato_compra ilike '70 cl%'
+    or formato_compra ilike '% 70 cl%'
+    or unidad_formato_compra ilike '70 cl%'
+    or unidad_formato_compra ilike '% 70 cl%'
   )
   and coalesce(formato_compra, '') not ilike '%pieza aprox%'
   and coalesce(unidad_formato_compra, '') not ilike '%pieza aprox%';
@@ -121,8 +135,10 @@ set cantidad_formato_compra = 0.02,
     unidad_medida = 'kg'
 where cantidad_formato_compra is null
   and (
-    formato_compra ilike '%20 g%'
-    or unidad_formato_compra ilike '%20 g%'
+    formato_compra ilike '20 g%'
+    or formato_compra ilike '% 20 g%'
+    or unidad_formato_compra ilike '20 g%'
+    or unidad_formato_compra ilike '% 20 g%'
   )
   and coalesce(formato_compra, '') not ilike '%pieza aprox%'
   and coalesce(unidad_formato_compra, '') not ilike '%pieza aprox%';
@@ -134,8 +150,10 @@ set cantidad_formato_compra = 0.125,
     unidad_medida = 'kg'
 where cantidad_formato_compra is null
   and (
-    formato_compra ilike '%125 g%'
-    or unidad_formato_compra ilike '%125 g%'
+    formato_compra ilike '125 g%'
+    or formato_compra ilike '% 125 g%'
+    or unidad_formato_compra ilike '125 g%'
+    or unidad_formato_compra ilike '% 125 g%'
   )
   and coalesce(formato_compra, '') not ilike '%pieza aprox%'
   and coalesce(unidad_formato_compra, '') not ilike '%pieza aprox%';
@@ -147,8 +165,10 @@ set cantidad_formato_compra = 0.15,
     unidad_medida = 'kg'
 where cantidad_formato_compra is null
   and (
-    formato_compra ilike '%150 g%'
-    or unidad_formato_compra ilike '%150 g%'
+    formato_compra ilike '150 g%'
+    or formato_compra ilike '% 150 g%'
+    or unidad_formato_compra ilike '150 g%'
+    or unidad_formato_compra ilike '% 150 g%'
   )
   and coalesce(formato_compra, '') not ilike '%pieza aprox%'
   and coalesce(unidad_formato_compra, '') not ilike '%pieza aprox%';
@@ -160,8 +180,10 @@ set cantidad_formato_compra = 0.20,
     unidad_medida = 'kg'
 where cantidad_formato_compra is null
   and (
-    formato_compra ilike '%200 g%'
-    or unidad_formato_compra ilike '%200 g%'
+    formato_compra ilike '200 g%'
+    or formato_compra ilike '% 200 g%'
+    or unidad_formato_compra ilike '200 g%'
+    or unidad_formato_compra ilike '% 200 g%'
   )
   and coalesce(formato_compra, '') not ilike '%pieza aprox%'
   and coalesce(unidad_formato_compra, '') not ilike '%pieza aprox%';
@@ -173,8 +195,10 @@ set cantidad_formato_compra = 0.25,
     unidad_medida = 'kg'
 where cantidad_formato_compra is null
   and (
-    formato_compra ilike '%250 g%'
-    or unidad_formato_compra ilike '%250 g%'
+    formato_compra ilike '250 g%'
+    or formato_compra ilike '% 250 g%'
+    or unidad_formato_compra ilike '250 g%'
+    or unidad_formato_compra ilike '% 250 g%'
   )
   and coalesce(formato_compra, '') not ilike '%pieza aprox%'
   and coalesce(unidad_formato_compra, '') not ilike '%pieza aprox%';
@@ -186,8 +210,10 @@ set cantidad_formato_compra = 0.30,
     unidad_medida = 'kg'
 where cantidad_formato_compra is null
   and (
-    formato_compra ilike '%300 g%'
-    or unidad_formato_compra ilike '%300 g%'
+    formato_compra ilike '300 g%'
+    or formato_compra ilike '% 300 g%'
+    or unidad_formato_compra ilike '300 g%'
+    or unidad_formato_compra ilike '% 300 g%'
   )
   and coalesce(formato_compra, '') not ilike '%pieza aprox%'
   and coalesce(unidad_formato_compra, '') not ilike '%pieza aprox%';
@@ -199,8 +225,10 @@ set cantidad_formato_compra = 0.40,
     unidad_medida = 'kg'
 where cantidad_formato_compra is null
   and (
-    formato_compra ilike '%400 g%'
-    or unidad_formato_compra ilike '%400 g%'
+    formato_compra ilike '400 g%'
+    or formato_compra ilike '% 400 g%'
+    or unidad_formato_compra ilike '400 g%'
+    or unidad_formato_compra ilike '% 400 g%'
   )
   and coalesce(formato_compra, '') not ilike '%pieza aprox%'
   and coalesce(unidad_formato_compra, '') not ilike '%pieza aprox%';
@@ -212,8 +240,10 @@ set cantidad_formato_compra = 0.45,
     unidad_medida = 'kg'
 where cantidad_formato_compra is null
   and (
-    formato_compra ilike '%450 g%'
-    or unidad_formato_compra ilike '%450 g%'
+    formato_compra ilike '450 g%'
+    or formato_compra ilike '% 450 g%'
+    or unidad_formato_compra ilike '450 g%'
+    or unidad_formato_compra ilike '% 450 g%'
   )
   and coalesce(formato_compra, '') not ilike '%pieza aprox%'
   and coalesce(unidad_formato_compra, '') not ilike '%pieza aprox%';
@@ -225,8 +255,10 @@ set cantidad_formato_compra = 0.50,
     unidad_medida = 'kg'
 where cantidad_formato_compra is null
   and (
-    formato_compra ilike '%500 g%'
-    or unidad_formato_compra ilike '%500 g%'
+    formato_compra ilike '500 g%'
+    or formato_compra ilike '% 500 g%'
+    or unidad_formato_compra ilike '500 g%'
+    or unidad_formato_compra ilike '% 500 g%'
   )
   and coalesce(formato_compra, '') not ilike '%pieza aprox%'
   and coalesce(unidad_formato_compra, '') not ilike '%pieza aprox%';
@@ -238,8 +270,10 @@ set cantidad_formato_compra = 0.60,
     unidad_medida = 'kg'
 where cantidad_formato_compra is null
   and (
-    formato_compra ilike '%600 g%'
-    or unidad_formato_compra ilike '%600 g%'
+    formato_compra ilike '600 g%'
+    or formato_compra ilike '% 600 g%'
+    or unidad_formato_compra ilike '600 g%'
+    or unidad_formato_compra ilike '% 600 g%'
   )
   and coalesce(formato_compra, '') not ilike '%pieza aprox%'
   and coalesce(unidad_formato_compra, '') not ilike '%pieza aprox%';
@@ -255,8 +289,10 @@ set cantidad_formato_compra = 1,
     unidad_medida = 'kg'
 where cantidad_formato_compra is null
   and (
-    formato_compra ilike '%1 kg%'
-    or unidad_formato_compra ilike '%1 kg%'
+    formato_compra ilike '1 kg%'
+    or formato_compra ilike '% 1 kg%'
+    or unidad_formato_compra ilike '1 kg%'
+    or unidad_formato_compra ilike '% 1 kg%'
   )
   and coalesce(formato_compra, '') not ilike '%pieza aprox%'
   and coalesce(unidad_formato_compra, '') not ilike '%pieza aprox%';
@@ -268,8 +304,10 @@ set cantidad_formato_compra = 25,
     unidad_medida = 'kg'
 where cantidad_formato_compra is null
   and (
-    formato_compra ilike '%25 kg%'
-    or unidad_formato_compra ilike '%25 kg%'
+    formato_compra ilike '25 kg%'
+    or formato_compra ilike '% 25 kg%'
+    or unidad_formato_compra ilike '25 kg%'
+    or unidad_formato_compra ilike '% 25 kg%'
   )
   and coalesce(formato_compra, '') not ilike '%pieza aprox%'
   and coalesce(unidad_formato_compra, '') not ilike '%pieza aprox%';
