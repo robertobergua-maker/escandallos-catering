@@ -407,6 +407,49 @@ def cargar_receta_detalle_supabase(receta_id):
         return {}, ingredientes_vacios
 
 
+def guardar_receta_nueva_supabase(datos_receta, ingredientes):
+    """
+    Guarda una receta nueva y sus lineas de escandallo en Supabase.
+    """
+    if not supabase_disponible or supabase is None:
+        return False, "Supabase no está conectado correctamente.", None
+
+    try:
+        respuesta_receta = (
+            supabase
+            .table("recetas")
+            .insert(datos_receta)
+            .execute()
+        )
+        receta_guardada = (respuesta_receta.data or [{}])[0]
+        receta_id = receta_guardada.get("id")
+        if not receta_id:
+            return False, "No se pudo obtener el identificador de la receta guardada.", None
+
+        lineas = []
+        for orden, ing in enumerate(ingredientes, start=1):
+            linea = calcular_datos_ingrediente_receta(ing, orden=orden)
+            linea["receta_id"] = receta_id
+            lineas.append(linea)
+
+        if lineas:
+            (
+                supabase
+                .table("receta_ingredientes")
+                .insert(lineas)
+                .execute()
+            )
+
+        try:
+            cargar_recetas_supabase.clear()
+        except Exception:
+            pass
+
+        return True, "Receta guardada correctamente.", receta_guardada
+    except Exception as e:
+        return False, f"Error al guardar la receta en Supabase: {e}", None
+
+
 # =============================================================================
 # 🧠 PROCESAMIENTO INTELIGENTE CON OPENAI GPT-4o
 # =============================================================================
@@ -1306,6 +1349,61 @@ if st.session_state['ingredientes']:
         r3.metric("Coste Total", f"{coste_total:.2f} €")
         r4.metric("PVP Total", f"{pvp_final:.2f} €")
         st.metric("PVP por ración", f"{pvp_por_racion:.2f} €")
+
+        st.divider()
+        st.subheader("Guardar receta")
+        if not supabase_disponible:
+            st.warning("Supabase no está disponible. No se puede guardar la receta ahora.")
+
+        with st.form("form_guardar_receta_nueva"):
+            nombre_receta_guardar = st.text_input("Nombre de receta", value=nombre_plato)
+            categoria_receta = st.text_input("Categoría", value="")
+            tipo_plato_receta = st.text_input("Tipo de plato", value="")
+            raciones_base_receta = st.number_input(
+                "Raciones base",
+                min_value=0.0,
+                step=1.0,
+                value=float(st.session_state.get('raciones_base', 1.0))
+            )
+            observaciones_receta = st.text_area("Descripción / observaciones", value="", height=90)
+
+            if st.form_submit_button("Guardar como nueva receta", type="primary", use_container_width=True):
+                nombre_limpio = nombre_receta_guardar.strip()
+                if not supabase_disponible or supabase is None:
+                    st.error("Supabase no está conectado correctamente.")
+                elif not nombre_limpio:
+                    st.error("Indica un nombre de receta antes de guardar.")
+                elif not st.session_state.get("ingredientes"):
+                    st.error("Añade al menos un ingrediente antes de guardar la receta.")
+                else:
+                    codigo_receta = generar_codigo_receta()
+                    datos_receta = {
+                        "user_id": None,
+                        "codigo_receta": codigo_receta,
+                        "nombre": nombre_limpio,
+                        "categoria": categoria_receta.strip(),
+                        "tipo_plato": tipo_plato_receta.strip(),
+                        "raciones_base": float(raciones_base_receta),
+                        "unidad_servicio": "racion",
+                        "descripcion": observaciones_receta.strip(),
+                        "observaciones": observaciones_receta.strip(),
+                        "costes_indirectos_pct": float(ci_val),
+                        "margen_beneficio_pct": float(mb_val),
+                        "iva_pct": float(iva_val),
+                        "coste_total": float(coste_total),
+                        "precio_venta_sin_iva": float(pvp_neto),
+                        "precio_venta_con_iva": float(pvp_final),
+                        "activa": True
+                    }
+                    ok, mensaje, receta_guardada = guardar_receta_nueva_supabase(
+                        datos_receta,
+                        st.session_state["ingredientes"]
+                    )
+                    if ok:
+                        codigo_mostrado = receta_guardada.get("codigo_receta", codigo_receta)
+                        st.success(f"Receta guardada correctamente con código {codigo_mostrado}.")
+                    else:
+                        st.error(mensaje)
 
         excel_virtual = generar_excel(
             nombre_plato,
