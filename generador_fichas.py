@@ -80,6 +80,12 @@ if 'receta_tipo_plato' not in st.session_state:
 if 'receta_observaciones' not in st.session_state:
     st.session_state['receta_observaciones'] = ""
 
+if 'receta_id_cargada' not in st.session_state:
+    st.session_state['receta_id_cargada'] = None
+
+if 'codigo_receta_cargada' not in st.session_state:
+    st.session_state['codigo_receta_cargada'] = ""
+
 # =============================================================================
 # 📥 FUNCIÓN CACHÉ PARA CARGAR INVENTARIO DESDE SUPABASE
 # =============================================================================
@@ -460,6 +466,56 @@ def guardar_receta_nueva_supabase(datos_receta, ingredientes):
         return True, "Receta guardada correctamente.", receta_guardada
     except Exception as e:
         return False, f"Error al guardar la receta en Supabase: {e}", None
+
+
+def actualizar_receta_supabase(receta_id, datos_receta, ingredientes):
+    """
+    Actualiza una receta existente y reemplaza solo sus lineas de escandallo.
+    """
+    if not receta_id:
+        return False, "No hay una receta cargada para actualizar."
+    if not supabase_disponible or supabase is None:
+        return False, "Supabase no está conectado correctamente."
+
+    try:
+        (
+            supabase
+            .table("recetas")
+            .update(datos_receta)
+            .eq("id", receta_id)
+            .execute()
+        )
+
+        (
+            supabase
+            .table("receta_ingredientes")
+            .delete()
+            .eq("receta_id", receta_id)
+            .execute()
+        )
+
+        lineas = []
+        for orden, ing in enumerate(ingredientes, start=1):
+            linea = calcular_datos_ingrediente_receta(ing, orden=orden)
+            linea["receta_id"] = receta_id
+            lineas.append(linea)
+
+        if lineas:
+            (
+                supabase
+                .table("receta_ingredientes")
+                .insert(lineas)
+                .execute()
+            )
+
+        try:
+            cargar_recetas_supabase.clear()
+        except Exception:
+            pass
+
+        return True, "Receta actualizada correctamente."
+    except Exception as e:
+        return False, f"Error al actualizar la receta en Supabase: {e}"
 
 
 def preparar_ingredientes_receta_para_sesion(ingredientes_df):
@@ -919,6 +975,8 @@ else:
                     )
                     codigo_cargado = str(cabecera.get("codigo_receta", "") or "").strip()
                     nombre_cargado = str(cabecera.get("nombre", "") or "receta").strip()
+                    st.session_state["receta_id_cargada"] = str(cabecera.get("id", receta_id_seleccionada))
+                    st.session_state["codigo_receta_cargada"] = codigo_cargado
                     st.session_state["mensaje_receta_cargada"] = f"Receta cargada: {nombre_cargado} ({codigo_cargado})."
                     st.rerun()
 
@@ -1304,6 +1362,8 @@ if st.session_state['ingredientes']:
                 st.session_state['ingredientes'] = []
                 st.session_state['ingredientes_base_raciones'] = None
                 st.session_state['factor_raciones'] = 1.0
+                st.session_state['receta_id_cargada'] = None
+                st.session_state['codigo_receta_cargada'] = ""
                 st.rerun()
 
         if ingredientes_no_encontrados:
@@ -1459,6 +1519,8 @@ if st.session_state['ingredientes']:
         st.subheader("Guardar receta")
         if not supabase_disponible:
             st.warning("Supabase no está disponible. No se puede guardar la receta ahora.")
+        if st.session_state.get("receta_id_cargada"):
+            st.caption(f"Receta cargada para actualizar: {st.session_state.get('codigo_receta_cargada', 'sin código')}")
 
         with st.form("form_guardar_receta_nueva"):
             nombre_receta_guardar = st.text_input("Nombre de receta", value=nombre_plato)
@@ -1472,16 +1534,26 @@ if st.session_state['ingredientes']:
             )
             observaciones_receta = st.text_area("Descripción / observaciones", key="receta_observaciones", height=90)
 
-            if st.form_submit_button("Guardar como nueva receta", type="primary", use_container_width=True):
+            guardar_col, actualizar_col = st.columns(2)
+            with guardar_col:
+                guardar_nueva = st.form_submit_button("Guardar como nueva receta", type="primary", use_container_width=True)
+            with actualizar_col:
+                actualizar_existente = st.form_submit_button("Actualizar receta seleccionada", use_container_width=True)
+
+            if guardar_nueva or actualizar_existente:
                 nombre_limpio = nombre_receta_guardar.strip()
+                receta_id_cargada = st.session_state.get("receta_id_cargada")
+                codigo_receta_cargada = st.session_state.get("codigo_receta_cargada", "")
                 if not supabase_disponible or supabase is None:
                     st.error("Supabase no está conectado correctamente.")
                 elif not nombre_limpio:
                     st.error("Indica un nombre de receta antes de guardar.")
                 elif not st.session_state.get("ingredientes"):
                     st.error("Añade al menos un ingrediente antes de guardar la receta.")
+                elif actualizar_existente and not receta_id_cargada:
+                    st.warning("Carga una receta guardada antes de actualizarla.")
                 else:
-                    codigo_receta = generar_codigo_receta()
+                    codigo_receta = codigo_receta_cargada if actualizar_existente else generar_codigo_receta()
                     datos_receta = {
                         "user_id": None,
                         "codigo_receta": codigo_receta,
@@ -1500,15 +1572,29 @@ if st.session_state['ingredientes']:
                         "precio_venta_con_iva": float(pvp_final),
                         "activa": True
                     }
-                    ok, mensaje, receta_guardada = guardar_receta_nueva_supabase(
-                        datos_receta,
-                        st.session_state["ingredientes"]
-                    )
-                    if ok:
-                        codigo_mostrado = receta_guardada.get("codigo_receta", codigo_receta)
-                        st.success(f"Receta guardada correctamente con código {codigo_mostrado}.")
+                    if actualizar_existente:
+                        ok, mensaje = actualizar_receta_supabase(
+                            receta_id_cargada,
+                            datos_receta,
+                            st.session_state["ingredientes"]
+                        )
+                        if ok:
+                            st.session_state["codigo_receta_cargada"] = codigo_receta
+                            st.success(f"Receta actualizada correctamente con código {codigo_receta}.")
+                        else:
+                            st.error(mensaje)
                     else:
-                        st.error(mensaje)
+                        ok, mensaje, receta_guardada = guardar_receta_nueva_supabase(
+                            datos_receta,
+                            st.session_state["ingredientes"]
+                        )
+                        if ok:
+                            codigo_mostrado = receta_guardada.get("codigo_receta", codigo_receta)
+                            st.session_state["receta_id_cargada"] = receta_guardada.get("id")
+                            st.session_state["codigo_receta_cargada"] = codigo_mostrado
+                            st.success(f"Receta guardada correctamente con código {codigo_mostrado}.")
+                        else:
+                            st.error(mensaje)
 
         excel_virtual = generar_excel(
             nombre_plato,
