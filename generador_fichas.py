@@ -95,6 +95,9 @@ if 'margen_beneficio_pct' not in st.session_state:
 if 'iva_pct' not in st.session_state:
     st.session_state['iva_pct'] = 10.0
 
+if 'menu_actual' not in st.session_state:
+    st.session_state['menu_actual'] = []
+
 # =============================================================================
 # 📥 FUNCIÓN CACHÉ PARA CARGAR INVENTARIO DESDE SUPABASE
 # =============================================================================
@@ -705,15 +708,20 @@ def calcular_totales_menu(lineas_menu):
 
     for linea in lineas:
         raciones = numero_seguro(linea.get("raciones", 1.0), 1.0)
+        raciones_base = numero_seguro(linea.get("raciones_base", 0.0), 0.0)
+        factor = raciones / raciones_base if raciones_base > 0 else raciones
         coste_receta = linea.get("coste_receta", linea.get("coste_total", None))
         precio_receta = linea.get(
             "precio_receta_con_iva",
-            linea.get("precio_venta_con_iva", linea.get("precio_total", None))
+            linea.get(
+                "precio_receta",
+                linea.get("precio_venta_con_iva", linea.get("precio_total", None))
+            )
         )
 
-        coste_total += numero_seguro(coste_receta, 0.0) * raciones
+        coste_total += numero_seguro(coste_receta, 0.0) * factor
         if precio_receta is not None and not pd.isna(precio_receta):
-            precio_total += numero_seguro(precio_receta, 0.0) * raciones
+            precio_total += numero_seguro(precio_receta, 0.0) * factor
             hay_precio = True
 
     return {
@@ -1339,9 +1347,10 @@ with st.sidebar:
 
 st.divider()
 
-main_tab_receta, main_tab_guardadas, main_tab_costes, main_tab_base = st.tabs([
+main_tab_receta, main_tab_guardadas, main_tab_menus, main_tab_costes, main_tab_base = st.tabs([
     "Receta activa",
     "Recetas guardadas",
+    "Menús",
     "Costes y exportacion",
     "Base de ingredientes"
 ])
@@ -1911,6 +1920,184 @@ with main_tab_guardadas:
                     else:
                         st.error(mensaje)
 
+with main_tab_menus:
+    st.subheader("Menús")
+    st.caption("Construye un menú básico combinando recetas guardadas.")
+
+    menu_col1, menu_col2 = st.columns([2, 1])
+    with menu_col1:
+        nombre_menu = st.text_input("Nombre del menú", key="menu_nombre")
+    with menu_col2:
+        tipo_menu = st.selectbox(
+            "Tipo de menú",
+            ["Cóctel", "Buffet", "Menú sentado", "Catering", "Otro"],
+            key="menu_tipo"
+        )
+
+    numero_comensales = st.number_input(
+        "Número de comensales",
+        min_value=1,
+        step=1,
+        value=int(st.session_state.get("menu_numero_comensales", 1) or 1),
+        key="menu_numero_comensales"
+    )
+
+    st.divider()
+    st.markdown("#### Añadir recetas")
+
+    recetas_menu_df = pd.DataFrame()
+    recetas_menu_por_id = {}
+    opciones_recetas_menu = []
+
+    if not supabase_disponible:
+        st.warning("Supabase no está disponible. No se pueden cargar recetas guardadas ahora.")
+    else:
+        recetas_menu_df = cargar_recetas_supabase()
+        if recetas_menu_df.empty:
+            st.info("Todavía no hay recetas guardadas para crear un menú.")
+        else:
+            recetas_menu_df = recetas_menu_df.copy()
+            recetas_menu_df["etiqueta_selector"] = recetas_menu_df.apply(
+                lambda row: f"{row.get('codigo_receta', '')} · {row.get('nombre', '')}".strip(" ·"),
+                axis=1
+            )
+            opciones_recetas_menu = recetas_menu_df["id"].dropna().astype(str).tolist()
+            recetas_menu_por_id = {
+                str(row.get("id")): row.to_dict()
+                for _, row in recetas_menu_df.iterrows()
+                if row.get("id")
+            }
+
+    if opciones_recetas_menu:
+        add_col1, add_col2, add_col3 = st.columns([3, 1, 1])
+        with add_col1:
+            receta_menu_id = st.selectbox(
+                "Recetas guardadas",
+                opciones_recetas_menu,
+                format_func=lambda receta_id: recetas_menu_por_id.get(str(receta_id), {}).get("etiqueta_selector", str(receta_id)),
+                key="selector_receta_menu"
+            )
+        with add_col2:
+            raciones_linea_menu = st.number_input(
+                "Raciones de esta receta",
+                min_value=0.0,
+                step=1.0,
+                value=1.0,
+                key="menu_raciones_receta"
+            )
+        with add_col3:
+            st.write("")
+            st.write("")
+            anadir_receta_menu = st.button("Añadir receta al menú", use_container_width=True)
+
+        if anadir_receta_menu:
+            receta_seleccionada = recetas_menu_por_id.get(str(receta_menu_id), {})
+            raciones_base_receta = numero_seguro(receta_seleccionada.get("raciones_base", 0.0), 0.0)
+            factor_linea = raciones_linea_menu / raciones_base_receta if raciones_base_receta > 0 else raciones_linea_menu
+            coste_receta = numero_seguro(receta_seleccionada.get("coste_total", 0.0), 0.0)
+            precio_receta = receta_seleccionada.get("precio_venta_con_iva", None)
+            if precio_receta is None or pd.isna(precio_receta):
+                precio_receta = receta_seleccionada.get("precio_venta_sin_iva", None)
+
+            hay_precio_receta = precio_receta is not None and not pd.isna(precio_receta)
+            linea_menu = {
+                "receta_id": str(receta_menu_id),
+                "codigo_receta": str(receta_seleccionada.get("codigo_receta", "") or ""),
+                "nombre_receta": str(receta_seleccionada.get("nombre", "") or "Receta sin nombre"),
+                "raciones": float(raciones_linea_menu),
+                "raciones_base": float(raciones_base_receta),
+                "coste_receta": float(coste_receta),
+                "precio_receta": float(numero_seguro(precio_receta, 0.0)) if hay_precio_receta else None,
+                "coste_total_linea": float(coste_receta * factor_linea),
+                "precio_total_linea": float(numero_seguro(precio_receta, 0.0) * factor_linea) if hay_precio_receta else None,
+                "orden": len(st.session_state["menu_actual"]) + 1,
+                "seccion": ""
+            }
+            st.session_state["menu_actual"].append(linea_menu)
+            st.success(f"Receta añadida al menú: {linea_menu['nombre_receta']}.")
+            st.rerun()
+
+    st.divider()
+    st.markdown("#### Menú actual")
+
+    lineas_menu_actual = st.session_state.get("menu_actual", [])
+    total_coste_menu = sum(numero_seguro(linea.get("coste_total_linea", 0.0), 0.0) for linea in lineas_menu_actual)
+    lineas_con_precio = [
+        linea for linea in lineas_menu_actual
+        if linea.get("precio_total_linea") is not None and not pd.isna(linea.get("precio_total_linea"))
+    ]
+    hay_precio_menu = bool(lineas_con_precio)
+    total_precio_menu = sum(numero_seguro(linea.get("precio_total_linea", 0.0), 0.0) for linea in lineas_con_precio)
+    coste_por_comensal = total_coste_menu / numero_comensales if numero_comensales > 0 else 0.0
+    precio_por_comensal = total_precio_menu / numero_comensales if hay_precio_menu and numero_comensales > 0 else None
+
+    if lineas_menu_actual:
+        menu_display_df = pd.DataFrame(lineas_menu_actual)
+        columnas_menu = ["codigo_receta", "nombre_receta", "raciones", "coste_total_linea"]
+        if hay_precio_menu:
+            columnas_menu.append("precio_total_linea")
+        menu_display_df = menu_display_df[columnas_menu].rename(columns={
+            "codigo_receta": "Código receta",
+            "nombre_receta": "Receta",
+            "raciones": "Raciones",
+            "coste_total_linea": "Coste línea",
+            "precio_total_linea": "Precio línea"
+        })
+        st.dataframe(
+            menu_display_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Raciones": st.column_config.NumberColumn("Raciones", format="%.2f"),
+                "Coste línea": st.column_config.NumberColumn("Coste línea", format="%.2f €"),
+                "Precio línea": st.column_config.NumberColumn("Precio línea", format="%.2f €")
+            }
+        )
+    else:
+        st.info("Añade recetas guardadas para construir el menú actual.")
+
+    resumen_col1, resumen_col2 = st.columns(2)
+    with resumen_col1:
+        st.metric("Coste total del menú", f"{total_coste_menu:.2f} €")
+        st.metric("Coste por comensal", f"{coste_por_comensal:.2f} €")
+    with resumen_col2:
+        if hay_precio_menu:
+            st.metric("Precio total del menú", f"{total_precio_menu:.2f} €")
+            st.metric("Precio por comensal", f"{precio_por_comensal:.2f} €")
+        else:
+            st.metric("Precio total del menú", "Sin datos")
+            st.metric("Precio por comensal", "Sin datos")
+
+    accion_menu_col1, accion_menu_col2 = st.columns(2)
+    with accion_menu_col1:
+        if st.button("Guardar menú", type="primary", use_container_width=True):
+            nombre_menu_limpio = str(nombre_menu or "").strip()
+            if not supabase_disponible or supabase is None:
+                st.error("Supabase no está conectado correctamente.")
+            elif not nombre_menu_limpio:
+                st.error("Indica un nombre de menú antes de guardar.")
+            elif not lineas_menu_actual:
+                st.error("Añade al menos una receta antes de guardar el menú.")
+            else:
+                datos_menu = {
+                    "user_id": None,
+                    "nombre": nombre_menu_limpio,
+                    "tipo_menu": tipo_menu,
+                    "descripcion": "",
+                    "numero_comensales": int(numero_comensales),
+                    "coste_total": float(total_coste_menu),
+                    "precio_total": float(total_precio_menu) if hay_precio_menu else None
+                }
+                ok, mensaje, menu_guardado = guardar_menu_supabase(datos_menu, lineas_menu_actual)
+                if ok:
+                    st.success(f"Menú guardado correctamente: {menu_guardado.get('nombre', nombre_menu_limpio)}.")
+                else:
+                    st.error(mensaje)
+    with accion_menu_col2:
+        if st.button("Limpiar menú actual", use_container_width=True):
+            st.session_state["menu_actual"] = []
+            st.success("Menú actual limpiado.")
+            st.rerun()
 
 
 with main_tab_base:
