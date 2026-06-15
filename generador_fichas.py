@@ -658,6 +658,17 @@ MENU_RECETAS_COLUMNAS = [
     "id", "menu_id", "receta_id", "raciones", "orden", "seccion", "created_at"
 ]
 
+CLIENTES_COLUMNAS = [
+    "id", "user_id", "nombre", "tipo_cliente", "nif_cif", "email", "telefono",
+    "direccion", "codigo_postal", "ciudad", "provincia", "pais",
+    "observaciones", "created_at", "updated_at"
+]
+
+MENSAJE_CLIENTES_NO_ACTIVADO = (
+    "El módulo de clientes todavía no está activado en Inventario. "
+    "Ejecuta primero el SQL de facturación."
+)
+
 
 def numero_seguro(valor, defecto=0.0):
     numero = pd.to_numeric(valor, errors="coerce")
@@ -1158,6 +1169,170 @@ def cargar_menu_detalle_supabase(menu_id):
         return cabecera, lineas_df.copy()
     except Exception:
         return {}, lineas_vacias
+
+
+def error_tabla_clientes_no_activada(error):
+    mensaje = str(error).lower()
+    return (
+        "clientes" in mensaje
+        and (
+            "does not exist" in mensaje
+            or "schema cache" in mensaje
+            or "42p01" in mensaje
+            or "pgrst205" in mensaje
+            or "could not find" in mensaje
+        )
+    )
+
+
+def datos_cliente_desde_formulario(
+    nombre, tipo_cliente, nif_cif, email, telefono, direccion,
+    codigo_postal, ciudad, provincia, pais, observaciones
+):
+    return {
+        "nombre": str(nombre or "").strip(),
+        "tipo_cliente": str(tipo_cliente or "").strip() or None,
+        "nif_cif": str(nif_cif or "").strip() or None,
+        "email": str(email or "").strip() or None,
+        "telefono": str(telefono or "").strip() or None,
+        "direccion": str(direccion or "").strip() or None,
+        "codigo_postal": str(codigo_postal or "").strip() or None,
+        "ciudad": str(ciudad or "").strip() or None,
+        "provincia": str(provincia or "").strip() or None,
+        "pais": str(pais or "").strip() or "España",
+        "observaciones": str(observaciones or "").strip() or None
+    }
+
+
+def cargar_clientes_supabase():
+    """
+    Lee los clientes del usuario conectado.
+    """
+    if not supabase_disponible or supabase is None:
+        return False, "El inventario no está conectado correctamente.", pd.DataFrame(columns=CLIENTES_COLUMNAS)
+
+    user_id_actual = obtener_user_id_actual()
+    if not user_id_actual:
+        return False, "Inicia sesión para guardar clientes en tu cuenta", pd.DataFrame(columns=CLIENTES_COLUMNAS)
+
+    try:
+        respuesta = (
+            supabase
+            .table("clientes")
+            .select(",".join(CLIENTES_COLUMNAS))
+            .eq("user_id", user_id_actual)
+            .order("nombre")
+            .execute()
+        )
+        df = pd.DataFrame(respuesta.data or [])
+        if df.empty:
+            return True, "", pd.DataFrame(columns=CLIENTES_COLUMNAS)
+        for col in CLIENTES_COLUMNAS:
+            if col not in df.columns:
+                df[col] = None
+        return True, "", df[CLIENTES_COLUMNAS].copy()
+    except Exception as e:
+        if error_tabla_clientes_no_activada(e):
+            return False, MENSAJE_CLIENTES_NO_ACTIVADO, pd.DataFrame(columns=CLIENTES_COLUMNAS)
+        return False, f"Error al cargar clientes: {e}", pd.DataFrame(columns=CLIENTES_COLUMNAS)
+
+
+def guardar_cliente_supabase(cliente):
+    """
+    Guarda un cliente nuevo asociado al usuario conectado.
+    """
+    if not supabase_disponible or supabase is None:
+        return False, "El inventario no está conectado correctamente.", None
+
+    user_id_actual = obtener_user_id_actual()
+    if not user_id_actual:
+        return False, "Inicia sesión para guardar clientes en tu cuenta", None
+
+    datos_guardar = dict(cliente)
+    datos_guardar["user_id"] = user_id_actual
+    if not datos_guardar.get("nombre"):
+        return False, "Indica un nombre de cliente antes de guardar.", None
+
+    try:
+        respuesta = (
+            supabase
+            .table("clientes")
+            .insert(datos_guardar)
+            .execute()
+        )
+        cliente_guardado = (respuesta.data or [{}])[0]
+        return True, "Cliente guardado correctamente.", cliente_guardado
+    except Exception as e:
+        if error_tabla_clientes_no_activada(e):
+            return False, MENSAJE_CLIENTES_NO_ACTIVADO, None
+        return False, f"Error al guardar cliente: {e}", None
+
+
+def actualizar_cliente_supabase(cliente_id, cliente):
+    """
+    Actualiza un cliente del usuario conectado.
+    """
+    if not supabase_disponible or supabase is None:
+        return False, "El inventario no está conectado correctamente."
+
+    user_id_actual = obtener_user_id_actual()
+    if not user_id_actual:
+        return False, "Inicia sesión para guardar clientes en tu cuenta"
+
+    cliente_id_limpio = str(cliente_id or "").strip()
+    if not cliente_id_limpio:
+        return False, "Selecciona un cliente antes de actualizar."
+    if not cliente.get("nombre"):
+        return False, "Indica un nombre de cliente antes de actualizar."
+
+    try:
+        (
+            supabase
+            .table("clientes")
+            .update(dict(cliente))
+            .eq("id", cliente_id_limpio)
+            .eq("user_id", user_id_actual)
+            .execute()
+        )
+        return True, "Cliente actualizado correctamente."
+    except Exception as e:
+        if error_tabla_clientes_no_activada(e):
+            return False, MENSAJE_CLIENTES_NO_ACTIVADO
+        return False, f"Error al actualizar cliente: {e}"
+
+
+def eliminar_cliente_supabase(cliente_id):
+    """
+    Elimina un cliente del usuario conectado.
+    """
+    if not supabase_disponible or supabase is None:
+        return False, "El inventario no está conectado correctamente."
+
+    user_id_actual = obtener_user_id_actual()
+    if not user_id_actual:
+        return False, "Inicia sesión para guardar clientes en tu cuenta"
+
+    cliente_id_limpio = str(cliente_id or "").strip()
+    if not cliente_id_limpio:
+        return False, "Selecciona un cliente antes de eliminar."
+
+    try:
+        (
+            supabase
+            .table("clientes")
+            .delete()
+            .eq("id", cliente_id_limpio)
+            .eq("user_id", user_id_actual)
+            .execute()
+        )
+        return True, "Cliente eliminado correctamente."
+    except Exception as e:
+        mensaje_error = str(e).lower()
+        if error_tabla_clientes_no_activada(e):
+            return False, MENSAJE_CLIENTES_NO_ACTIVADO
+        if "foreign key" in mensaje_error or "violates foreign key" in mensaje_error or "23503" in mensaje_error:
+            return False, "No se puede eliminar el cliente porque tiene facturas asociadas."
+        return False, f"Error al eliminar cliente: {e}"
 
 
 def calcular_totales_menu(lineas_menu):
@@ -2039,10 +2214,11 @@ with st.sidebar:
 
 st.divider()
 
-main_tab_receta, main_tab_guardadas, main_tab_menus, main_tab_costes, main_tab_base = st.tabs([
+main_tab_receta, main_tab_guardadas, main_tab_menus, main_tab_facturacion, main_tab_costes, main_tab_base = st.tabs([
     "Receta activa",
     "Recetas guardadas",
     "Menús",
+    "Facturación",
     "Costes y exportacion",
     "Base de ingredientes"
 ])
@@ -2439,6 +2615,143 @@ with main_tab_receta:
 
     else:
         st.info("Empieza agregando ingredientes usando entrada manual, texto o imagen.")
+
+
+with main_tab_facturacion:
+    st.subheader("Facturación")
+    st.markdown("#### Clientes")
+
+    usuario_id_facturacion = obtener_user_id_actual()
+    if not usuario_id_facturacion:
+        st.info("Inicia sesión para guardar clientes en tu cuenta")
+    else:
+        ok_clientes, mensaje_clientes, clientes_df = cargar_clientes_supabase()
+        if not ok_clientes:
+            st.warning(mensaje_clientes)
+        else:
+            if clientes_df.empty:
+                st.info("Todavía no hay clientes guardados en tu cuenta.")
+            else:
+                clientes_resumen = clientes_df[[
+                    "nombre", "tipo_cliente", "nif_cif", "email", "telefono",
+                    "ciudad", "provincia", "pais"
+                ]].fillna("")
+                st.dataframe(clientes_resumen, use_container_width=True, hide_index=True)
+
+            with st.form("form_cliente_nuevo"):
+                st.markdown("#### Nuevo cliente")
+                nuevo_col1, nuevo_col2 = st.columns(2)
+                with nuevo_col1:
+                    nuevo_nombre = st.text_input("Nombre", key="cliente_nuevo_nombre")
+                    nuevo_tipo = st.text_input("Tipo cliente", key="cliente_nuevo_tipo")
+                    nuevo_nif = st.text_input("NIF/CIF", key="cliente_nuevo_nif")
+                    nuevo_email = st.text_input("Email", key="cliente_nuevo_email")
+                    nuevo_telefono = st.text_input("Teléfono", key="cliente_nuevo_telefono")
+                with nuevo_col2:
+                    nuevo_direccion = st.text_input("Dirección", key="cliente_nuevo_direccion")
+                    nuevo_cp = st.text_input("Código postal", key="cliente_nuevo_cp")
+                    nuevo_ciudad = st.text_input("Ciudad", key="cliente_nuevo_ciudad")
+                    nuevo_provincia = st.text_input("Provincia", key="cliente_nuevo_provincia")
+                    nuevo_pais = st.text_input("País", value="España", key="cliente_nuevo_pais")
+                nuevo_observaciones = st.text_area("Observaciones", key="cliente_nuevo_observaciones", height=90)
+                guardar_cliente = st.form_submit_button("Guardar cliente", type="primary", use_container_width=True)
+
+                if guardar_cliente:
+                    datos_cliente = datos_cliente_desde_formulario(
+                        nuevo_nombre, nuevo_tipo, nuevo_nif, nuevo_email, nuevo_telefono,
+                        nuevo_direccion, nuevo_cp, nuevo_ciudad, nuevo_provincia,
+                        nuevo_pais, nuevo_observaciones
+                    )
+                    ok_guardar, mensaje_guardar, _ = guardar_cliente_supabase(datos_cliente)
+                    if ok_guardar:
+                        st.success(mensaje_guardar)
+                        st.rerun()
+                    else:
+                        st.error(mensaje_guardar)
+
+            if not clientes_df.empty:
+                st.divider()
+                st.markdown("#### Editar cliente")
+                clientes_por_id = {
+                    str(row.get("id")): row.to_dict()
+                    for _, row in clientes_df.iterrows()
+                    if row.get("id")
+                }
+                opciones_clientes = list(clientes_por_id.keys())
+                cliente_id_seleccionado = st.selectbox(
+                    "Clientes guardados",
+                    opciones_clientes,
+                    format_func=lambda cliente_id: clientes_por_id.get(cliente_id, {}).get("nombre", cliente_id),
+                    key="selector_cliente_facturacion"
+                )
+                cliente_seleccionado = clientes_por_id.get(str(cliente_id_seleccionado), {})
+
+                def valor_cliente(campo, defecto=""):
+                    valor = cliente_seleccionado.get(campo, defecto)
+                    if valor is None:
+                        return ""
+                    try:
+                        if pd.isna(valor):
+                            return ""
+                    except TypeError:
+                        pass
+                    return str(valor)
+
+                with st.form("form_cliente_editar"):
+                    editar_col1, editar_col2 = st.columns(2)
+                    with editar_col1:
+                        editar_nombre = st.text_input("Nombre", value=valor_cliente("nombre"), key=f"cliente_editar_nombre_{cliente_id_seleccionado}")
+                        editar_tipo = st.text_input("Tipo cliente", value=valor_cliente("tipo_cliente"), key=f"cliente_editar_tipo_{cliente_id_seleccionado}")
+                        editar_nif = st.text_input("NIF/CIF", value=valor_cliente("nif_cif"), key=f"cliente_editar_nif_{cliente_id_seleccionado}")
+                        editar_email = st.text_input("Email", value=valor_cliente("email"), key=f"cliente_editar_email_{cliente_id_seleccionado}")
+                        editar_telefono = st.text_input("Teléfono", value=valor_cliente("telefono"), key=f"cliente_editar_telefono_{cliente_id_seleccionado}")
+                    with editar_col2:
+                        editar_direccion = st.text_input("Dirección", value=valor_cliente("direccion"), key=f"cliente_editar_direccion_{cliente_id_seleccionado}")
+                        editar_cp = st.text_input("Código postal", value=valor_cliente("codigo_postal"), key=f"cliente_editar_cp_{cliente_id_seleccionado}")
+                        editar_ciudad = st.text_input("Ciudad", value=valor_cliente("ciudad"), key=f"cliente_editar_ciudad_{cliente_id_seleccionado}")
+                        editar_provincia = st.text_input("Provincia", value=valor_cliente("provincia"), key=f"cliente_editar_provincia_{cliente_id_seleccionado}")
+                        editar_pais = st.text_input("País", value=valor_cliente("pais", "España") or "España", key=f"cliente_editar_pais_{cliente_id_seleccionado}")
+                    editar_observaciones = st.text_area(
+                        "Observaciones",
+                        value=valor_cliente("observaciones"),
+                        key=f"cliente_editar_observaciones_{cliente_id_seleccionado}",
+                        height=90
+                    )
+                    actualizar_cliente = st.form_submit_button("Actualizar cliente", use_container_width=True)
+
+                    if actualizar_cliente:
+                        datos_cliente = datos_cliente_desde_formulario(
+                            editar_nombre, editar_tipo, editar_nif, editar_email, editar_telefono,
+                            editar_direccion, editar_cp, editar_ciudad, editar_provincia,
+                            editar_pais, editar_observaciones
+                        )
+                        ok_actualizar, mensaje_actualizar = actualizar_cliente_supabase(
+                            cliente_id_seleccionado,
+                            datos_cliente
+                        )
+                        if ok_actualizar:
+                            st.success(mensaje_actualizar)
+                            st.rerun()
+                        else:
+                            st.error(mensaje_actualizar)
+
+                st.markdown("#### Eliminar cliente")
+                st.warning("Esta acción no se puede deshacer. No elimines clientes con documentación asociada.")
+                confirmar_eliminar_cliente = st.text_input(
+                    "Escribe ELIMINAR para confirmar",
+                    key=f"confirmar_eliminar_cliente_{cliente_id_seleccionado}"
+                )
+                if st.button("Eliminar cliente seleccionado", type="secondary", use_container_width=True):
+                    if confirmar_eliminar_cliente != "ELIMINAR":
+                        st.error("Para eliminar el cliente debes escribir exactamente ELIMINAR.")
+                    else:
+                        ok_eliminar, mensaje_eliminar = eliminar_cliente_supabase(cliente_id_seleccionado)
+                        if ok_eliminar:
+                            st.success(mensaje_eliminar)
+                            st.rerun()
+                        else:
+                            st.error(mensaje_eliminar)
+
 
 with main_tab_costes:
     st.subheader("Costes y exportacion")
