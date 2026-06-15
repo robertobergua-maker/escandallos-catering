@@ -116,7 +116,99 @@ using (
   )
 );
 
--- No se crean politicas de menus en este paso.
--- La siguiente fase debera definir politicas de select/insert/update/delete
--- para menus usando auth.uid(), y decidir como tratar los registros historicos
--- con user_id null.
+-- Politicas de menus: cada usuario autenticado solo puede operar sobre sus
+-- propios menus.
+drop policy if exists "menus_select_propios" on public.menus;
+create policy "menus_select_propios"
+on public.menus
+for select
+to authenticated
+using (user_id = auth.uid());
+
+drop policy if exists "menus_insert_propios" on public.menus;
+create policy "menus_insert_propios"
+on public.menus
+for insert
+to authenticated
+with check (user_id = auth.uid());
+
+drop policy if exists "menus_update_propios" on public.menus;
+create policy "menus_update_propios"
+on public.menus
+for update
+to authenticated
+using (user_id = auth.uid())
+with check (user_id = auth.uid());
+
+drop policy if exists "menus_delete_propios" on public.menus;
+create policy "menus_delete_propios"
+on public.menus
+for delete
+to authenticated
+using (user_id = auth.uid());
+
+-- menu_recetas no lleva user_id propio: hereda la seguridad desde el menu
+-- propietario mediante menu_id.
+drop policy if exists "menu_recetas_select_por_menu_propio" on public.menu_recetas;
+create policy "menu_recetas_select_por_menu_propio"
+on public.menu_recetas
+for select
+to authenticated
+using (
+  exists (
+    select 1
+    from public.menus
+    where public.menus.id = menu_recetas.menu_id
+      and public.menus.user_id = auth.uid()
+  )
+);
+
+drop policy if exists "menu_recetas_insert_por_menu_propio" on public.menu_recetas;
+create policy "menu_recetas_insert_por_menu_propio"
+on public.menu_recetas
+for insert
+to authenticated
+with check (
+  exists (
+    select 1
+    from public.menus
+    where public.menus.id = menu_recetas.menu_id
+      and public.menus.user_id = auth.uid()
+  )
+);
+
+drop policy if exists "menu_recetas_update_por_menu_propio" on public.menu_recetas;
+create policy "menu_recetas_update_por_menu_propio"
+on public.menu_recetas
+for update
+to authenticated
+using (
+  exists (
+    select 1
+    from public.menus
+    where public.menus.id = menu_recetas.menu_id
+      and public.menus.user_id = auth.uid()
+  )
+)
+with check (
+  exists (
+    select 1
+    from public.menus
+    where public.menus.id = menu_recetas.menu_id
+      and public.menus.user_id = auth.uid()
+  )
+);
+
+drop policy if exists "menu_recetas_delete_por_menu_propio" on public.menu_recetas;
+create policy "menu_recetas_delete_por_menu_propio"
+on public.menu_recetas
+for delete
+to authenticated
+using (
+  exists (
+    select 1
+    from public.menus
+    where public.menus.id = menu_recetas.menu_id
+      and public.menus.user_id = auth.uid()
+  )
+);
