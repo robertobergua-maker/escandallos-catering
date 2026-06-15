@@ -652,6 +652,57 @@ def duplicar_receta_supabase(datos_receta, ingredientes):
     return guardar_receta_nueva_supabase(datos_copia, ingredientes)
 
 
+def eliminar_receta_supabase(receta_id):
+    """
+    Elimina una sola receta por id. Los ingredientes asociados dependen del cascade de Supabase.
+    """
+    if not receta_id:
+        return False, "No hay una receta seleccionada para eliminar."
+    if not supabase_disponible or supabase is None:
+        return False, "Supabase no está conectado correctamente."
+
+    try:
+        respuesta_uso_menu = (
+            supabase
+            .table("menu_recetas")
+            .select("id")
+            .eq("receta_id", receta_id)
+            .limit(1)
+            .execute()
+        )
+        if respuesta_uso_menu.data:
+            return (
+                False,
+                "No se puede eliminar porque esta receta está usada en uno o varios menús. "
+                "Primero elimínala del menú o duplica/modifica el menú."
+            )
+
+        (
+            supabase
+            .table("recetas")
+            .delete()
+            .eq("id", receta_id)
+            .execute()
+        )
+        limpiar_cache_recetas_guardadas()
+        return True, "Receta eliminada correctamente."
+    except Exception as e:
+        mensaje_error = str(e)
+        mensaje_error_lower = mensaje_error.lower()
+        if (
+            "foreign key" in mensaje_error_lower
+            or "violates foreign key" in mensaje_error_lower
+            or "23503" in mensaje_error_lower
+            or "menu_recetas" in mensaje_error_lower
+        ):
+            return (
+                False,
+                "No se puede eliminar porque esta receta está usada en uno o varios menús. "
+                "Primero elimínala del menú o duplica/modifica el menú."
+            )
+        return False, f"Error al eliminar la receta en Supabase: {e}"
+
+
 @st.cache_data(ttl=600)
 def cargar_menus_supabase():
     """
@@ -1877,6 +1928,12 @@ with main_tab_guardadas:
     if mensaje_receta_cargada:
         st.success(mensaje_receta_cargada)
 
+    opciones_recetas = []
+    recetas_por_id = {}
+    receta_id_seleccionada = None
+    if st.session_state.pop("limpiar_selector_receta_guardada", False):
+        st.session_state.pop("selector_receta_guardada", None)
+
     if not supabase_disponible:
         st.warning("Supabase no está disponible. No se pueden cargar recetas guardadas ahora.")
     else:
@@ -2089,6 +2146,55 @@ with main_tab_guardadas:
                         st.rerun()
                     else:
                         st.error(mensaje)
+
+    st.divider()
+    st.subheader("Eliminar receta")
+    receta_id_para_eliminar = (
+        str(receta_id_seleccionada)
+        if receta_id_seleccionada
+        else str(st.session_state.get("receta_id_cargada") or "")
+    )
+    receta_para_eliminar = recetas_por_id.get(receta_id_para_eliminar, {})
+
+    if not supabase_disponible:
+        st.warning("Supabase no está disponible. No se puede eliminar la receta ahora.")
+    elif not receta_id_para_eliminar:
+        st.info("Selecciona o carga una receta antes de intentar eliminarla.")
+    else:
+        codigo_eliminar = str(
+            receta_para_eliminar.get("codigo_receta")
+            or st.session_state.get("codigo_receta_cargada")
+            or "sin código"
+        )
+        nombre_eliminar = str(
+            receta_para_eliminar.get("nombre")
+            or st.session_state.get("receta_nombre")
+            or "receta seleccionada"
+        )
+        st.warning(
+            "Esta acción no se puede deshacer. Se borrará la cabecera de la receta y "
+            "sus ingredientes asociados. No se borrarán ingredientes del inventario."
+        )
+        st.write(f"**Receta seleccionada:** {codigo_eliminar} · {nombre_eliminar}")
+        confirmacion_eliminar = st.text_input(
+            "Escribe ELIMINAR para confirmar",
+            key=f"confirmar_eliminar_receta_{receta_id_para_eliminar}"
+        )
+        if st.button("Eliminar receta seleccionada", type="secondary", use_container_width=True):
+            if confirmacion_eliminar != "ELIMINAR":
+                st.error("Para eliminar la receta debes escribir exactamente ELIMINAR.")
+            else:
+                ok, mensaje = eliminar_receta_supabase(receta_id_para_eliminar)
+                if ok:
+                    if str(st.session_state.get("receta_id_cargada") or "") == receta_id_para_eliminar:
+                        st.session_state["receta_id_cargada"] = None
+                        st.session_state["codigo_receta_cargada"] = ""
+                    limpiar_cache_recetas_guardadas()
+                    st.session_state["limpiar_selector_receta_guardada"] = True
+                    st.session_state["mensaje_receta_cargada"] = "Receta eliminada correctamente. Listado de recetas actualizado."
+                    st.rerun()
+                else:
+                    st.error(mensaje)
 
 with main_tab_menus:
     st.subheader("Menús")
