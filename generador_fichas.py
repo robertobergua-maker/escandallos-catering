@@ -125,6 +125,8 @@ if 'menu_id' not in st.session_state:
     st.session_state['menu_id'] = None
 if 'sincronizar_campos_menu' not in st.session_state:
     st.session_state['sincronizar_campos_menu'] = False
+if 'menu_comensales_raciones_sync' not in st.session_state:
+    st.session_state['menu_comensales_raciones_sync'] = None
 
 # =============================================================================
 # 📥 FUNCIÓN CACHÉ PARA CARGAR INVENTARIO DESDE SUPABASE
@@ -1120,12 +1122,14 @@ INSTRUCCIONES CRÍTICAS:
 4. Devuelve ingredientes comestibles, no envases ni utensilios. Descarta explícitamente PAPEL, ENVOLVER, ENVOLTORIO, BANDEJA, CAJA, ETIQUETA, PACKAGING, SERVILLETA, PLATO, VASO, CUCHARA, TENEDOR, CUCHILLO y MOLDE.
 5. Si no conoces el precio, usa precio_unidad 0 y deja que la app lo vincule a BBDD.
 6. Si el texto o la imagen presenta mermas implícitas (por ejemplo, Peso Bruto: 0.350, Peso Neto: 0.300), calcula la merma porcentual de forma precisa: ((bruto - neto)/bruto)*100.
-7. Si detectas raciones de receta en expresiones como "6 porciones", "6 raciones", "para 6 personas", "serves 6" o "6 servings", devuelve ese número como "raciones_base".
-8. Ignora títulos de columnas de cabecera de Excel, importes totales o subtotales de facturas.
+7. Si detectas el nombre del plato o receta en el texto o imagen, devuélvelo como "nombre_receta" con el nombre limpio y legible.
+8. Si detectas raciones de receta en expresiones como "6 porciones", "6 raciones", "para 6 personas", "serves 6" o "6 servings", devuelve ese número como "raciones_base".
+9. Ignora títulos de columnas de cabecera de Excel, importes totales o subtotales de facturas.
 
 REQUISITO EXCLUSIVO DE RESPUESTA: Devuelve ÚNICAMENTE JSON puro sin bloques de código markdown de tipo ```json y sin explicaciones adicionales.
-Si detectas raciones base, devuelve un objeto:
+Si detectas nombre de receta o raciones base, devuelve un objeto:
 {{
+  "nombre_receta": "Azpacho andaluz",
   "raciones_base": 6,
   "ingredientes": [
     {{"codigo": "ING-0019", "descripcion": "POLLO", "unidad_medida": "kg", "cantidad_bruta": 0.35, "merma": 14.29, "precio_unidad": 5.15}}
@@ -1179,17 +1183,19 @@ Si no detectas raciones base, puedes devolver el array antiguo:
 
 def normalizar_respuesta_ingredientes_ia(respuesta_ia):
     """
-    Acepta el formato antiguo (lista) y el nuevo objeto con raciones_base.
+    Acepta el formato antiguo (lista) y el nuevo objeto con nombre_receta y raciones_base.
     """
+    nombre_receta = ""
     if isinstance(respuesta_ia, list):
         ingredientes = respuesta_ia
         raciones_base = None
-    if isinstance(respuesta_ia, dict):
+    elif isinstance(respuesta_ia, dict):
         ingredientes = respuesta_ia.get("ingredientes", [])
+        nombre_receta = str(respuesta_ia.get("nombre_receta", "") or "").strip()
         raciones_base = pd.to_numeric(respuesta_ia.get("raciones_base"), errors="coerce")
         raciones_base = None if pd.isna(raciones_base) or float(raciones_base) <= 0 else float(raciones_base)
-    elif not isinstance(respuesta_ia, list):
-        return None, []
+    else:
+        return "", None, []
 
     ingredientes_limpios = []
     for ing in ingredientes if isinstance(ingredientes, list) else []:
@@ -1204,13 +1210,17 @@ def normalizar_respuesta_ingredientes_ia(respuesta_ia):
             ing_limpio["unidad_medida"] = inferir_unidad_medida(ing_limpio["descripcion"])
         ingredientes_limpios.append(ing_limpio)
 
-    return raciones_base, ingredientes_limpios
+    return nombre_receta, raciones_base, ingredientes_limpios
 
 
 def incorporar_ingredientes_ia(respuesta_ia):
-    raciones_base_detectadas, nuevos = normalizar_respuesta_ingredientes_ia(respuesta_ia)
+    nombre_receta_detectado, raciones_base_detectadas, nuevos = normalizar_respuesta_ingredientes_ia(respuesta_ia)
     if not nuevos:
         return False
+
+    if nombre_receta_detectado:
+        st.session_state['receta_nombre'] = nombre_receta_detectado
+        st.session_state['sincronizar_campos_receta'] = True
 
     st.session_state['ingredientes'].extend(nuevos)
     st.session_state['ingredientes_base_raciones'] = [dict(ing) for ing in st.session_state['ingredientes']]
@@ -2372,6 +2382,10 @@ with main_tab_menus:
         value=int(st.session_state.get("menu_numero_comensales", 1) or 1),
         key="menu_numero_comensales"
     )
+    raciones_nueva_linea_default = float(numero_comensales) if numero_comensales and numero_comensales > 0 else 1.0
+    if st.session_state.get("menu_comensales_raciones_sync") != int(numero_comensales):
+        st.session_state["menu_raciones_receta"] = raciones_nueva_linea_default
+        st.session_state["menu_comensales_raciones_sync"] = int(numero_comensales)
 
     st.divider()
     st.markdown("#### Añadir recetas")
@@ -2413,7 +2427,6 @@ with main_tab_menus:
                 "Raciones de esta receta",
                 min_value=0.0,
                 step=1.0,
-                value=1.0,
                 key="menu_raciones_receta"
             )
         with add_col3:
