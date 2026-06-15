@@ -213,7 +213,7 @@ def normalizar_texto_busqueda(texto):
 PALABRAS_NO_ALIMENTARIAS = {
     "PAPEL", "ENVOLVER", "ENVOLTORIO", "CAJA", "BOLSA", "BANDEJA", "SERVILLETA",
     "VASO", "PLATO", "CUBIERTO", "GUANTE", "FILM", "ALUMINIO", "ETIQUETA",
-    "PACKAGING", "CUCHARA", "TENEDOR", "CUCHILLO", "MOLDE", "BLONDA", "TAPA"
+    "PACKAGING", "ENVASE", "CUCHARA", "TENEDOR", "CUCHILLO", "MOLDE", "BLONDA", "TAPA"
 }
 
 
@@ -263,6 +263,10 @@ def sugerir_ingredientes_similares(descripcion, inventario, limite=8, umbral=0.3
                 "unidad_medida": str(row.get("unidad_medida", "kg")).strip() or "kg",
                 "merma": float(row.get("merma", 0.0)) if pd.notna(row.get("merma")) else 0.0,
                 "precio_unidad": float(row.get("precio_unidad", 0.0)) if pd.notna(row.get("precio_unidad")) else 0.0,
+                "proveedor_precio": str(row.get("proveedor_precio", "") or "").strip(),
+                "formato_compra": str(row.get("formato_compra", "") or "").strip(),
+                "cantidad_formato_compra": row.get("cantidad_formato_compra", None),
+                "unidad_formato_compra": str(row.get("unidad_formato_compra", "") or "").strip(),
                 "score": score
             })
 
@@ -1730,29 +1734,71 @@ with main_tab_receta:
         if ingredientes_no_encontrados:
             with st.expander("🔎 Ingredientes no encontrados en BBDD y sugerencias", expanded=True):
                 for idx, ing, sugerencias in ingredientes_no_encontrados:
-                    st.markdown(f"**Fila {idx + 1}:** {ing.get('descripcion', 'Sin descripción')} · Código actual: `{ing.get('codigo', 'S/C')}`")
+                    ingrediente_original = str(ing.get("descripcion", "") or "Sin descripción").strip()
+                    cantidad_original = numero_seguro(ing.get("cantidad_bruta", 0.0), 0.0)
+                    unidad_original = str(ing.get("unidad_medida", "") or "kg").strip()
+                    codigo_original = str(ing.get("codigo", "S/C") or "S/C").strip().upper()
+
+                    if idx > 0:
+                        st.divider()
+
+                    st.markdown("#### Ingrediente no encontrado")
+                    st.write(f"**Ingrediente detectado:** {ingrediente_original}")
+                    st.write(f"**Cantidad:** {cantidad_original:.3f}")
+                    st.write(f"**Unidad:** {unidad_original}")
+                    st.write("**Motivo:** no existe coincidencia exacta en inventario")
+                    st.caption(f"Fila {idx + 1} · Código actual: `{codigo_original}`")
+
+                    st.markdown("#### Sugerencias de inventario")
                     if sugerencias:
                         opciones = [s["codigo"] for s in sugerencias]
                         etiquetas = {
-                            s["codigo"]: f"{s['codigo']} · {s['descripcion']} · {s.get('familia', '')} · {s.get('unidad_medida', 'kg')} · {s.get('precio_unidad', 0):.2f} € · {s['score']:.0%}"
+                            s["codigo"]: (
+                                f"{s['codigo']} · {s['descripcion']} · {s.get('familia', '')} · "
+                                f"{s.get('unidad_medida', 'kg')} · merma {s.get('merma', 0):.2f}% · "
+                                f"{s.get('precio_unidad', 0):.2f} € · "
+                                f"{s.get('proveedor_precio', '') or 'sin proveedor'} · "
+                                f"{s.get('formato_compra', '') or 'sin formato'} · "
+                                f"{s['score']:.0%}"
+                            )
                             for s in sugerencias
                         }
-                        sel_col, btn_col = st.columns([3, 1])
-                        seleccion = sel_col.selectbox(
-                            "Sugerencia parecida",
+                        seleccion = st.selectbox(
+                            "Elegir sugerencia parecida",
                             opciones,
                             format_func=lambda codigo: etiquetas.get(codigo, codigo),
                             key=f"sugerencia_codigo_{idx}"
                         )
-                        if btn_col.button("Usar", key=f"usar_sugerencia_{idx}", use_container_width=True):
+                        sugerencia_seleccionada = next((s for s in sugerencias if s["codigo"] == seleccion), None)
+                        if sugerencia_seleccionada:
+                            detalle_col1, detalle_col2 = st.columns(2)
+                            with detalle_col1:
+                                st.write(f"**Código:** {sugerencia_seleccionada['codigo']}")
+                                st.write(f"**Descripción:** {sugerencia_seleccionada['descripcion']}")
+                                st.write(f"**Familia:** {sugerencia_seleccionada.get('familia', '') or 'Sin familia'}")
+                                st.write(f"**Unidad:** {sugerencia_seleccionada.get('unidad_medida', 'kg')}")
+                            with detalle_col2:
+                                st.write(f"**Merma:** {sugerencia_seleccionada.get('merma', 0):.2f}%")
+                                st.write(f"**Precio unidad:** {sugerencia_seleccionada.get('precio_unidad', 0):.2f} €")
+                                st.write(f"**Proveedor:** {sugerencia_seleccionada.get('proveedor_precio', '') or 'Sin proveedor'}")
+                                formato = sugerencia_seleccionada.get("formato_compra", "") or "Sin formato"
+                                cantidad_formato = sugerencia_seleccionada.get("cantidad_formato_compra", None)
+                                unidad_formato = sugerencia_seleccionada.get("unidad_formato_compra", "") or ""
+                                if cantidad_formato is not None and pd.notna(cantidad_formato):
+                                    formato = f"{formato} · {cantidad_formato} {unidad_formato}".strip()
+                                st.write(f"**Formato:** {formato}")
+
+                        if st.button("Usar ingrediente sugerido", key=f"usar_sugerencia_{idx}", use_container_width=True):
                             sugerencia = next((s for s in sugerencias if s["codigo"] == seleccion), None)
                             if sugerencia:
                                 ingrediente_actualizado = dict(st.session_state['ingredientes'][idx])
+                                unidad_sugerida = sugerencia.get("unidad_medida", "kg")
+                                unidad_actual = str(ingrediente_actualizado.get("unidad_medida", "") or "").strip()
                                 ingrediente_actualizado.update({
                                     "codigo": sugerencia["codigo"],
                                     "familia": sugerencia.get("familia", "SIN CLASIFICAR"),
                                     "descripcion": sugerencia["descripcion"],
-                                    "unidad_medida": sugerencia.get("unidad_medida", "kg"),
+                                    "unidad_medida": unidad_sugerida or unidad_actual or "kg",
                                     "merma": sugerencia["merma"],
                                     "precio_unidad": sugerencia["precio_unidad"]
                                 })
@@ -1760,7 +1806,8 @@ with main_tab_receta:
                                 marcar_receta_modificada_manualmente()
                                 st.rerun()
                     else:
-                        st.caption("Sin coincidencias claras. Puedes crearlo como nuevo con el botón superior.")
+                        st.info("No se han encontrado sugerencias fiables en inventario.")
+                        st.caption("Puedes crearlo como nuevo en base de datos con el botón superior, o mantenerlo solo en la receta activa.")
 
 
     else:
