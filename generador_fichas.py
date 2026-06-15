@@ -382,6 +382,35 @@ def generar_nombre_copia_receta(nombre_original):
         return f"{nombre_base} copia"
 
 
+def generar_nombre_copia_menu(nombre_original):
+    """
+    Genera un nombre de copia de menu evitando duplicados sencillos.
+    """
+    nombre_base = str(nombre_original or "Menú").strip() or "Menú"
+    if not supabase_disponible or supabase is None:
+        return f"{nombre_base} copia"
+
+    try:
+        menus_df = cargar_menus_supabase()
+        nombres_existentes = {
+            str(nombre).strip().lower()
+            for nombre in menus_df.get("nombre", [])
+            if str(nombre).strip()
+        }
+        candidato = f"{nombre_base} copia"
+        if candidato.lower() not in nombres_existentes:
+            return candidato
+
+        contador = 2
+        while True:
+            candidato = f"{nombre_base} copia {contador}"
+            if candidato.lower() not in nombres_existentes:
+                return candidato
+            contador += 1
+    except Exception:
+        return f"{nombre_base} copia"
+
+
 def calcular_datos_ingrediente_receta(ing, orden=0):
     """
     Convierte un ingrediente de la app al formato de public.receta_ingredientes.
@@ -2160,7 +2189,7 @@ with main_tab_menus:
             st.metric("Precio total del menú", "Sin datos")
             st.metric("Precio por comensal", "Sin datos")
 
-    accion_menu_col1, accion_menu_col2, accion_menu_col3 = st.columns(3)
+    accion_menu_col1, accion_menu_col2, accion_menu_col3, accion_menu_col4 = st.columns(4)
     with accion_menu_col1:
         if st.button("Guardar menú", type="primary", use_container_width=True):
             nombre_menu_limpio = str(nombre_menu or "").strip()
@@ -2213,6 +2242,37 @@ with main_tab_menus:
                 else:
                     st.error(mensaje)
     with accion_menu_col3:
+        if st.button("Duplicar menú seleccionado", use_container_width=True):
+            menu_id_actual = st.session_state.get("menu_id")
+            nombre_menu_limpio = str(nombre_menu or "").strip()
+            if not supabase_disponible or supabase is None:
+                st.error("Supabase no está conectado correctamente.")
+            elif not menu_id_actual:
+                st.warning("Carga un menú guardado antes de duplicarlo.")
+            elif not nombre_menu_limpio:
+                st.error("Indica un nombre de menú antes de duplicarlo.")
+            elif not lineas_menu_actual:
+                st.warning("Añade al menos una receta antes de duplicar el menú.")
+            else:
+                nuevo_nombre_menu = generar_nombre_copia_menu(nombre_menu_limpio)
+                datos_menu = {
+                    "user_id": None,
+                    "nombre": nuevo_nombre_menu,
+                    "tipo_menu": tipo_menu,
+                    "descripcion": "",
+                    "numero_comensales": int(numero_comensales),
+                    "coste_total": float(total_coste_menu),
+                    "precio_total": float(total_precio_menu) if hay_precio_menu else None
+                }
+                ok, mensaje, menu_guardado = guardar_menu_supabase(datos_menu, lineas_menu_actual)
+                if ok:
+                    st.session_state["menu_id"] = menu_guardado.get("id")
+                    st.session_state["menu_nombre"] = menu_guardado.get("nombre", nuevo_nombre_menu)
+                    st.session_state["mensaje_menu_cargado"] = f"Menú duplicado correctamente: {st.session_state['menu_nombre']}."
+                    st.rerun()
+                else:
+                    st.error(mensaje)
+    with accion_menu_col4:
         if st.button("Limpiar menú actual", use_container_width=True):
             st.session_state["menu_actual"] = []
             st.session_state["menu_id"] = None
