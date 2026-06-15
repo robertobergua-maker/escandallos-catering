@@ -75,6 +75,58 @@ def login_supabase(email, password):
         return False, f"No se pudo iniciar sesión: {e}"
 
 
+def registrar_usuario_supabase(email, password):
+    """
+    Crea un usuario con Supabase Auth y guarda la sesion si Supabase la devuelve.
+    """
+    if not supabase_disponible or supabase is None:
+        return False, "Supabase no está conectado correctamente."
+
+    email_limpio = str(email or "").strip()
+    password_limpio = str(password or "")
+    if not email_limpio:
+        return False, "Introduce un email para crear la cuenta."
+    if len(password_limpio) < 6:
+        return False, "La contraseña debe tener al menos 6 caracteres."
+
+    try:
+        respuesta = supabase.auth.sign_up({
+            "email": email_limpio,
+            "password": password_limpio,
+        })
+        usuario = _obtener_campo_auth(respuesta, "user")
+        sesion = _obtener_campo_auth(respuesta, "session")
+        identidades = _obtener_campo_auth(usuario, "identities")
+
+        if identidades == []:
+            return False, "Este email ya tiene una cuenta. Inicia sesión."
+
+        user_id = _obtener_campo_auth(usuario, "id")
+        user_email = _obtener_campo_auth(usuario, "email", email_limpio)
+        access_token = _obtener_campo_auth(sesion, "access_token")
+
+        if sesion and user_id:
+            st.session_state["user_id"] = str(user_id)
+            st.session_state["user_email"] = str(user_email or email_limpio)
+            st.session_state["access_token"] = access_token
+            return True, "Cuenta creada e iniciada correctamente"
+
+        return True, "Cuenta creada. Revisa tu correo para confirmar el registro antes de iniciar sesión."
+    except Exception as e:
+        mensaje_error = str(e)
+        mensaje_error_lower = mensaje_error.lower()
+        if (
+            "already registered" in mensaje_error_lower
+            or "already exists" in mensaje_error_lower
+            or "user already" in mensaje_error_lower
+            or "email exists" in mensaje_error_lower
+            or "already been registered" in mensaje_error_lower
+            or "user_already_exists" in mensaje_error_lower
+        ):
+            return False, "Este email ya tiene una cuenta. Inicia sesión."
+        return False, f"No se pudo crear la cuenta: {mensaje_error}"
+
+
 def logout_supabase():
     """
     Cierra la sesion de Supabase y limpia los datos de autenticacion locales.
@@ -1688,28 +1740,52 @@ with st.sidebar:
     st.divider()
     st.subheader("Acceso")
     usuario_actual = obtener_usuario_actual()
+    auth_feedback = st.session_state.pop("auth_feedback", None)
+    if auth_feedback:
+        tipo_feedback, mensaje_feedback = auth_feedback
+        if tipo_feedback == "success":
+            st.success(mensaje_feedback)
+        elif tipo_feedback == "warning":
+            st.warning(mensaje_feedback)
+        else:
+            st.error(mensaje_feedback)
+
     if usuario_actual:
         st.success(f"Sesión iniciada: {usuario_actual.get('email') or 'usuario'}")
         if st.button("Cerrar sesión", use_container_width=True):
             ok_logout, mensaje_logout = logout_supabase()
             if ok_logout:
-                st.success(mensaje_logout)
+                st.session_state["auth_feedback"] = ("success", mensaje_logout)
                 st.rerun()
             else:
                 st.error(mensaje_logout)
     else:
         st.info("Inicia sesión para guardar tus recetas y menús en tu cuenta")
-        with st.form("form_login_supabase"):
-            login_email = st.text_input("Email")
-            login_password = st.text_input("Contraseña", type="password")
-            iniciar_sesion = st.form_submit_button("Iniciar sesión", use_container_width=True)
+        with st.form("form_acceso_supabase"):
+            acceso_email = st.text_input("Email")
+            acceso_password = st.text_input("Contraseña", type="password")
+            login_col, registro_col = st.columns(2)
+            with login_col:
+                iniciar_sesion = st.form_submit_button("Iniciar sesión", use_container_width=True)
+            with registro_col:
+                crear_cuenta = st.form_submit_button("Crear cuenta", use_container_width=True)
             if iniciar_sesion:
-                ok_login, mensaje_login = login_supabase(login_email, login_password)
+                ok_login, mensaje_login = login_supabase(acceso_email, acceso_password)
                 if ok_login:
-                    st.success(mensaje_login)
+                    st.session_state["auth_feedback"] = ("success", mensaje_login)
                     st.rerun()
                 else:
                     st.error(mensaje_login)
+            elif crear_cuenta:
+                ok_registro, mensaje_registro = registrar_usuario_supabase(acceso_email, acceso_password)
+                if ok_registro:
+                    if obtener_usuario_actual():
+                        st.session_state["auth_feedback"] = ("success", mensaje_registro)
+                        st.rerun()
+                    else:
+                        st.success(mensaje_registro)
+                else:
+                    st.error(mensaje_registro)
 
     st.divider()
     st.info("💡 Consejo: Al realizar modificaciones en la pestaña del Catálogo Supabase, haz clic en el botón 'Guardar Cambios en Supabase' para persistirlos en la nube de forma permanente.")
