@@ -336,6 +336,8 @@ if 'sincronizar_campos_menu' not in st.session_state:
     st.session_state['sincronizar_campos_menu'] = False
 if 'menu_comensales_raciones_sync' not in st.session_state:
     st.session_state['menu_comensales_raciones_sync'] = None
+if 'factura_lineas_actual' not in st.session_state:
+    st.session_state['factura_lineas_actual'] = []
 
 # =============================================================================
 # 📥 FUNCIÓN CACHÉ PARA CARGAR INVENTARIO
@@ -664,8 +666,26 @@ CLIENTES_COLUMNAS = [
     "observaciones", "created_at", "updated_at"
 ]
 
+FACTURAS_COLUMNAS = [
+    "id", "user_id", "cliente_id", "numero_factura", "tipo_documento", "estado",
+    "fecha_emision", "fecha_vencimiento", "concepto", "base_imponible",
+    "iva_pct", "iva_importe", "retencion_pct", "retencion_importe", "total",
+    "metodo_pago", "estado_cobro", "notas", "created_at", "updated_at"
+]
+
+FACTURA_LINEAS_COLUMNAS = [
+    "id", "factura_id", "origen_tipo", "origen_id", "descripcion", "cantidad",
+    "unidad", "precio_unitario", "descuento_pct", "base_linea", "iva_pct",
+    "iva_linea", "total_linea", "orden", "created_at"
+]
+
 MENSAJE_CLIENTES_NO_ACTIVADO = (
     "El módulo de clientes todavía no está activado en Inventario. "
+    "Ejecuta primero el SQL de facturación."
+)
+
+MENSAJE_FACTURACION_NO_ACTIVADA = (
+    "El módulo de facturación todavía no está activado en Inventario. "
     "Ejecuta primero el SQL de facturación."
 )
 
@@ -1333,6 +1353,215 @@ def eliminar_cliente_supabase(cliente_id):
         if "foreign key" in mensaje_error or "violates foreign key" in mensaje_error or "23503" in mensaje_error:
             return False, "No se puede eliminar el cliente porque tiene facturas asociadas."
         return False, f"Error al eliminar cliente: {e}"
+
+
+def error_tabla_facturacion_no_activada(error):
+    mensaje = str(error).lower()
+    return (
+        ("facturas" in mensaje or "factura_lineas" in mensaje)
+        and (
+            "does not exist" in mensaje
+            or "schema cache" in mensaje
+            or "42p01" in mensaje
+            or "pgrst205" in mensaje
+            or "could not find" in mensaje
+        )
+    )
+
+
+def linea_factura_vacia():
+    return {
+        "descripcion": "",
+        "cantidad": 1.0,
+        "unidad": "ud",
+        "precio_unitario": 0.0,
+        "descuento_pct": 0.0,
+        "iva_pct": 21.0,
+        "base_linea": 0.0,
+        "iva_linea": 0.0,
+        "total_linea": 0.0
+    }
+
+
+def calcular_linea_factura(linea):
+    cantidad = numero_seguro(linea.get("cantidad", 1.0), 1.0)
+    precio_unitario = numero_seguro(linea.get("precio_unitario", 0.0), 0.0)
+    descuento_pct = numero_seguro(linea.get("descuento_pct", 0.0), 0.0)
+    iva_pct = numero_seguro(linea.get("iva_pct", 21.0), 21.0)
+    base_linea = cantidad * precio_unitario * (1 - descuento_pct / 100)
+    iva_linea = base_linea * iva_pct / 100
+    total_linea = base_linea + iva_linea
+    return {
+        "descripcion": str(linea.get("descripcion", "") or "").strip(),
+        "cantidad": cantidad,
+        "unidad": str(linea.get("unidad", "ud") or "ud").strip() or "ud",
+        "precio_unitario": precio_unitario,
+        "descuento_pct": descuento_pct,
+        "iva_pct": iva_pct,
+        "base_linea": round(base_linea, 2),
+        "iva_linea": round(iva_linea, 2),
+        "total_linea": round(total_linea, 2)
+    }
+
+
+def calcular_totales_factura(lineas, iva_pct=21, retencion_pct=0):
+    lineas_calculadas = [calcular_linea_factura(linea) for linea in (lineas or [])]
+    base_imponible = sum(numero_seguro(linea.get("base_linea", 0.0), 0.0) for linea in lineas_calculadas)
+    iva_importe = sum(numero_seguro(linea.get("iva_linea", 0.0), 0.0) for linea in lineas_calculadas)
+    retencion_pct_num = numero_seguro(retencion_pct, 0.0)
+    retencion_importe = base_imponible * retencion_pct_num / 100
+    total = base_imponible + iva_importe - retencion_importe
+    iva_pct_num = numero_seguro(iva_pct, 21.0)
+    return {
+        "lineas": lineas_calculadas,
+        "base_imponible": round(base_imponible, 2),
+        "iva_pct": iva_pct_num,
+        "iva_importe": round(iva_importe, 2),
+        "retencion_pct": retencion_pct_num,
+        "retencion_importe": round(retencion_importe, 2),
+        "total": round(total, 2)
+    }
+
+
+def generar_numero_factura(tipo_documento):
+    prefijos = {
+        "presupuesto": "PRE",
+        "factura": "FAC",
+        "factura_rectificativa": "REC"
+    }
+    prefijo = prefijos.get(str(tipo_documento or "").strip(), "DOC")
+    anio = pd.Timestamp.today().year
+    if not supabase_disponible or supabase is None or not obtener_user_id_actual():
+        return f"{prefijo}-{anio}-0001"
+
+    try:
+        (
+            supabase
+            .table("factura_lineas")
+            .select("id")
+            .limit(1)
+            .execute()
+        )
+        respuesta = (
+            supabase
+            .table("facturas")
+            .select("numero_factura")
+            .eq("user_id", obtener_user_id_actual())
+            .ilike("numero_factura", f"{prefijo}-{anio}-%")
+            .execute()
+        )
+        ultimo = 0
+        for fila in respuesta.data or []:
+            numero = str(fila.get("numero_factura", "") or "")
+            coincidencia = re.search(r"(\d+)$", numero)
+            if coincidencia:
+                ultimo = max(ultimo, int(coincidencia.group(1)))
+        return f"{prefijo}-{anio}-{ultimo + 1:04d}"
+    except Exception:
+        return f"{prefijo}-{anio}-0001"
+
+
+def cargar_facturas_supabase():
+    if not supabase_disponible or supabase is None:
+        return False, "El inventario no está conectado correctamente.", pd.DataFrame(columns=FACTURAS_COLUMNAS)
+
+    user_id_actual = obtener_user_id_actual()
+    if not user_id_actual:
+        return False, "Inicia sesión para guardar clientes en tu cuenta", pd.DataFrame(columns=FACTURAS_COLUMNAS)
+
+    try:
+        respuesta = (
+            supabase
+            .table("facturas")
+            .select(",".join(FACTURAS_COLUMNAS))
+            .eq("user_id", user_id_actual)
+            .order("created_at", desc=True)
+            .limit(25)
+            .execute()
+        )
+        df = pd.DataFrame(respuesta.data or [])
+        if df.empty:
+            return True, "", pd.DataFrame(columns=FACTURAS_COLUMNAS)
+        for col in FACTURAS_COLUMNAS:
+            if col not in df.columns:
+                df[col] = None
+        return True, "", df[FACTURAS_COLUMNAS].copy()
+    except Exception as e:
+        if error_tabla_facturacion_no_activada(e):
+            return False, MENSAJE_FACTURACION_NO_ACTIVADA, pd.DataFrame(columns=FACTURAS_COLUMNAS)
+        return False, f"Error al cargar documentos: {e}", pd.DataFrame(columns=FACTURAS_COLUMNAS)
+
+
+def guardar_factura_supabase(factura, lineas):
+    if not supabase_disponible or supabase is None:
+        return False, "El inventario no está conectado correctamente.", None
+
+    user_id_actual = obtener_user_id_actual()
+    if not user_id_actual:
+        return False, "Inicia sesión para guardar clientes en tu cuenta", None
+    if not factura.get("cliente_id"):
+        return False, "Selecciona un cliente antes de guardar el documento.", None
+
+    lineas_validas = [
+        calcular_linea_factura(linea)
+        for linea in (lineas or [])
+        if str(linea.get("descripcion", "") or "").strip()
+    ]
+    if not lineas_validas:
+        return False, "Añade al menos una línea antes de guardar el documento.", None
+
+    totales = calcular_totales_factura(
+        lineas_validas,
+        factura.get("iva_pct", 21),
+        factura.get("retencion_pct", 0)
+    )
+    datos_factura = dict(factura)
+    datos_factura["user_id"] = user_id_actual
+    datos_factura["base_imponible"] = totales["base_imponible"]
+    datos_factura["iva_importe"] = totales["iva_importe"]
+    datos_factura["retencion_importe"] = totales["retencion_importe"]
+    datos_factura["total"] = totales["total"]
+
+    try:
+        respuesta_factura = (
+            supabase
+            .table("facturas")
+            .insert(datos_factura)
+            .execute()
+        )
+        factura_guardada = (respuesta_factura.data or [{}])[0]
+        factura_id = factura_guardada.get("id")
+        if not factura_id:
+            return False, "No se pudo obtener el identificador del documento guardado.", None
+
+        lineas_guardar = []
+        for orden, linea in enumerate(lineas_validas, start=1):
+            lineas_guardar.append({
+                "factura_id": factura_id,
+                "origen_tipo": "manual",
+                "descripcion": linea["descripcion"],
+                "cantidad": linea["cantidad"],
+                "unidad": linea["unidad"],
+                "precio_unitario": linea["precio_unitario"],
+                "descuento_pct": linea["descuento_pct"],
+                "base_linea": linea["base_linea"],
+                "iva_pct": linea["iva_pct"],
+                "iva_linea": linea["iva_linea"],
+                "total_linea": linea["total_linea"],
+                "orden": orden
+            })
+
+        (
+            supabase
+            .table("factura_lineas")
+            .insert(lineas_guardar)
+            .execute()
+        )
+        return True, "Documento guardado correctamente.", factura_guardada
+    except Exception as e:
+        if error_tabla_facturacion_no_activada(e):
+            return False, MENSAJE_FACTURACION_NO_ACTIVADA, None
+        return False, f"Error al guardar documento: {e}", None
 
 
 def calcular_totales_menu(lineas_menu):
@@ -2751,6 +2980,183 @@ with main_tab_facturacion:
                             st.rerun()
                         else:
                             st.error(mensaje_eliminar)
+
+            st.divider()
+            st.markdown("#### Presupuestos y facturas")
+            st.info("Módulo de facturación interna. No usar como sistema fiscal definitivo sin revisión legal/fiscal.")
+
+            ok_facturas, mensaje_facturas, facturas_df = cargar_facturas_supabase()
+            if not ok_facturas:
+                st.warning(mensaje_facturas)
+            elif clientes_df.empty:
+                st.warning("Añade al menos un cliente antes de crear presupuestos o facturas.")
+            else:
+                clientes_por_id_factura = {
+                    str(row.get("id")): row.to_dict()
+                    for _, row in clientes_df.iterrows()
+                    if row.get("id")
+                }
+                opciones_clientes_factura = list(clientes_por_id_factura.keys())
+
+                st.markdown("##### Nuevo documento")
+                doc_col1, doc_col2, doc_col3 = st.columns(3)
+                with doc_col1:
+                    factura_cliente_id = st.selectbox(
+                        "Cliente",
+                        opciones_clientes_factura,
+                        format_func=lambda cliente_id: clientes_por_id_factura.get(cliente_id, {}).get("nombre", cliente_id),
+                        key="factura_cliente_id"
+                    )
+                    tipo_documento = st.selectbox(
+                        "Tipo de documento",
+                        ["presupuesto", "factura", "factura_rectificativa"],
+                        key="factura_tipo_documento"
+                    )
+                    numero_sugerido = generar_numero_factura(tipo_documento)
+                    numero_factura = st.text_input(
+                        "Número de factura/documento",
+                        value=numero_sugerido,
+                        key=f"factura_numero_actual_{tipo_documento}"
+                    )
+                with doc_col2:
+                    fecha_emision = st.date_input("Fecha de emisión", key="factura_fecha_emision")
+                    fecha_vencimiento = st.date_input("Fecha de vencimiento", key="factura_fecha_vencimiento")
+                    estado = st.selectbox(
+                        "Estado",
+                        ["borrador", "emitida", "cobrada", "anulada"],
+                        key="factura_estado"
+                    )
+                with doc_col3:
+                    metodo_pago = st.text_input("Método de pago", key="factura_metodo_pago")
+                    estado_cobro = st.selectbox(
+                        "Estado de cobro",
+                        ["pendiente", "parcial", "cobrado"],
+                        key="factura_estado_cobro"
+                    )
+                    retencion_pct = st.number_input(
+                        "Retención (%)",
+                        min_value=0.0,
+                        max_value=100.0,
+                        step=1.0,
+                        key="factura_retencion_pct"
+                    )
+
+                concepto = st.text_input("Concepto", key="factura_concepto")
+                notas = st.text_area("Notas", key="factura_notas", height=80)
+
+                lineas_accion_col1, lineas_accion_col2, lineas_accion_col3 = st.columns(3)
+                with lineas_accion_col1:
+                    if st.button("Añadir línea", use_container_width=True):
+                        st.session_state["factura_lineas_actual"].append(linea_factura_vacia())
+                        st.rerun()
+                with lineas_accion_col2:
+                    if st.button("Quitar línea", use_container_width=True):
+                        if st.session_state["factura_lineas_actual"]:
+                            st.session_state["factura_lineas_actual"].pop()
+                            st.rerun()
+                        else:
+                            st.info("No hay líneas para quitar.")
+                with lineas_accion_col3:
+                    if st.button("Limpiar documento", use_container_width=True):
+                        st.session_state["factura_lineas_actual"] = []
+                        st.rerun()
+
+                if not st.session_state["factura_lineas_actual"]:
+                    st.session_state["factura_lineas_actual"] = [linea_factura_vacia()]
+
+                lineas_df = pd.DataFrame([
+                    calcular_linea_factura(linea)
+                    for linea in st.session_state["factura_lineas_actual"]
+                ])
+                lineas_editadas_df = st.data_editor(
+                    lineas_df,
+                    num_rows="fixed",
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "descripcion": st.column_config.TextColumn("Descripción", required=True, width="large"),
+                        "cantidad": st.column_config.NumberColumn("Cantidad", min_value=0.0, step=1.0, format="%.3f"),
+                        "unidad": st.column_config.TextColumn("Unidad", width="small"),
+                        "precio_unitario": st.column_config.NumberColumn("Precio unitario", min_value=0.0, step=1.0, format="%.4f €"),
+                        "descuento_pct": st.column_config.NumberColumn("Descuento %", min_value=0.0, max_value=100.0, step=1.0, format="%.2f %%"),
+                        "iva_pct": st.column_config.NumberColumn("IVA %", min_value=0.0, max_value=100.0, step=1.0, format="%.2f %%"),
+                        "base_linea": st.column_config.NumberColumn("Base línea", format="%.2f €"),
+                        "iva_linea": st.column_config.NumberColumn("IVA línea", format="%.2f €"),
+                        "total_linea": st.column_config.NumberColumn("Total línea", format="%.2f €")
+                    },
+                    disabled=["base_linea", "iva_linea", "total_linea"],
+                    key="editor_factura_lineas"
+                )
+
+                lineas_actualizadas = [
+                    calcular_linea_factura(linea)
+                    for linea in lineas_editadas_df.to_dict(orient="records")
+                ]
+                if lineas_actualizadas != st.session_state["factura_lineas_actual"]:
+                    st.session_state["factura_lineas_actual"] = lineas_actualizadas
+                    st.rerun()
+
+                totales_factura = calcular_totales_factura(
+                    st.session_state["factura_lineas_actual"],
+                    retencion_pct=retencion_pct
+                )
+                total_col1, total_col2, total_col3, total_col4 = st.columns(4)
+                with total_col1:
+                    st.metric("Base imponible", f"{totales_factura['base_imponible']:.2f} €")
+                with total_col2:
+                    st.metric("IVA", f"{totales_factura['iva_importe']:.2f} €")
+                with total_col3:
+                    st.metric("Retención", f"{totales_factura['retencion_importe']:.2f} €")
+                with total_col4:
+                    st.metric("Total", f"{totales_factura['total']:.2f} €")
+
+                if st.button("Guardar documento", type="primary", use_container_width=True):
+                    factura = {
+                        "cliente_id": factura_cliente_id,
+                        "numero_factura": str(numero_factura or "").strip(),
+                        "tipo_documento": tipo_documento,
+                        "estado": estado,
+                        "fecha_emision": fecha_emision.isoformat() if fecha_emision else None,
+                        "fecha_vencimiento": fecha_vencimiento.isoformat() if fecha_vencimiento else None,
+                        "concepto": str(concepto or "").strip() or None,
+                        "iva_pct": 21.0,
+                        "retencion_pct": float(retencion_pct),
+                        "metodo_pago": str(metodo_pago or "").strip() or None,
+                        "estado_cobro": estado_cobro,
+                        "notas": str(notas or "").strip() or None
+                    }
+                    ok_guardar_doc, mensaje_guardar_doc, factura_guardada = guardar_factura_supabase(
+                        factura,
+                        st.session_state["factura_lineas_actual"]
+                    )
+                    if ok_guardar_doc:
+                        st.success(f"{mensaje_guardar_doc} {factura_guardada.get('numero_factura', numero_factura)}")
+                        st.session_state["factura_lineas_actual"] = []
+                        st.rerun()
+                    else:
+                        st.error(mensaje_guardar_doc)
+
+                st.markdown("##### Últimos documentos")
+                if facturas_df.empty:
+                    st.info("Todavía no hay presupuestos ni facturas guardados.")
+                else:
+                    nombres_clientes = {
+                        cliente_id: datos.get("nombre", "")
+                        for cliente_id, datos in clientes_por_id_factura.items()
+                    }
+                    facturas_resumen = facturas_df.copy()
+                    facturas_resumen["cliente"] = facturas_resumen["cliente_id"].apply(
+                        lambda cliente_id: nombres_clientes.get(str(cliente_id), "")
+                    )
+                    facturas_resumen = facturas_resumen[[
+                        "numero_factura", "tipo_documento", "cliente",
+                        "fecha_emision", "estado", "total"
+                    ]].rename(columns={
+                        "numero_factura": "número",
+                        "tipo_documento": "tipo",
+                        "fecha_emision": "fecha"
+                    })
+                    st.dataframe(facturas_resumen.fillna(""), use_container_width=True, hide_index=True)
 
 
 with main_tab_costes:
