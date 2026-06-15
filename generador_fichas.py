@@ -16,7 +16,7 @@ from supabase import create_client, Client
 st.set_page_config(page_title="Gestor de Fichas Técnicas Cloud", page_icon="👨‍🍳", layout="wide")
 
 # =============================================================================
-# 🔑 INICIALIZACIÓN DE CONEXIONES CLOUD (SUPABASE Y OPENAI)
+# 🔑 INICIALIZACIÓN DE CONEXIONES CLOUD (INVENTARIO Y CIA)
 # =============================================================================
 supabase_url = st.secrets.get("SUPABASE_URL", None)
 supabase_key = st.secrets.get("SUPABASE_KEY", None)
@@ -24,13 +24,13 @@ api_key = st.secrets.get("OPENAI_API_KEY", None)
 
 supabase_disponible = supabase_url is not None and supabase_key is not None
 
-# Variable de cliente global para Supabase
+# Variable de cliente global para el inventario
 supabase: Client = None
 if supabase_disponible:
     try:
         supabase = create_client(supabase_url, supabase_key)
     except Exception as e:
-        st.error(f"⚠️ Error al conectar con el cliente de Supabase: {e}")
+        st.error(f"⚠️ Error al conectar con el inventario: {e}")
         supabase_disponible = False
 
 
@@ -44,10 +44,10 @@ def _obtener_campo_auth(objeto, campo, valor_por_defecto=None):
 
 def login_supabase(email, password):
     """
-    Inicia sesion con Supabase Auth y guarda los datos basicos en session_state.
+    Inicia sesion y guarda los datos basicos en session_state.
     """
     if not supabase_disponible or supabase is None:
-        return False, "Supabase no está conectado correctamente."
+        return False, "El inventario no está conectado correctamente."
 
     email_limpio = str(email or "").strip()
     if not email_limpio or not password:
@@ -77,10 +77,10 @@ def login_supabase(email, password):
 
 def registrar_usuario_supabase(email, password):
     """
-    Crea un usuario con Supabase Auth y guarda la sesion si Supabase la devuelve.
+    Crea un usuario y guarda la sesion si el inventario la devuelve.
     """
     if not supabase_disponible or supabase is None:
-        return False, "Supabase no está conectado correctamente."
+        return False, "El inventario no está conectado correctamente."
 
     email_limpio = str(email or "").strip()
     password_limpio = str(password or "")
@@ -129,7 +129,7 @@ def registrar_usuario_supabase(email, password):
 
 def logout_supabase():
     """
-    Cierra la sesion de Supabase y limpia los datos de autenticacion locales.
+    Cierra la sesion y limpia los datos de autenticacion locales.
     """
     if supabase_disponible and supabase is not None:
         try:
@@ -281,7 +281,7 @@ if 'raciones_base_aplicadas' not in st.session_state:
 if 'raciones_deseadas_aplicadas' not in st.session_state:
     st.session_state['raciones_deseadas_aplicadas'] = float(st.session_state['raciones_deseadas'])
 
-# Trigger para invalidar caché de Supabase al editar el catálogo
+# Trigger para invalidar cache del inventario al editar el catalogo
 if 'db_trigger' not in st.session_state:
     st.session_state['db_trigger'] = 0
 
@@ -338,12 +338,12 @@ if 'menu_comensales_raciones_sync' not in st.session_state:
     st.session_state['menu_comensales_raciones_sync'] = None
 
 # =============================================================================
-# 📥 FUNCIÓN CACHÉ PARA CARGAR INVENTARIO DESDE SUPABASE
+# 📥 FUNCIÓN CACHÉ PARA CARGAR INVENTARIO
 # =============================================================================
 @st.cache_data(ttl=600)
 def cargar_inventario_supabase(trigger):
     """
-    Trae el listado de ingredientes de Supabase de forma segura.
+    Trae el listado de ingredientes del inventario de forma segura.
     Se invalida automáticamente al cambiar el 'trigger'.
     """
     cols_deseadas = [
@@ -383,7 +383,7 @@ def cargar_inventario_supabase(trigger):
         df = df.sort_values(by="descripcion")
         return df
     except Exception as e:
-        st.error(f"Error al leer de Supabase: {e}")
+        st.error(f"Error al leer el inventario: {e}")
         return pd.DataFrame(columns=cols_deseadas)
 
 # Cargar inventario actual para autocompletado y contexto IA
@@ -561,7 +561,7 @@ def numero_seguro(valor, defecto=0.0):
 def generar_codigo_receta():
     """
     Genera el siguiente codigo REC-0001, REC-0002... leyendo public.recetas.
-    Si Supabase no esta disponible, devuelve un codigo inicial seguro.
+    Si el inventario no esta disponible, devuelve un codigo inicial seguro.
     """
     if not supabase_disponible or supabase is None:
         return "REC-0001"
@@ -768,10 +768,10 @@ def cargar_receta_detalle_supabase(receta_id):
 
 def guardar_receta_nueva_supabase(datos_receta, ingredientes):
     """
-    Guarda una receta nueva y sus lineas de escandallo en Supabase.
+    Guarda una receta nueva y sus lineas de escandallo en el inventario.
     """
     if not supabase_disponible or supabase is None:
-        return False, "Supabase no está conectado correctamente.", None
+        return False, "El inventario no está conectado correctamente.", None
 
     try:
         user_id_actual = obtener_user_id_actual()
@@ -808,7 +808,7 @@ def guardar_receta_nueva_supabase(datos_receta, ingredientes):
             return True, "Receta guardada en tu cuenta", receta_guardada
         return True, "Receta guardada correctamente. Inicia sesión para guardar recetas en tu cuenta", receta_guardada
     except Exception as e:
-        return False, f"Error al guardar la receta en Supabase: {e}", None
+        return False, f"Error al guardar la receta en el inventario: {e}", None
 
 
 def actualizar_receta_supabase(receta_id, datos_receta, ingredientes):
@@ -818,7 +818,7 @@ def actualizar_receta_supabase(receta_id, datos_receta, ingredientes):
     if not receta_id:
         return False, "No hay una receta cargada para actualizar."
     if not supabase_disponible or supabase is None:
-        return False, "Supabase no está conectado correctamente."
+        return False, "El inventario no está conectado correctamente."
 
     try:
         cabecera_actual, _ = cargar_receta_detalle_supabase(receta_id)
@@ -863,7 +863,7 @@ def actualizar_receta_supabase(receta_id, datos_receta, ingredientes):
 
         return True, "Receta actualizada correctamente."
     except Exception as e:
-        return False, f"Error al actualizar la receta en Supabase: {e}"
+        return False, f"Error al actualizar la receta en el inventario: {e}"
 
 
 def duplicar_receta_supabase(datos_receta, ingredientes):
@@ -871,7 +871,7 @@ def duplicar_receta_supabase(datos_receta, ingredientes):
     Duplica una receta cargada como una receta nueva con codigo y nombre nuevos.
     """
     if not supabase_disponible or supabase is None:
-        return False, "Supabase no está conectado correctamente.", None
+        return False, "El inventario no está conectado correctamente.", None
     if not ingredientes:
         return False, "No hay ingredientes para duplicar.", None
 
@@ -885,12 +885,12 @@ def duplicar_receta_supabase(datos_receta, ingredientes):
 
 def eliminar_receta_supabase(receta_id):
     """
-    Elimina una sola receta por id. Los ingredientes asociados dependen del cascade de Supabase.
+    Elimina una sola receta por id. Los ingredientes asociados dependen del cascade del inventario.
     """
     if not receta_id:
         return False, "No hay una receta seleccionada para eliminar."
     if not supabase_disponible or supabase is None:
-        return False, "Supabase no está conectado correctamente."
+        return False, "El inventario no está conectado correctamente."
 
     try:
         cabecera_actual, _ = cargar_receta_detalle_supabase(receta_id)
@@ -937,7 +937,7 @@ def eliminar_receta_supabase(receta_id):
                 "No se puede eliminar porque esta receta está usada en uno o varios menús. "
                 "Primero elimínala del menú o duplica/modifica el menú."
             )
-        return False, f"Error al eliminar la receta en Supabase: {e}"
+        return False, f"Error al eliminar la receta en el inventario: {e}"
 
 
 @st.cache_data(ttl=600)
@@ -1193,7 +1193,7 @@ def guardar_menu_supabase(datos_menu, lineas_menu):
     Crea un menu nuevo y sus recetas asociadas. No modifica recetas.
     """
     if not supabase_disponible or supabase is None:
-        return False, "Supabase no está conectado correctamente.", None
+        return False, "El inventario no está conectado correctamente.", None
 
     lineas_menu = normalizar_lineas_menu(lineas_menu)
     lineas_preparadas = preparar_lineas_menu_para_supabase(lineas_menu)
@@ -1243,7 +1243,7 @@ def guardar_menu_supabase(datos_menu, lineas_menu):
             return True, "Menú guardado en tu cuenta", menu_guardado
         return True, "Menú guardado correctamente. Inicia sesión para guardar menús en tu cuenta", menu_guardado
     except Exception as e:
-        return False, f"Error al guardar el menú en Supabase: {e}", None
+        return False, f"Error al guardar el menú en el inventario: {e}", None
 
 
 def actualizar_menu_supabase(menu_id, datos_menu, lineas_menu):
@@ -1253,7 +1253,7 @@ def actualizar_menu_supabase(menu_id, datos_menu, lineas_menu):
     if not menu_id:
         return False, "No hay un menú seleccionado para actualizar."
     if not supabase_disponible or supabase is None:
-        return False, "Supabase no está conectado correctamente."
+        return False, "El inventario no está conectado correctamente."
 
     lineas_menu = normalizar_lineas_menu(lineas_menu)
     lineas_preparadas = preparar_lineas_menu_para_supabase(lineas_menu)
@@ -1311,7 +1311,7 @@ def actualizar_menu_supabase(menu_id, datos_menu, lineas_menu):
 
         return True, "Menú actualizado correctamente."
     except Exception as e:
-        return False, f"Error al actualizar el menú en Supabase: {e}"
+        return False, f"Error al actualizar el menú en el inventario: {e}"
 
 
 def preparar_ingredientes_receta_para_sesion(ingredientes_df):
@@ -1336,14 +1336,14 @@ def preparar_ingredientes_receta_para_sesion(ingredientes_df):
 
 
 # =============================================================================
-# 🧠 PROCESAMIENTO INTELIGENTE CON OPENAI GPT-4o
+# 🧠 PROCESAMIENTO INTELIGENTE CON CIA
 # =============================================================================
 def procesar_con_openai(texto_plano=None, bytes_imagen=None, mime_type=None):
     """
-    Envía la información a GPT-4o pasándole el inventario actual de Supabase como contexto.
+    Envia la informacion a CIA pasandole el inventario actual como contexto.
     """
     if not api_key:
-        st.error("❌ Error: No se ha encontrado la clave 'OPENAI_API_KEY' en los Secrets de Streamlit.")
+        st.error("❌ Error: No se ha encontrado la clave de CIA en los secrets.")
         return []
 
     try:
@@ -1429,7 +1429,7 @@ Si no detectas raciones base, puedes devolver el array antiguo:
         return json.loads(json_texto)
 
     except Exception as e:
-        st.error(f"⚠️ Error al conectar con la Inteligencia Artificial de OpenAI: {str(e)}")
+        st.error(f"⚠️ Error al conectar con CIA: {str(e)}")
         return []
 
 
@@ -1718,7 +1718,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-st.title("👨‍🍳 Gestor de Escandallos Inteligente con Supabase PostgreSQL")
+st.title("👨‍🍳 Gestor de Escandallos Inteligente Samirarte")
 
 usuario_actual = obtener_usuario_actual()
 if usuario_actual is None:
@@ -1726,16 +1726,16 @@ if usuario_actual is None:
 
 # Panel lateral indicador de conexiones activas
 with st.sidebar:
-    st.header("⚙️ Estado de Conexiones Cloud")
+    st.header("⚙️ Estado de Conexiones")
     if supabase_disponible:
-        st.success("⚡ Supabase: Conectado")
+        st.success("⚡ Inventario: Conectado")
     else:
-        st.warning("⚠️ Supabase: Desconectado. Configure 'SUPABASE_URL' y 'SUPABASE_KEY' en los Secrets.")
+        st.warning("⚠️ Inventario: Desconectado. Configura las credenciales en los secrets.")
         
     if api_key:
-        st.success("🤖 OpenAI GPT-4o: Activo")
+        st.success("🤖 CIA: Activo")
     else:
-        st.warning("⚠️ OpenAI: Desconectado. Configure 'OPENAI_API_KEY' en los Secrets.")
+        st.warning("⚠️ CIA: Desconectado. Configura la clave de IA en los secrets.")
 
     st.divider()
     st.subheader("Acceso")
@@ -1788,7 +1788,7 @@ with st.sidebar:
                     st.error(mensaje_registro)
 
     st.divider()
-    st.info("💡 Consejo: Al realizar modificaciones en la pestaña del Catálogo Supabase, haz clic en el botón 'Guardar Cambios en Supabase' para persistirlos en la nube de forma permanente.")
+    st.info("💡 Consejo: Al realizar modificaciones en la pestaña del catálogo, haz clic en el botón 'Guardar cambios en inventario' para persistirlos en la nube de forma permanente.")
 
     ingredientes_vinculados = [
         (idx, ing, str(ing.get("codigo", "")).strip().upper())
@@ -1848,7 +1848,7 @@ with st.sidebar:
 
             if st.form_submit_button("Guardar cambios en BBDD"):
                 if not supabase_disponible:
-                    st.error("Supabase no está conectado correctamente.")
+                    st.error("El inventario no está conectado correctamente.")
                 else:
                     datos_ficha = {
                         "codigo": codigo_ficha,
@@ -1871,7 +1871,7 @@ with st.sidebar:
                         st.success(f"Ficha {codigo_ficha} actualizada.")
                         st.rerun()
                     except Exception as e:
-                        st.error(f"Error al guardar la ficha en Supabase: {e}")
+                        st.error(f"Error al guardar la ficha en el inventario: {e}")
 
 
 
@@ -2005,7 +2005,7 @@ with main_tab_receta:
                         'merma': info_bd['merma'],
                         'precio_unidad': info_bd['precio_unidad']
                     })
-                    st.success(f"Ingrediente de Supabase añadido: {info_bd['descripcion']}")
+                    st.success(f"Ingrediente de inventario añadido: {info_bd['descripcion']}")
                 else:
                     # Si es un ingrediente sin código en el inventario
                     st.session_state['ingredientes'].append({
@@ -2026,7 +2026,7 @@ with main_tab_receta:
 
         if st.button("Analizar texto con IA", type="primary"):
             if texto_pegado:
-                with st.spinner("La IA está leyendo y cruzando los datos con tu Supabase..."):
+                with st.spinner("La IA está leyendo y cruzando los datos con tu inventario..."):
                     nuevos = procesar_con_openai(texto_plano=texto_pegado)
                     if incorporar_ingredientes_ia(nuevos):
                         st.rerun()
@@ -2039,7 +2039,7 @@ with main_tab_receta:
         if archivo_imagen:
             if st.button("Escanear imagen con IA Vision", type="primary"):
                 bytes_img = archivo_imagen.read()
-                with st.spinner("Leyendo factura y asociando códigos de Supabase..."):
+                with st.spinner("Leyendo factura y asociando códigos de inventario..."):
                     nuevos = procesar_con_openai(bytes_imagen=bytes_img, mime_type=archivo_imagen.type)
                     if incorporar_ingredientes_ia(nuevos):
                         st.rerun()
@@ -2111,7 +2111,7 @@ with main_tab_receta:
         with acciones_db_col1:
             if st.button("Actualizar BBDD con códigos existentes", use_container_width=True):
                 if not supabase_disponible:
-                    st.error("Supabase no está conectado correctamente.")
+                    st.error("El inventario no está conectado correctamente.")
                 else:
                     filas_validas = [
                         preparar_fila_inventario_desde_ingrediente(ing)
@@ -2123,17 +2123,17 @@ with main_tab_receta:
                             for fila in filas_validas:
                                 supabase.table("inventario").upsert(fila).execute()
                             st.session_state['db_trigger'] += 1
-                            st.success(f"{len(filas_validas)} ingredientes actualizados en Supabase.")
+                            st.success(f"{len(filas_validas)} ingredientes actualizados en el inventario.")
                             st.rerun()
                         except Exception as e:
-                            st.error(f"Error al actualizar Supabase: {e}")
+                            st.error(f"Error al actualizar el inventario: {e}")
                     else:
                         st.info("No hay ingredientes con código existente para actualizar.")
 
         with acciones_db_col2:
             if st.button("Crear nuevos en BBDD", use_container_width=True):
                 if not supabase_disponible:
-                    st.error("Supabase no está conectado correctamente.")
+                    st.error("El inventario no está conectado correctamente.")
                 else:
                     existentes = set(inventario_dict.keys())
                     ingredientes_actualizados = [dict(ing) for ing in st.session_state['ingredientes']]
@@ -2152,10 +2152,10 @@ with main_tab_receta:
                             st.session_state['ingredientes'] = ingredientes_actualizados
                             st.session_state['db_trigger'] += 1
                             marcar_receta_modificada_manualmente()
-                            st.success(f"{len(filas_nuevas)} ingredientes nuevos creados en Supabase.")
+                            st.success(f"{len(filas_nuevas)} ingredientes nuevos creados en el inventario.")
                             st.rerun()
                         except Exception as e:
-                            st.error(f"Error al crear ingredientes en Supabase: {e}")
+                            st.error(f"Error al crear ingredientes en el inventario: {e}")
                     else:
                         st.info("No hay ingredientes nuevos pendientes de crear.")
 
@@ -2321,11 +2321,11 @@ with main_tab_guardadas:
         st.session_state.pop("selector_receta_guardada", None)
 
     if not supabase_disponible:
-        st.warning("Supabase no está disponible. No se pueden cargar recetas guardadas ahora.")
+        st.warning("El inventario no está disponible. No se pueden cargar recetas guardadas ahora.")
     else:
         recetas_guardadas_df = cargar_recetas_supabase(obtener_user_id_actual())
         if recetas_guardadas_df.empty:
-            st.info("Todavía no hay recetas guardadas en Supabase.")
+            st.info("Todavía no hay recetas guardadas en el inventario.")
         else:
             recetas_guardadas_df = recetas_guardadas_df.copy()
             recetas_sin_propietario = recetas_guardadas_df["user_id"].apply(
@@ -2428,7 +2428,7 @@ with main_tab_guardadas:
     st.divider()
     st.subheader("Guardar receta")
     if not supabase_disponible:
-        st.warning("Supabase no está disponible. No se puede guardar la receta ahora.")
+        st.warning("El inventario no está disponible. No se puede guardar la receta ahora.")
     elif not obtener_user_id_actual():
         st.info("Inicia sesión para guardar recetas en tu cuenta")
     if st.session_state.get("receta_id_cargada"):
@@ -2464,7 +2464,7 @@ with main_tab_guardadas:
             receta_id_cargada = st.session_state.get("receta_id_cargada")
             codigo_receta_cargada = st.session_state.get("codigo_receta_cargada", "")
             if not supabase_disponible or supabase is None:
-                st.error("Supabase no está conectado correctamente.")
+                st.error("El inventario no está conectado correctamente.")
             elif not nombre_limpio:
                 st.error("Indica un nombre de receta antes de guardar.")
             elif not st.session_state.get("ingredientes"):
@@ -2561,7 +2561,7 @@ with main_tab_guardadas:
     receta_para_eliminar = recetas_por_id.get(receta_id_para_eliminar, {})
 
     if not supabase_disponible:
-        st.warning("Supabase no está disponible. No se puede eliminar la receta ahora.")
+        st.warning("El inventario no está disponible. No se puede eliminar la receta ahora.")
     elif not receta_id_para_eliminar:
         st.info("Selecciona o carga una receta antes de intentar eliminarla.")
     elif receta_para_eliminar and not receta_es_modificable(receta_para_eliminar):
@@ -2618,11 +2618,11 @@ with main_tab_menus:
 
     st.markdown("#### Cargar menú guardado")
     if not supabase_disponible:
-        st.warning("Supabase no está disponible. No se pueden cargar menús guardados ahora.")
+        st.warning("El inventario no está disponible. No se pueden cargar menús guardados ahora.")
     else:
         menus_guardados_df = cargar_menus_supabase(obtener_user_id_actual())
         if menus_guardados_df.empty:
-            st.info("Todavía no hay menús guardados en Supabase.")
+            st.info("Todavía no hay menús guardados en el inventario.")
         else:
             menus_guardados_df = menus_guardados_df.copy()
             menus_sin_propietario = menus_guardados_df["user_id"].apply(
@@ -2740,7 +2740,7 @@ with main_tab_menus:
     opciones_recetas_menu = []
 
     if not supabase_disponible:
-        st.warning("Supabase no está disponible. No se pueden cargar recetas guardadas ahora.")
+        st.warning("El inventario no está disponible. No se pueden cargar recetas guardadas ahora.")
     else:
         recetas_menu_df = cargar_recetas_supabase(obtener_user_id_actual())
         if recetas_menu_df.empty:
@@ -2928,7 +2928,7 @@ with main_tab_menus:
         if st.button("Guardar menú", type="primary", use_container_width=True):
             nombre_menu_limpio = str(nombre_menu or "").strip()
             if not supabase_disponible or supabase is None:
-                st.error("Supabase no está conectado correctamente.")
+                st.error("El inventario no está conectado correctamente.")
             elif not nombre_menu_limpio:
                 st.error("Indica un nombre de menú antes de guardar.")
             elif not lineas_menu_actual:
@@ -2954,7 +2954,7 @@ with main_tab_menus:
             menu_id_actual = st.session_state.get("menu_id")
             nombre_menu_limpio = str(nombre_menu or "").strip()
             if not supabase_disponible or supabase is None:
-                st.error("Supabase no está conectado correctamente.")
+                st.error("El inventario no está conectado correctamente.")
             elif not menu_id_actual:
                 st.warning("Carga un menú guardado antes de actualizarlo.")
             elif not nombre_menu_limpio:
@@ -2980,7 +2980,7 @@ with main_tab_menus:
             menu_id_actual = st.session_state.get("menu_id")
             nombre_menu_limpio = str(nombre_menu or "").strip()
             if not supabase_disponible or supabase is None:
-                st.error("Supabase no está conectado correctamente.")
+                st.error("El inventario no está conectado correctamente.")
             elif not menu_id_actual:
                 st.warning("Carga un menú guardado antes de duplicarlo.")
             elif not nombre_menu_limpio:
@@ -3021,8 +3021,8 @@ with main_tab_menus:
 
 
 with main_tab_base:
-    st.subheader("🎒 Catálogo Relacional de Ingredientes en Supabase")
-    st.markdown("Busca, añade, modifica o elimina productos de tu base de datos en la nube. **Los cambios realizados aquí se sincronizarán directamente en Postgres.**")
+    st.subheader("🎒 Catálogo relacional de ingredientes")
+    st.markdown("Busca, añade, modifica o elimina productos de tu inventario en la nube. **Los cambios realizados aquí se sincronizarán directamente.**")
 
     if not inventario_df.empty:
         # Buscador ágil en la base de datos para no colapsar el rendimiento de la web
@@ -3042,7 +3042,7 @@ with main_tab_base:
             num_rows="dynamic",
             use_container_width=True,
             column_config={
-                "codigo": st.column_config.TextColumn("Código", help="ID único de Supabase", required=True),
+                "codigo": st.column_config.TextColumn("Código", help="ID único del inventario", required=True),
                 "familia": st.column_config.TextColumn("Familia / Categoría", help="Ej: CARNES, PESCADOS..."),
                 "descripcion": st.column_config.TextColumn("Descripción / Ingrediente", required=True),
                 "unidad_medida": st.column_config.TextColumn("Unidad Base", help="kg, l, ud, sobre..."),
@@ -3052,11 +3052,11 @@ with main_tab_base:
             key="db_editor_component"
         )
 
-        # Guardar cambios aplicados en el editor interactivo directo a Supabase
-        if st.button("💾 Guardar Cambios en Supabase", type="primary"):
+        # Guardar cambios aplicados en el editor interactivo directo al inventario
+        if st.button("💾 Guardar cambios en inventario", type="primary"):
             editor_state = st.session_state.get("db_editor_component")
             if editor_state and supabase_disponible:
-                with st.spinner("Sincronizando catálogo con Supabase..."):
+                with st.spinner("Sincronizando catálogo con inventario..."):
                     try:
                         # 1. Procesar modificaciones de filas existentes
                         for row_idx_str, edits in editor_state.get("edited_rows", {}).items():
@@ -3093,12 +3093,12 @@ with main_tab_base:
                             original_code = fila_original["codigo"]
                             supabase.table("inventario").delete().eq("codigo", original_code).execute()
 
-                        st.success("¡Base de datos de Supabase actualizada con éxito! 🚀")
+                        st.success("¡Inventario actualizado con éxito! 🚀")
                         st.session_state['db_trigger'] += 1  # Forzar actualización de caché
                         st.rerun()
                     except Exception as e:
-                        st.error(f"Error al sincronizar datos con Supabase: {e}")
+                        st.error(f"Error al sincronizar datos con el inventario: {e}")
             elif not supabase_disponible:
-                st.error("❌ Supabase no está conectado correctamente.")
+                st.error("❌ El inventario no está conectado correctamente.")
     else:
-        st.info("💡 Tu tabla 'inventario' en Supabase está vacía o cargando datos...")
+        st.info("💡 Tu tabla de inventario está vacía o cargando datos...")

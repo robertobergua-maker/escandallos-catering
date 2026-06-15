@@ -69,7 +69,7 @@ La relacion con ingredientes se mantiene por ahora mediante `codigo_ingrediente`
 
 ## Precaucion antes de ejecutar
 
-El SQL `sql/013_crear_base_datos_recetas_y_menus.sql` no debe ejecutarse contra Supabase sin revision previa.
+El SQL `sql/013_crear_base_datos_recetas_y_menus.sql` no debe ejecutarse contra el inventario real sin revision previa.
 
 Antes de aplicarlo en un entorno real, conviene revisar nombres de columnas, defaults, indices, triggers y comentarios, y confirmar que encajan con la version actual de la app.
 
@@ -89,11 +89,11 @@ Mas adelante la app podra implementar:
 ## Orden recomendado de ejecucion
 
 1. Revisar SQL.
-2. Ejecutar SQL en Supabase.
+2. Ejecutar SQL en el entorno de inventario.
 3. Comprobar tablas.
 4. Modificar app para guardar/cargar recetas.
 
-## Consulta de comprobacion para Supabase
+## Consulta de comprobacion para Inventario
 
 ```sql
 select table_name

@@ -1,7 +1,7 @@
 # RLS de usuarios para recetas y menus
 
 El archivo `sql/014_auth_rls_recetas_menus.sql` prepara la seguridad por
-usuario para recetas y menus usando Supabase Auth. Anade la columna `user_id`
+usuario para recetas y menus usando autenticacion del inventario. Anade la columna `user_id`
 en las tablas principales y define politicas RLS para que cada usuario
 autenticado trabaje solo con sus propios datos.
 
@@ -30,7 +30,7 @@ desde `recetas` mediante `receta_id`.
 Los registros antiguos con `user_id null` dejaran de verse cuando se active
 RLS estricto, porque las politicas comparan `user_id` con `auth.uid()`.
 
-Antes de ejecutar este SQL en Supabase conviene hacer backup o revisar bien el
+Antes de ejecutar este SQL en el inventario real conviene hacer backup o revisar bien el
 estado de los datos existentes.
 
 ## Comprobar RLS
@@ -56,7 +56,7 @@ order by tablename, policyname;
 
 1. Revisar SQL.
 2. Hacer backup.
-3. Ejecutar SQL en Supabase.
+3. Ejecutar SQL en el entorno de inventario.
 4. Comprobar RLS.
 5. Adaptar app para login.
 6. Guardar recetas y menus con `user_id`.
