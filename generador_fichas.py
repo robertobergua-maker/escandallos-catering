@@ -33,6 +33,79 @@ if supabase_disponible:
         st.error(f"⚠️ Error al conectar con el cliente de Supabase: {e}")
         supabase_disponible = False
 
+
+def _obtener_campo_auth(objeto, campo, valor_por_defecto=None):
+    if objeto is None:
+        return valor_por_defecto
+    if isinstance(objeto, dict):
+        return objeto.get(campo, valor_por_defecto)
+    return getattr(objeto, campo, valor_por_defecto)
+
+
+def login_supabase(email, password):
+    """
+    Inicia sesion con Supabase Auth y guarda los datos basicos en session_state.
+    """
+    if not supabase_disponible or supabase is None:
+        return False, "Supabase no está conectado correctamente."
+
+    email_limpio = str(email or "").strip()
+    if not email_limpio or not password:
+        return False, "Introduce email y contraseña."
+
+    try:
+        respuesta = supabase.auth.sign_in_with_password({
+            "email": email_limpio,
+            "password": password,
+        })
+        usuario = _obtener_campo_auth(respuesta, "user")
+        sesion = _obtener_campo_auth(respuesta, "session")
+        user_id = _obtener_campo_auth(usuario, "id")
+        user_email = _obtener_campo_auth(usuario, "email", email_limpio)
+        access_token = _obtener_campo_auth(sesion, "access_token")
+
+        if not user_id:
+            return False, "No se pudo obtener el usuario autenticado."
+
+        st.session_state["user_id"] = str(user_id)
+        st.session_state["user_email"] = str(user_email or email_limpio)
+        st.session_state["access_token"] = access_token
+        return True, "Sesión iniciada correctamente."
+    except Exception as e:
+        return False, f"No se pudo iniciar sesión: {e}"
+
+
+def logout_supabase():
+    """
+    Cierra la sesion de Supabase y limpia los datos de autenticacion locales.
+    """
+    if supabase_disponible and supabase is not None:
+        try:
+            supabase.auth.sign_out()
+        except Exception:
+            pass
+
+    st.session_state["user_id"] = None
+    st.session_state["user_email"] = None
+    st.session_state["access_token"] = None
+    return True, "Sesión cerrada correctamente."
+
+
+def obtener_usuario_actual():
+    """
+    Devuelve el usuario autenticado guardado en session_state, si existe.
+    """
+    user_id = st.session_state.get("user_id")
+    user_email = st.session_state.get("user_email")
+    if not user_id:
+        return None
+    return {
+        "id": user_id,
+        "email": user_email,
+        "access_token": st.session_state.get("access_token"),
+    }
+
+
 # Inicializar estado de sesión para el escandallo activo
 if 'ingredientes' not in st.session_state:
     st.session_state['ingredientes'] = []
@@ -82,6 +155,13 @@ if 'raciones_deseadas_aplicadas' not in st.session_state:
 # Trigger para invalidar caché de Supabase al editar el catálogo
 if 'db_trigger' not in st.session_state:
     st.session_state['db_trigger'] = 0
+
+if 'user_id' not in st.session_state:
+    st.session_state['user_id'] = None
+if 'user_email' not in st.session_state:
+    st.session_state['user_email'] = None
+if 'access_token' not in st.session_state:
+    st.session_state['access_token'] = None
 
 if 'nombre_plato' not in st.session_state:
     st.session_state['nombre_plato'] = st.session_state['receta_nombre']
@@ -1468,6 +1548,10 @@ st.markdown(
 
 st.title("👨‍🍳 Gestor de Escandallos Inteligente con Supabase PostgreSQL")
 
+usuario_actual = obtener_usuario_actual()
+if usuario_actual is None:
+    st.info("Inicia sesión para guardar tus recetas y menús en tu cuenta")
+
 # Panel lateral indicador de conexiones activas
 with st.sidebar:
     st.header("⚙️ Estado de Conexiones Cloud")
@@ -1480,7 +1564,33 @@ with st.sidebar:
         st.success("🤖 OpenAI GPT-4o: Activo")
     else:
         st.warning("⚠️ OpenAI: Desconectado. Configure 'OPENAI_API_KEY' en los Secrets.")
-        
+
+    st.divider()
+    st.subheader("Acceso")
+    usuario_actual = obtener_usuario_actual()
+    if usuario_actual:
+        st.success(f"Sesión iniciada: {usuario_actual.get('email') or 'usuario'}")
+        if st.button("Cerrar sesión", use_container_width=True):
+            ok_logout, mensaje_logout = logout_supabase()
+            if ok_logout:
+                st.success(mensaje_logout)
+                st.rerun()
+            else:
+                st.error(mensaje_logout)
+    else:
+        st.info("Inicia sesión para guardar tus recetas y menús en tu cuenta")
+        with st.form("form_login_supabase"):
+            login_email = st.text_input("Email")
+            login_password = st.text_input("Contraseña", type="password")
+            iniciar_sesion = st.form_submit_button("Iniciar sesión", use_container_width=True)
+            if iniciar_sesion:
+                ok_login, mensaje_login = login_supabase(login_email, login_password)
+                if ok_login:
+                    st.success(mensaje_login)
+                    st.rerun()
+                else:
+                    st.error(mensaje_login)
+
     st.divider()
     st.info("💡 Consejo: Al realizar modificaciones en la pestaña del Catálogo Supabase, haz clic en el botón 'Guardar Cambios en Supabase' para persistirlos en la nube de forma permanente.")
 
