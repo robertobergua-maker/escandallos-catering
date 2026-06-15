@@ -427,10 +427,48 @@ PALABRAS_NO_ALIMENTARIAS = {
     "PACKAGING", "ENVASE", "CUCHARA", "TENEDOR", "CUCHILLO", "MOLDE", "BLONDA", "TAPA"
 }
 
+PALABRAS_BLOQUEO_MATCHING = {
+    "CARCASA", "HUESO", "HUESOS", "PIEL", "RECORTE", "RECORTES",
+    "PAPEL", "ENVOLVER", "ENVASE", "BANDEJA", "CAJA", "ETIQUETA", "PACKAGING"
+}
+
+FRASES_BLOQUEO_MATCHING = {
+    "SAL ESPECIAL HORNEAR"
+}
+
+INGREDIENTES_INCOHERENTES_ARROZ = {
+    "MANGO", "VINAGRE", "ESPINACA", "ESPINACAS", "SETA", "SETAS",
+    "ZANAHORIA", "SECRETO", "CARCASA", "HABAS"
+}
+
 
 def parece_material_no_alimentario(descripcion):
     palabras = set(normalizar_texto_busqueda(descripcion).split())
     return bool(palabras & PALABRAS_NO_ALIMENTARIAS)
+
+
+def contiene_bloqueo_matching(descripcion):
+    texto = normalizar_texto_busqueda(descripcion)
+    palabras = set(texto.split())
+    if palabras & PALABRAS_BLOQUEO_MATCHING:
+        return True
+    return any(frase in texto for frase in FRASES_BLOQUEO_MATCHING)
+
+
+def bloqueo_pedido_explicitamente(descripcion_original, descripcion_inventario):
+    original_norm = normalizar_texto_busqueda(descripcion_original)
+    inventario_norm = normalizar_texto_busqueda(descripcion_inventario)
+    palabras_bloqueadas = [
+        palabra for palabra in PALABRAS_BLOQUEO_MATCHING
+        if palabra in inventario_norm.split()
+    ]
+    frases_bloqueadas = [
+        frase for frase in FRASES_BLOQUEO_MATCHING
+        if frase in inventario_norm
+    ]
+    return all(palabra in original_norm.split() for palabra in palabras_bloqueadas) and all(
+        frase in original_norm for frase in frases_bloqueadas
+    )
 
 
 def descripcion_generica_ingrediente(descripcion):
@@ -439,7 +477,8 @@ def descripcion_generica_ingrediente(descripcion):
         "FRESCO", "FRESCA", "CONGELADO", "CONGELADA", "ECO", "ECOLOGICO", "ECOLOGICA",
         "BIO", "MARCA", "BOLSA", "LATA", "CAJA", "BANDEJA", "PAQUETE", "GARRAFA",
         "BOTELLA", "SACO", "MONODOSIS", "APROX", "SIN", "CON", "NATURAL", "PACK", "UNIDAD",
-        "UD", "UDS", "GR", "G", "KG", "ML", "CL", "L"
+        "UD", "UDS", "GR", "G", "KG", "K", "ML", "CL", "L", "LITRO", "LITROS", "ESPECIAL",
+        "HORNEAR", "FINDUS", "HS"
     }
     palabras = [p for p in texto.split() if not p.isdigit() and p not in palabras_descartables]
     return " ".join(palabras[:4]) or texto
@@ -454,6 +493,8 @@ def sugerir_ingredientes_similares(descripcion, inventario, limite=8, umbral=0.3
     for _, row in inventario.iterrows():
         desc_bd = str(row.get("descripcion", ""))
         if parece_material_no_alimentario(desc_bd) and not parece_material_no_alimentario(objetivo):
+            continue
+        if contiene_bloqueo_matching(desc_bd) and not bloqueo_pedido_explicitamente(descripcion, desc_bd):
             continue
         desc_norm = normalizar_texto_busqueda(desc_bd)
         if not desc_norm:
@@ -498,6 +539,71 @@ def inferir_unidad_medida(descripcion):
     if "SOBRE" in texto or "SOBRES" in texto:
         return "sobre"
     return "kg"
+
+
+def receta_parece_arroz(nombre_receta):
+    texto = normalizar_texto_busqueda(nombre_receta)
+    return bool({"PAELLA", "ARROZ", "RISOTTO"} & set(texto.split()))
+
+
+def ingrediente_incoherente_en_arroz(nombre_ingrediente):
+    palabras = set(normalizar_texto_busqueda(nombre_ingrediente).split())
+    return bool(palabras & INGREDIENTES_INCOHERENTES_ARROZ)
+
+
+def motivo_indica_presencia_explicita(motivo):
+    texto = normalizar_texto_busqueda(motivo)
+    return any(palabra in texto for palabra in ["APARECE", "EXPLICITO", "EXPLICITA", "TEXTO", "IMAGEN", "RECETA"])
+
+
+def normalizar_unidad_ia(unidad, descripcion):
+    unidad_norm = normalizar_texto_busqueda(unidad).lower()
+    equivalencias = {
+        "gramos": "kg",
+        "gramo": "kg",
+        "g": "kg",
+        "kgs": "kg",
+        "kilogramo": "kg",
+        "kilogramos": "kg",
+        "litro": "l",
+        "litros": "l",
+        "ml": "l",
+        "unidad": "ud",
+        "unidades": "ud",
+        "pieza": "ud",
+        "piezas": "ud"
+    }
+    return equivalencias.get(unidad_norm, unidad_norm or inferir_unidad_medida(descripcion))
+
+
+def convertir_cantidad_ia(cantidad, unidad):
+    cantidad_num = pd.to_numeric(cantidad, errors="coerce")
+    if pd.isna(cantidad_num):
+        return 0.0
+    cantidad_num = float(cantidad_num)
+    unidad_norm = normalizar_texto_busqueda(unidad).lower()
+    if unidad_norm in ["g", "gramo", "gramos"]:
+        return cantidad_num / 1000
+    if unidad_norm in ["ml"]:
+        return cantidad_num / 1000
+    return cantidad_num
+
+
+def buscar_coincidencia_principal_inventario(nombre_original, confianza):
+    sugerencias = sugerir_ingredientes_similares(nombre_original, inventario_df, limite=6, umbral=0.35)
+    if not sugerencias:
+        return None, [], "sin_coincidencia"
+
+    principal = sugerencias[0]
+    segunda = sugerencias[1] if len(sugerencias) > 1 else None
+    score_principal = float(principal.get("score", 0.0))
+    score_segunda = float(segunda.get("score", 0.0)) if segunda else 0.0
+    confianza_norm = normalizar_texto_busqueda(confianza)
+    es_clara = score_principal >= 0.72 and (not segunda or score_principal - score_segunda >= 0.12)
+    if confianza_norm == "BAJA":
+        es_clara = False
+
+    return principal, sugerencias, "clara" if es_clara else "dudosa"
 
 
 def generar_codigo_ingrediente_nuevo(descripcion, existentes):
@@ -1362,47 +1468,57 @@ def procesar_con_openai(texto_plano=None, bytes_imagen=None, mime_type=None):
 
         bd_contexto = json.dumps(catalogo_reducido, ensure_ascii=False)
 
-        prompt_sistema = f'''Eres un experto en contabilidad hostelera de alta cocina. Tu trabajo consiste en procesar textos o imágenes de recetas, albaranes, facturas o capturas, y extraer los ingredientes para un escandallo técnico estructurado.
+        prompt_sistema = f'''Eres un experto en cocina y escandallos. Trabaja SIEMPRE en dos fases:
+FASE 1: extrae la receta culinaria real a partir del texto o imagen.
+FASE 2: solo como apoyo mental, consulta el inventario para entender equivalencias posibles, pero NO devuelvas productos comerciales ni codigos.
 
 Dispones del catálogo completo de ingredientes reales de nuestra cocina en formato JSON de referencia:
 {bd_contexto}
 
 INSTRUCCIONES CRÍTICAS:
-1. Compara semánticamente cada ingrediente detectado con el catálogo de referencia. Si encuentras una coincidencia clara (por ejemplo, "pollo" con "CUARTO POLLO ASADO" o "aceite oliva" con "ACEITE OLIVA"), asigna exactamente su "codigo" (parámetro "c") y usa su "descripcion", "merma" y "precio_unidad" correspondientes del catálogo.
-2. Trabaja con ingredientes genéricos de cocina: AGUA, TOMATE, PEPINO, PIMIENTO, CEBOLLA, AJO, ACEITE OLIVA, VINAGRE, SAL, PAN, HARINA, etc. Evita marcas, formatos comerciales y productos demasiado específicos salvo que el catálogo tenga una coincidencia clara.
-3. Si el ingrediente analizado NO existe en el catálogo, invéntale un código único y nuevo corto que comience por "ING-" seguido de 4 números lógicos, asigna una descripción genérica del ingrediente y sus precios o mermas correspondientes.
-4. Devuelve ingredientes comestibles, no envases ni utensilios. Descarta explícitamente PAPEL, ENVOLVER, ENVOLTORIO, BANDEJA, CAJA, ETIQUETA, PACKAGING, SERVILLETA, PLATO, VASO, CUCHARA, TENEDOR, CUCHILLO y MOLDE.
-5. Si no conoces el precio, usa precio_unidad 0 y deja que la app lo vincule a BBDD.
-6. Si el texto o la imagen presenta mermas implícitas (por ejemplo, Peso Bruto: 0.350, Peso Neto: 0.300), calcula la merma porcentual de forma precisa: ((bruto - neto)/bruto)*100.
-7. Si detectas el nombre del plato o receta en el texto o imagen, devuélvelo como "nombre_receta" con el nombre limpio y legible.
-8. Si detectas raciones de receta en expresiones como "6 porciones", "6 raciones", "para 6 personas", "serves 6" o "6 servings", devuelve ese número como "raciones_base".
-9. Ignora títulos de columnas de cabecera de Excel, importes totales o subtotales de facturas.
+1. Devuelve SOLO ingredientes que aparezcan claramente en la receta, imagen o texto, o que sean imprescindibles para la preparacion. No inventes ingredientes para completar.
+2. Si no estas seguro de un ingrediente, omitelo o incluyelo con "confianza": "baja" y un motivo claro. No lo conviertas en producto de inventario.
+3. Devuelve ingredientes genericos de cocina: pollo, arroz, judia verde, garrofon, tomate, aceite de oliva, sal. NO devuelvas productos comerciales como GARROFON 5K, GARROFON FINDUS, VERDURA PAELLA, ACEITE OLIVA 1L o SAL ESPECIAL HORNEAR HS.
+4. No devuelvas codigos de inventario, marcas, formatos, proveedores, envases ni productos preparados del catalogo.
+5. Descarta envases y utensilios: PAPEL, ENVOLVER, ENVOLTORIO, BANDEJA, CAJA, ETIQUETA, PACKAGING, SERVILLETA, PLATO, VASO, CUCHARA, TENEDOR, CUCHILLO, MOLDE.
+6. No uses automaticamente carcasa, hueso, piel, recorte ni sal especial hornear salvo que el texto lo pida expresamente.
+7. Si la receta parece una paella o arroz, no añadas mango, vinagre, espinaca, setas, zanahoria, secreto, carcasa o habas salvo que aparezcan explicitamente en el texto o imagen.
+8. Si detectas cantidades, normalizalas cuando sea razonable: kg, l, ud, sobre, botella, lata, paquete, caja, bandeja u hoja. Si no hay cantidad, usa 0.
+9. Si detectas el nombre del plato o receta, devuelvelo como "nombre_receta" con el nombre limpio y legible.
+10. Si detectas raciones de receta en expresiones como "6 porciones", "6 raciones", "para 6 personas", "serves 6" o "6 servings", devuelve ese numero como "raciones_base".
+11. Ignora titulos de columnas de cabecera de Excel, importes totales o subtotales de facturas.
 
 REQUISITO EXCLUSIVO DE RESPUESTA: Devuelve ÚNICAMENTE JSON puro sin bloques de código markdown de tipo ```json y sin explicaciones adicionales.
-Si detectas nombre de receta o raciones base, devuelve un objeto:
+Devuelve preferentemente este objeto:
 {{
-  "nombre_receta": "Azpacho andaluz",
+  "nombre_receta": "Paella valenciana",
   "raciones_base": 6,
   "ingredientes": [
-    {{"codigo": "ING-0019", "descripcion": "POLLO", "unidad_medida": "kg", "cantidad_bruta": 0.35, "merma": 14.29, "precio_unidad": 5.15}}
+    {{
+      "nombre": "pollo",
+      "cantidad": 0.5,
+      "unidad": "kg",
+      "confianza": "alta",
+      "motivo": "aparece en la receta"
+    }}
   ]
 }}
-Si no detectas raciones base, puedes devolver el array antiguo:
+Mantén compatibilidad si no puedes usar objeto y devuelve una lista generica:
 [
-  {{"codigo": "ING-0019", "descripcion": "POLLO", "unidad_medida": "kg", "cantidad_bruta": 0.35, "merma": 14.29, "precio_unidad": 5.15}}
+  {{"nombre": "pollo", "cantidad": 0.5, "unidad": "kg", "confianza": "alta", "motivo": "aparece en la receta"}}
 ]'''
 
         contenido_usuario = []
         if texto_plano:
             contenido_usuario.append({
                 "type": "text",
-                "text": f"Analiza esta lista de ingredientes y estructúrala cruzando sus nombres con nuestra base de datos:\n\n{texto_plano}"
+                "text": f"Analiza esta receta o lista. Primero extrae solo ingredientes culinarios genericos reales; despues deja que la app haga el cruce con inventario:\n\n{texto_plano}"
             })
         elif bytes_imagen:
             base64_image = base64.b64encode(bytes_imagen).decode('utf-8')
             contenido_usuario.append({
                 "type": "text",
-                "text": "Analiza esta imagen (puede ser un tique, albarán o factura) y extrae los ingredientes vinculando los códigos correctos del catálogo."
+                "text": "Analiza esta imagen (puede ser una receta, tique, albarán o factura) y extrae solo ingredientes culinarios genericos reales. No devuelvas codigos ni productos comerciales del inventario."
             })
             contenido_usuario.append({
                 "type": "image_url",
@@ -1435,7 +1551,7 @@ Si no detectas raciones base, puedes devolver el array antiguo:
 
 def normalizar_respuesta_ingredientes_ia(respuesta_ia):
     """
-    Acepta el formato antiguo (lista) y el nuevo objeto con nombre_receta y raciones_base.
+    Acepta el formato antiguo y el formato culinario generico con matching posterior.
     """
     nombre_receta = ""
     if isinstance(respuesta_ia, list):
@@ -1450,16 +1566,62 @@ def normalizar_respuesta_ingredientes_ia(respuesta_ia):
         return "", None, []
 
     ingredientes_limpios = []
+    ingredientes_vistos = set()
+    es_receta_arroz = receta_parece_arroz(nombre_receta)
     for ing in ingredientes if isinstance(ingredientes, list) else []:
         if not isinstance(ing, dict):
             continue
-        descripcion = ing.get("descripcion", "")
-        if parece_material_no_alimentario(descripcion):
+        nombre_original = str(
+            ing.get("nombre")
+            or ing.get("ingrediente")
+            or ing.get("descripcion")
+            or ""
+        ).strip()
+        descripcion_generica = descripcion_generica_ingrediente(nombre_original)
+        if not descripcion_generica or parece_material_no_alimentario(descripcion_generica):
             continue
-        ing_limpio = dict(ing)
-        ing_limpio["descripcion"] = descripcion_generica_ingrediente(descripcion) or str(descripcion).strip()
-        if not ing_limpio.get("unidad_medida"):
-            ing_limpio["unidad_medida"] = inferir_unidad_medida(ing_limpio["descripcion"])
+        confianza = str(ing.get("confianza", "media") or "media").strip().lower()
+        motivo = str(ing.get("motivo", "") or "").strip()
+        if es_receta_arroz and ingrediente_incoherente_en_arroz(descripcion_generica) and not motivo_indica_presencia_explicita(motivo):
+            continue
+        clave_generica = normalizar_texto_busqueda(descripcion_generica)
+        if not clave_generica or clave_generica in ingredientes_vistos:
+            continue
+        ingredientes_vistos.add(clave_generica)
+
+        unidad_original = ing.get("unidad", ing.get("unidad_medida", ""))
+        unidad_medida = normalizar_unidad_ia(unidad_original, descripcion_generica)
+        cantidad_bruta = convertir_cantidad_ia(
+            ing.get("cantidad", ing.get("cantidad_bruta", 0.0)),
+            unidad_original or unidad_medida
+        )
+
+        coincidencia, alternativas, estado_match = buscar_coincidencia_principal_inventario(descripcion_generica, confianza)
+        requiere_revision = estado_match != "clara"
+        ing_limpio = {
+            "codigo": "S/C",
+            "descripcion": descripcion_generica.title(),
+            "unidad_medida": unidad_medida,
+            "cantidad_bruta": cantidad_bruta,
+            "merma": 0.0,
+            "precio_unidad": 0.0,
+            "ia_nombre_original": nombre_original,
+            "ia_confianza": confianza or "media",
+            "ia_motivo": motivo or "detectado por IA",
+            "ia_requiere_revision": requiere_revision,
+            "ia_estado_match": estado_match,
+            "ia_coincidencia_elegida": coincidencia.get("codigo") if coincidencia else "",
+            "ia_alternativas": [alt.get("codigo") for alt in alternativas]
+        }
+        if coincidencia and not requiere_revision:
+            ing_limpio.update({
+                "codigo": coincidencia["codigo"],
+                "familia": coincidencia.get("familia", "SIN CLASIFICAR"),
+                "descripcion": coincidencia["descripcion"],
+                "unidad_medida": coincidencia.get("unidad_medida", unidad_medida) or unidad_medida,
+                "merma": coincidencia.get("merma", 0.0),
+                "precio_unidad": coincidencia.get("precio_unidad", 0.0)
+            })
         ingredientes_limpios.append(ing_limpio)
 
     return nombre_receta, raciones_base, ingredientes_limpios
@@ -2103,7 +2265,12 @@ with main_tab_receta:
         ingredientes_no_encontrados = []
         for idx, ing in enumerate(st.session_state['ingredientes']):
             codigo_actual = str(ing.get("codigo", "")).strip().upper()
-            if not codigo_ingrediente_valido(codigo_actual) or codigo_actual not in inventario_dict:
+            requiere_revision_ia = bool(ing.get("ia_requiere_revision")) and ing.get("ia_estado_match") != "temporal"
+            requiere_revision_codigo = (
+                ing.get("ia_estado_match") != "temporal"
+                and (not codigo_ingrediente_valido(codigo_actual) or codigo_actual not in inventario_dict)
+            )
+            if requiere_revision_ia or requiere_revision_codigo:
                 sugerencias = sugerir_ingredientes_similares(ing.get("descripcion", ""), inventario_df)
                 ingredientes_no_encontrados.append((idx, ing, sugerencias))
 
@@ -2172,18 +2339,28 @@ with main_tab_receta:
             with st.expander("🔎 Ingredientes no encontrados en BBDD y sugerencias", expanded=True):
                 for idx, ing, sugerencias in ingredientes_no_encontrados:
                     ingrediente_original = str(ing.get("descripcion", "") or "Sin descripción").strip()
+                    ingrediente_detectado_ia = str(ing.get("ia_nombre_original") or ingrediente_original).strip()
                     cantidad_original = numero_seguro(ing.get("cantidad_bruta", 0.0), 0.0)
                     unidad_original = str(ing.get("unidad_medida", "") or "kg").strip()
                     codigo_original = str(ing.get("codigo", "S/C") or "S/C").strip().upper()
+                    confianza_ia = str(ing.get("ia_confianza", "") or "").strip()
+                    motivo_ia = str(ing.get("ia_motivo", "") or "").strip()
+                    coincidencia_elegida = str(ing.get("ia_coincidencia_elegida", "") or "").strip().upper()
 
                     if idx > 0:
                         st.divider()
 
-                    st.markdown("#### Ingrediente no encontrado")
-                    st.write(f"**Ingrediente detectado:** {ingrediente_original}")
+                    st.markdown(f"#### Ingrediente no encontrado: {ingrediente_detectado_ia}")
+                    st.write(f"**Ingrediente detectado por IA:** {ingrediente_detectado_ia}")
+                    st.write(f"**Nombre normalizado:** {ingrediente_original}")
                     st.write(f"**Cantidad:** {cantidad_original:.3f}")
                     st.write(f"**Unidad:** {unidad_original}")
-                    st.write("**Motivo:** no existe coincidencia exacta en inventario")
+                    if confianza_ia:
+                        st.write(f"**Confianza IA:** {confianza_ia}")
+                    if motivo_ia:
+                        st.write(f"**Motivo IA:** {motivo_ia}")
+                    st.write(f"**Coincidencia elegida en inventario:** {coincidencia_elegida or 'pendiente de revisión'}")
+                    st.write("**Motivo de revisión:** no existe coincidencia exacta o la coincidencia es dudosa")
                     st.caption(f"Fila {idx + 1} · Código actual: `{codigo_original}`")
 
                     st.markdown("#### Sugerencias de inventario")
@@ -2237,14 +2414,27 @@ with main_tab_receta:
                                     "descripcion": sugerencia["descripcion"],
                                     "unidad_medida": unidad_sugerida or unidad_actual or "kg",
                                     "merma": sugerencia["merma"],
-                                    "precio_unidad": sugerencia["precio_unidad"]
+                                    "precio_unidad": sugerencia["precio_unidad"],
+                                    "ia_requiere_revision": False,
+                                    "ia_estado_match": "revisada",
+                                    "ia_coincidencia_elegida": sugerencia["codigo"]
                                 })
                                 st.session_state['ingredientes'][idx] = ingrediente_actualizado
                                 marcar_receta_modificada_manualmente()
                                 st.rerun()
                     else:
                         st.info("No se han encontrado sugerencias fiables en inventario.")
-                        st.caption("Puedes crearlo como nuevo en base de datos con el botón superior, o mantenerlo solo en la receta activa.")
+                    if st.button("Mantener temporalmente en la receta activa", key=f"mantener_temporal_ia_{idx}", use_container_width=True):
+                        ingrediente_temporal = dict(st.session_state['ingredientes'][idx])
+                        ingrediente_temporal.update({
+                            "codigo": "S/C",
+                            "ia_requiere_revision": False,
+                            "ia_estado_match": "temporal"
+                        })
+                        st.session_state['ingredientes'][idx] = ingrediente_temporal
+                        marcar_receta_modificada_manualmente()
+                        st.rerun()
+                    st.caption("Puedes mantenerlo temporalmente o crearlo como nuevo en base de datos con el botón superior.")
 
 
     else:
