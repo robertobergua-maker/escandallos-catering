@@ -1604,6 +1604,63 @@ def calcular_totales_menu(lineas_menu):
     }
 
 
+def crear_lineas_factura_desde_menu(cabecera_menu, lineas_menu_df, desglosar=False):
+    """
+    Convierte un menu guardado en lineas editables de documento de facturacion.
+    No modifica el menu ni sus recetas.
+    """
+    cabecera_menu = cabecera_menu or {}
+    lineas_menu = lineas_menu_df.to_dict(orient="records") if isinstance(lineas_menu_df, pd.DataFrame) else list(lineas_menu_df or [])
+    nombre_menu = str(cabecera_menu.get("nombre", "") or "Menú").strip()
+    numero_comensales = int(numero_seguro(cabecera_menu.get("numero_comensales", 1), 1))
+    aviso_precio = False
+
+    if not desglosar:
+        precio_total = cabecera_menu.get("precio_total", None)
+        hay_precio_total = precio_total is not None and not pd.isna(precio_total)
+        if hay_precio_total:
+            precio_unitario = numero_seguro(precio_total, 0.0)
+        else:
+            totales_menu = calcular_totales_menu(lineas_menu)
+            precio_unitario = numero_seguro(
+                cabecera_menu.get("coste_total", totales_menu.get("coste_total", 0.0)),
+                0.0
+            )
+            aviso_precio = True
+        return [
+            calcular_linea_factura({
+                "descripcion": f"Menú: {nombre_menu} - {numero_comensales} comensales",
+                "cantidad": 1.0,
+                "unidad": "servicio",
+                "precio_unitario": precio_unitario,
+                "descuento_pct": 0.0,
+                "iva_pct": 21.0
+            })
+        ], aviso_precio
+
+    lineas_factura = []
+    for linea in normalizar_lineas_menu(lineas_menu):
+        raciones = numero_seguro(linea.get("raciones", 1.0), 1.0)
+        divisor = raciones if raciones > 0 else 1.0
+        precio_total_linea = linea.get("precio_total_linea", None)
+        hay_precio_linea = precio_total_linea is not None and not pd.isna(precio_total_linea)
+        if hay_precio_linea:
+            precio_unitario = numero_seguro(precio_total_linea, 0.0) / divisor
+        else:
+            precio_unitario = numero_seguro(linea.get("coste_total_linea", 0.0), 0.0) / divisor
+            aviso_precio = True
+        lineas_factura.append(calcular_linea_factura({
+            "descripcion": str(linea.get("nombre_receta", "") or "Receta del menú"),
+            "cantidad": raciones,
+            "unidad": "ración",
+            "precio_unitario": precio_unitario,
+            "descuento_pct": 0.0,
+            "iva_pct": 21.0
+        }))
+
+    return lineas_factura, aviso_precio
+
+
 SECCIONES_MENU = ["", "Aperitivo", "Entrante", "Principal", "Postre", "Bebida", "Otro"]
 
 
@@ -2984,6 +3041,12 @@ with main_tab_facturacion:
             st.divider()
             st.markdown("#### Presupuestos y facturas")
             st.info("Módulo de facturación interna. No usar como sistema fiscal definitivo sin revisión legal/fiscal.")
+            feedback_menu_factura = st.session_state.pop("factura_menu_feedback", None)
+            if feedback_menu_factura:
+                mensaje_menu_factura, aviso_precio_menu_feedback = feedback_menu_factura
+                st.success(mensaje_menu_factura)
+                if aviso_precio_menu_feedback:
+                    st.warning("El menú no tiene precio de venta completo. Se ha usado el coste como referencia.")
 
             ok_facturas, mensaje_facturas, facturas_df = cargar_facturas_supabase()
             if not ok_facturas:
@@ -3043,6 +3106,75 @@ with main_tab_facturacion:
 
                 concepto = st.text_input("Concepto", key="factura_concepto")
                 notas = st.text_area("Notas", key="factura_notas", height=80)
+
+                st.markdown("##### Crear documento desde menú")
+                if not factura_cliente_id:
+                    st.warning("Selecciona un cliente antes de crear líneas desde un menú.")
+                else:
+                    menus_factura_df = cargar_menus_supabase(obtener_user_id_actual())
+                    menus_factura_df = menus_factura_df[
+                        menus_factura_df["user_id"].apply(lambda valor: valor_user_id_menu({"user_id": valor}) == obtener_user_id_actual())
+                    ].copy() if not menus_factura_df.empty else menus_factura_df
+                    if menus_factura_df.empty:
+                        st.info("No hay menús guardados para crear un documento.")
+                    else:
+                        menus_factura_df = menus_factura_df.copy()
+                        menus_factura_df["etiqueta_selector"] = menus_factura_df.apply(
+                            lambda row: (
+                                f"{row.get('nombre', '')} · {row.get('tipo_menu', '')} · "
+                                f"{int(numero_seguro(row.get('numero_comensales', 0), 0))} comensales"
+                            ).strip(" ·"),
+                            axis=1
+                        )
+                        menus_factura_por_id = {
+                            str(row.get("id")): row.to_dict()
+                            for _, row in menus_factura_df.iterrows()
+                            if row.get("id")
+                        }
+                        opciones_menus_factura = list(menus_factura_por_id.keys())
+                        menu_doc_col1, menu_doc_col2, menu_doc_col3 = st.columns([2, 1, 1])
+                        with menu_doc_col1:
+                            menu_factura_id = st.selectbox(
+                                "Menú guardado",
+                                opciones_menus_factura,
+                                format_func=lambda menu_id: menus_factura_por_id.get(str(menu_id), {}).get("etiqueta_selector", str(menu_id)),
+                                key="selector_menu_facturacion"
+                            )
+                        with menu_doc_col2:
+                            tipo_documento_menu = st.selectbox(
+                                "Tipo desde menú",
+                                ["presupuesto", "factura"],
+                                key="factura_tipo_documento_menu"
+                            )
+                        with menu_doc_col3:
+                            desglosar_menu = st.checkbox("Desglosar recetas del menú", key="factura_desglosar_menu")
+
+                        if tipo_documento not in ["presupuesto", "factura"]:
+                            st.warning("Para documentos desde menú, selecciona presupuesto o factura en el tipo principal antes de guardar.")
+                        elif tipo_documento != tipo_documento_menu:
+                            st.info("El tipo elegido aquí es orientativo; el guardado usará el tipo de documento principal.")
+
+                        if st.button("Crear líneas desde menú", use_container_width=True):
+                            cabecera_menu, lineas_menu_df = cargar_menu_detalle_supabase(menu_factura_id)
+                            if not cabecera_menu:
+                                st.error("No se pudo cargar el menú seleccionado.")
+                            elif lineas_menu_df.empty:
+                                st.warning("El menú seleccionado no tiene recetas guardadas.")
+                            else:
+                                lineas_desde_menu, aviso_precio_menu = crear_lineas_factura_desde_menu(
+                                    cabecera_menu,
+                                    lineas_menu_df,
+                                    desglosar=desglosar_menu
+                                )
+                                if not lineas_desde_menu:
+                                    st.warning("No se pudieron crear líneas desde el menú seleccionado.")
+                                else:
+                                    st.session_state["factura_lineas_actual"] = lineas_desde_menu
+                                    st.session_state["factura_menu_feedback"] = (
+                                        "Líneas creadas desde el menú. Revisa precios antes de guardar.",
+                                        aviso_precio_menu
+                                    )
+                                    st.rerun()
 
                 lineas_accion_col1, lineas_accion_col2, lineas_accion_col3 = st.columns(3)
                 with lineas_accion_col1:
