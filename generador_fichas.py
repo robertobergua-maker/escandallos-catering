@@ -106,6 +106,46 @@ def obtener_usuario_actual():
     }
 
 
+def obtener_user_id_actual():
+    user_id = st.session_state.get("user_id")
+    return str(user_id).strip() if user_id else None
+
+
+def valor_user_id_receta(receta):
+    if receta is None:
+        return None
+    user_id = receta.get("user_id") if isinstance(receta, dict) else getattr(receta, "user_id", None)
+    if user_id is None:
+        return None
+    try:
+        if pd.isna(user_id):
+            return None
+    except TypeError:
+        pass
+    user_id = str(user_id).strip()
+    return user_id or None
+
+
+def receta_es_propia_o_antigua(receta):
+    user_id_actual = obtener_user_id_actual()
+    receta_user_id = valor_user_id_receta(receta)
+    if user_id_actual:
+        return receta_user_id in (user_id_actual, None)
+    return receta_user_id is None
+
+
+def receta_es_modificable(receta):
+    user_id_actual = obtener_user_id_actual()
+    receta_user_id = valor_user_id_receta(receta)
+    if user_id_actual:
+        return receta_user_id == user_id_actual
+    return receta_user_id is None
+
+
+def mensaje_receta_no_modificable():
+    return "No puedes modificar una receta de otro usuario"
+
+
 # Inicializar estado de sesión para el escandallo activo
 if 'ingredientes' not in st.session_state:
     st.session_state['ingredientes'] = []
@@ -474,7 +514,7 @@ def generar_nombre_copia_receta(nombre_original):
         return f"{nombre_base} copia"
 
     try:
-        recetas_df = cargar_recetas_supabase()
+        recetas_df = cargar_recetas_supabase(obtener_user_id_actual())
         nombres_existentes = {
             str(nombre).strip().lower()
             for nombre in recetas_df.get("nombre", [])
@@ -552,7 +592,7 @@ def calcular_datos_ingrediente_receta(ing, orden=0):
 
 
 @st.cache_data(ttl=600)
-def cargar_recetas_supabase():
+def cargar_recetas_supabase(user_id_actual=None):
     """
     Lee public.recetas y devuelve un DataFrame seguro.
     """
@@ -574,7 +614,12 @@ def cargar_recetas_supabase():
         for col in RECETAS_COLUMNAS:
             if col not in df.columns:
                 df[col] = None
-        return df[RECETAS_COLUMNAS].copy()
+        df = df[RECETAS_COLUMNAS].copy()
+        user_id_actual = str(user_id_actual).strip() if user_id_actual else None
+        user_ids = df["user_id"].apply(lambda valor: valor_user_id_receta({"user_id": valor}))
+        if user_id_actual:
+            return df[user_ids.isin([user_id_actual, None])].copy()
+        return df[user_ids.isna()].copy()
     except Exception:
         return pd.DataFrame(columns=RECETAS_COLUMNAS)
 
@@ -609,6 +654,8 @@ def cargar_receta_detalle_supabase(receta_id):
             .execute()
         )
         cabecera = (respuesta_receta.data or [{}])[0] if respuesta_receta.data else {}
+        if cabecera and not receta_es_propia_o_antigua(cabecera):
+            return {}, ingredientes_vacios
 
         respuesta_ingredientes = (
             supabase
@@ -638,10 +685,13 @@ def guardar_receta_nueva_supabase(datos_receta, ingredientes):
         return False, "Supabase no está conectado correctamente.", None
 
     try:
+        user_id_actual = obtener_user_id_actual()
+        datos_guardar = dict(datos_receta)
+        datos_guardar["user_id"] = user_id_actual
         respuesta_receta = (
             supabase
             .table("recetas")
-            .insert(datos_receta)
+            .insert(datos_guardar)
             .execute()
         )
         receta_guardada = (respuesta_receta.data or [{}])[0]
@@ -665,7 +715,9 @@ def guardar_receta_nueva_supabase(datos_receta, ingredientes):
 
         limpiar_cache_recetas_guardadas()
 
-        return True, "Receta guardada correctamente.", receta_guardada
+        if user_id_actual:
+            return True, "Receta guardada en tu cuenta", receta_guardada
+        return True, "Receta guardada correctamente. Inicia sesión para guardar recetas en tu cuenta", receta_guardada
     except Exception as e:
         return False, f"Error al guardar la receta en Supabase: {e}", None
 
@@ -680,10 +732,18 @@ def actualizar_receta_supabase(receta_id, datos_receta, ingredientes):
         return False, "Supabase no está conectado correctamente."
 
     try:
+        cabecera_actual, _ = cargar_receta_detalle_supabase(receta_id)
+        if not cabecera_actual:
+            return False, "No se pudo comprobar la receta antes de actualizarla."
+        if not receta_es_modificable(cabecera_actual):
+            return False, mensaje_receta_no_modificable()
+
+        datos_actualizar = dict(datos_receta)
+        datos_actualizar["user_id"] = valor_user_id_receta(cabecera_actual)
         (
             supabase
             .table("recetas")
-            .update(datos_receta)
+            .update(datos_actualizar)
             .eq("id", receta_id)
             .execute()
         )
@@ -727,7 +787,7 @@ def duplicar_receta_supabase(datos_receta, ingredientes):
         return False, "No hay ingredientes para duplicar.", None
 
     datos_copia = dict(datos_receta)
-    datos_copia["user_id"] = None
+    datos_copia["user_id"] = obtener_user_id_actual()
     datos_copia["codigo_receta"] = generar_codigo_receta()
     datos_copia["nombre"] = generar_nombre_copia_receta(datos_receta.get("nombre", "Receta"))
 
@@ -744,6 +804,12 @@ def eliminar_receta_supabase(receta_id):
         return False, "Supabase no está conectado correctamente."
 
     try:
+        cabecera_actual, _ = cargar_receta_detalle_supabase(receta_id)
+        if not cabecera_actual:
+            return False, "No se pudo comprobar la receta antes de eliminarla."
+        if not receta_es_modificable(cabecera_actual):
+            return False, mensaje_receta_no_modificable()
+
         respuesta_uso_menu = (
             supabase
             .table("menu_recetas")
@@ -2127,13 +2193,24 @@ with main_tab_guardadas:
     if not supabase_disponible:
         st.warning("Supabase no está disponible. No se pueden cargar recetas guardadas ahora.")
     else:
-        recetas_guardadas_df = cargar_recetas_supabase()
+        recetas_guardadas_df = cargar_recetas_supabase(obtener_user_id_actual())
         if recetas_guardadas_df.empty:
             st.info("Todavía no hay recetas guardadas en Supabase.")
         else:
             recetas_guardadas_df = recetas_guardadas_df.copy()
+            recetas_sin_propietario = recetas_guardadas_df["user_id"].apply(
+                lambda valor: valor_user_id_receta({"user_id": valor}) is None
+            ).sum()
+            if obtener_user_id_actual() and recetas_sin_propietario:
+                st.info(
+                    f"Hay {recetas_sin_propietario} recetas antiguas sin propietario. "
+                    "Puedes cargarlas para consultarlas o duplicarlas en tu cuenta."
+                )
             recetas_guardadas_df["etiqueta_selector"] = recetas_guardadas_df.apply(
-                lambda row: f"{row.get('codigo_receta', '')} · {row.get('nombre', '')}".strip(" ·"),
+                lambda row: (
+                    f"{row.get('codigo_receta', '')} · {row.get('nombre', '')}"
+                    f"{' · sin propietario' if valor_user_id_receta(row.to_dict()) is None else ''}"
+                ).strip(" ·"),
                 axis=1
             )
             opciones_recetas = recetas_guardadas_df["id"].dropna().astype(str).tolist()
@@ -2164,37 +2241,41 @@ with main_tab_guardadas:
                     cargar_receta_btn = st.button("Cargar receta", use_container_width=True)
 
                 if cargar_receta_btn:
-                    cabecera, ingredientes_df = cargar_receta_detalle_supabase(receta_id_seleccionada)
-                    ingredientes_cargados = preparar_ingredientes_receta_para_sesion(ingredientes_df)
-                    if not cabecera:
-                        st.error("No se pudo cargar la cabecera de la receta seleccionada.")
-                    elif not ingredientes_cargados:
-                        st.warning("La receta seleccionada no tiene ingredientes guardados.")
+                    receta_seleccionada = recetas_por_id.get(str(receta_id_seleccionada), {})
+                    if receta_seleccionada and not receta_es_propia_o_antigua(receta_seleccionada):
+                        st.error("No puedes modificar una receta de otro usuario")
                     else:
-                        raciones_cargadas = numero_seguro(cabecera.get("raciones_base", 1.0), 1.0)
-                        st.session_state["ingredientes"] = ingredientes_cargados
-                        st.session_state["ingredientes_base_raciones"] = [dict(ing) for ing in ingredientes_cargados]
-                        st.session_state["factor_raciones"] = 1.0
-                        st.session_state["raciones_base"] = raciones_cargadas
-                        st.session_state["raciones_deseadas"] = raciones_cargadas
-                        st.session_state["receta_raciones_base"] = raciones_cargadas
-                        st.session_state["receta_raciones_deseadas"] = raciones_cargadas
-                        st.session_state["raciones_base_aplicadas"] = raciones_cargadas
-                        st.session_state["raciones_deseadas_aplicadas"] = raciones_cargadas
-                        st.session_state["sincronizar_inputs_raciones"] = True
-                        st.session_state["receta_nombre"] = str(cabecera.get("nombre", "") or "Mi Receta")
-                        st.session_state["receta_categoria"] = str(cabecera.get("categoria", "") or "")
-                        st.session_state["receta_tipo_plato"] = str(cabecera.get("tipo_plato", "") or "")
-                        st.session_state["receta_observaciones"] = str(
-                            cabecera.get("observaciones") or cabecera.get("descripcion") or ""
-                        )
-                        st.session_state["sincronizar_campos_receta"] = True
-                        codigo_cargado = str(cabecera.get("codigo_receta", "") or "").strip()
-                        nombre_cargado = str(cabecera.get("nombre", "") or "receta").strip()
-                        st.session_state["receta_id_cargada"] = str(cabecera.get("id", receta_id_seleccionada))
-                        st.session_state["codigo_receta_cargada"] = codigo_cargado
-                        st.session_state["mensaje_receta_cargada"] = f"Receta cargada: {nombre_cargado} ({codigo_cargado})."
-                        st.rerun()
+                        cabecera, ingredientes_df = cargar_receta_detalle_supabase(receta_id_seleccionada)
+                        ingredientes_cargados = preparar_ingredientes_receta_para_sesion(ingredientes_df)
+                        if not cabecera:
+                            st.error("No se pudo cargar la cabecera de la receta seleccionada.")
+                        elif not ingredientes_cargados:
+                            st.warning("La receta seleccionada no tiene ingredientes guardados.")
+                        else:
+                            raciones_cargadas = numero_seguro(cabecera.get("raciones_base", 1.0), 1.0)
+                            st.session_state["ingredientes"] = ingredientes_cargados
+                            st.session_state["ingredientes_base_raciones"] = [dict(ing) for ing in ingredientes_cargados]
+                            st.session_state["factor_raciones"] = 1.0
+                            st.session_state["raciones_base"] = raciones_cargadas
+                            st.session_state["raciones_deseadas"] = raciones_cargadas
+                            st.session_state["receta_raciones_base"] = raciones_cargadas
+                            st.session_state["receta_raciones_deseadas"] = raciones_cargadas
+                            st.session_state["raciones_base_aplicadas"] = raciones_cargadas
+                            st.session_state["raciones_deseadas_aplicadas"] = raciones_cargadas
+                            st.session_state["sincronizar_inputs_raciones"] = True
+                            st.session_state["receta_nombre"] = str(cabecera.get("nombre", "") or "Mi Receta")
+                            st.session_state["receta_categoria"] = str(cabecera.get("categoria", "") or "")
+                            st.session_state["receta_tipo_plato"] = str(cabecera.get("tipo_plato", "") or "")
+                            st.session_state["receta_observaciones"] = str(
+                                cabecera.get("observaciones") or cabecera.get("descripcion") or ""
+                            )
+                            st.session_state["sincronizar_campos_receta"] = True
+                            codigo_cargado = str(cabecera.get("codigo_receta", "") or "").strip()
+                            nombre_cargado = str(cabecera.get("nombre", "") or "receta").strip()
+                            st.session_state["receta_id_cargada"] = str(cabecera.get("id", receta_id_seleccionada))
+                            st.session_state["codigo_receta_cargada"] = codigo_cargado
+                            st.session_state["mensaje_receta_cargada"] = f"Receta cargada: {nombre_cargado} ({codigo_cargado})."
+                            st.rerun()
 
 
     if st.session_state['ingredientes']:
@@ -2218,6 +2299,8 @@ with main_tab_guardadas:
     st.subheader("Guardar receta")
     if not supabase_disponible:
         st.warning("Supabase no está disponible. No se puede guardar la receta ahora.")
+    elif not obtener_user_id_actual():
+        st.info("Inicia sesión para guardar recetas en tu cuenta")
     if st.session_state.get("receta_id_cargada"):
         st.caption(f"Receta cargada para actualizar: {st.session_state.get('codigo_receta_cargada', 'sin código')}")
 
@@ -2263,7 +2346,7 @@ with main_tab_guardadas:
             else:
                 codigo_receta = codigo_receta_cargada if actualizar_existente else generar_codigo_receta()
                 datos_receta = {
-                    "user_id": None,
+                    "user_id": obtener_user_id_actual(),
                     "codigo_receta": codigo_receta,
                     "nombre": nombre_limpio,
                     "categoria": categoria_receta.strip(),
@@ -2312,7 +2395,8 @@ with main_tab_guardadas:
                         limpiar_cache_recetas_guardadas()
                         st.session_state["selector_receta_guardada_pendiente"] = receta_guardada.get("id")
                         st.session_state["mensaje_receta_cargada"] = (
-                            f"Receta duplicada correctamente con código {nuevo_codigo}. "
+                            f"{'Receta duplicada en tu cuenta' if obtener_user_id_actual() else 'Receta duplicada correctamente'} "
+                            f"con código {nuevo_codigo}. "
                             "Listado de recetas actualizado."
                         )
                         st.rerun()
@@ -2330,7 +2414,7 @@ with main_tab_guardadas:
                         limpiar_cache_recetas_guardadas()
                         st.session_state["selector_receta_guardada_pendiente"] = receta_guardada.get("id")
                         st.session_state["mensaje_receta_cargada"] = (
-                            f"Receta guardada correctamente con código {codigo_mostrado}. "
+                            f"{mensaje} con código {codigo_mostrado}. "
                             "Listado de recetas actualizado."
                         )
                         st.rerun()
@@ -2350,6 +2434,10 @@ with main_tab_guardadas:
         st.warning("Supabase no está disponible. No se puede eliminar la receta ahora.")
     elif not receta_id_para_eliminar:
         st.info("Selecciona o carga una receta antes de intentar eliminarla.")
+    elif receta_para_eliminar and not receta_es_modificable(receta_para_eliminar):
+        st.warning("No puedes modificar una receta de otro usuario")
+        if valor_user_id_receta(receta_para_eliminar) is None:
+            st.info("Esta receta antigua no tiene propietario. Cierra sesión para eliminarla o duplícala en tu cuenta.")
     else:
         codigo_eliminar = str(
             receta_para_eliminar.get("codigo_receta")
@@ -2507,7 +2595,7 @@ with main_tab_menus:
     if not supabase_disponible:
         st.warning("Supabase no está disponible. No se pueden cargar recetas guardadas ahora.")
     else:
-        recetas_menu_df = cargar_recetas_supabase()
+        recetas_menu_df = cargar_recetas_supabase(obtener_user_id_actual())
         if recetas_menu_df.empty:
             st.info("Todavía no hay recetas guardadas para crear un menú.")
         else:
