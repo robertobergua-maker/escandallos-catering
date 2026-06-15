@@ -108,4 +108,30 @@ Este modulo no certifica cumplimiento VERI*FACTU, no sustituye revision fiscal y
 
 ## RLS
 
-Este SQL no activa RLS para facturacion. La seguridad por usuario de clientes, facturas y lineas se preparara en otro paso.
+`sql/016_facturacion_rls.sql` prepara la seguridad por usuario de clientes, facturas y lineas.
+
+La regla principal es:
+
+- `clientes` y `facturas` se filtran por `user_id = auth.uid()`;
+- `factura_lineas` hereda la seguridad desde `facturas`, comprobando que la factura propietaria pertenece al usuario autenticado.
+
+No se hace migracion automatica de datos. Los registros antiguos con `user_id null` no seran visibles cuando RLS estricto este activo.
+
+### Comprobar RLS
+
+```sql
+select schemaname, tablename, rowsecurity
+from pg_tables
+where schemaname = 'public'
+  and tablename in ('clientes', 'facturas', 'factura_lineas');
+```
+
+### Ver politicas
+
+```sql
+select schemaname, tablename, policyname, cmd
+from pg_policies
+where schemaname = 'public'
+  and tablename in ('clientes', 'facturas', 'factura_lineas')
+order by tablename, policyname;
+```
