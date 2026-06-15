@@ -296,6 +296,16 @@ RECETA_INGREDIENTES_COLUMNAS = [
     "created_at", "updated_at"
 ]
 
+MENUS_COLUMNAS = [
+    "id", "user_id", "nombre", "tipo_menu", "descripcion",
+    "numero_comensales", "coste_total", "precio_total",
+    "created_at", "updated_at"
+]
+
+MENU_RECETAS_COLUMNAS = [
+    "id", "menu_id", "receta_id", "raciones", "orden", "seccion", "created_at"
+]
+
 
 def numero_seguro(valor, defecto=0.0):
     numero = pd.to_numeric(valor, errors="coerce")
@@ -571,6 +581,285 @@ def duplicar_receta_supabase(datos_receta, ingredientes):
     datos_copia["nombre"] = generar_nombre_copia_receta(datos_receta.get("nombre", "Receta"))
 
     return guardar_receta_nueva_supabase(datos_copia, ingredientes)
+
+
+@st.cache_data(ttl=600)
+def cargar_menus_supabase():
+    """
+    Lee public.menus y devuelve un DataFrame seguro.
+    """
+    if not supabase_disponible or supabase is None:
+        return pd.DataFrame(columns=MENUS_COLUMNAS)
+
+    try:
+        respuesta = (
+            supabase
+            .table("menus")
+            .select(",".join(MENUS_COLUMNAS))
+            .order("created_at", desc=True)
+            .execute()
+        )
+        df = pd.DataFrame(respuesta.data or [])
+        if df.empty:
+            return pd.DataFrame(columns=MENUS_COLUMNAS)
+
+        for col in MENUS_COLUMNAS:
+            if col not in df.columns:
+                df[col] = None
+        return df[MENUS_COLUMNAS].copy()
+    except Exception:
+        return pd.DataFrame(columns=MENUS_COLUMNAS)
+
+
+def cargar_menu_detalle_supabase(menu_id):
+    """
+    Lee cabecera de public.menus y lineas de public.menu_recetas.
+    Enriquece las lineas con nombre, codigo y costes de public.recetas cuando existen.
+    """
+    lineas_vacias = pd.DataFrame(columns=MENU_RECETAS_COLUMNAS)
+    if not menu_id or not supabase_disponible or supabase is None:
+        return {}, lineas_vacias
+
+    try:
+        respuesta_menu = (
+            supabase
+            .table("menus")
+            .select(",".join(MENUS_COLUMNAS))
+            .eq("id", menu_id)
+            .limit(1)
+            .execute()
+        )
+        cabecera = (respuesta_menu.data or [{}])[0] if respuesta_menu.data else {}
+
+        respuesta_lineas = (
+            supabase
+            .table("menu_recetas")
+            .select(",".join(MENU_RECETAS_COLUMNAS))
+            .eq("menu_id", menu_id)
+            .order("orden")
+            .execute()
+        )
+        lineas_df = pd.DataFrame(respuesta_lineas.data or [])
+        if lineas_df.empty:
+            return cabecera, lineas_vacias
+
+        for col in MENU_RECETAS_COLUMNAS:
+            if col not in lineas_df.columns:
+                lineas_df[col] = None
+
+        receta_ids = [
+            str(receta_id)
+            for receta_id in lineas_df["receta_id"].dropna().unique().tolist()
+            if str(receta_id).strip()
+        ]
+        recetas_por_id = {}
+        if receta_ids:
+            respuesta_recetas = (
+                supabase
+                .table("recetas")
+                .select("id,codigo_receta,nombre,coste_total,precio_venta_sin_iva,precio_venta_con_iva")
+                .in_("id", receta_ids)
+                .execute()
+            )
+            recetas_por_id = {
+                str(receta.get("id")): receta
+                for receta in (respuesta_recetas.data or [])
+                if receta.get("id")
+            }
+
+        lineas_df["codigo_receta"] = lineas_df["receta_id"].apply(
+            lambda receta_id: recetas_por_id.get(str(receta_id), {}).get("codigo_receta")
+        )
+        lineas_df["nombre_receta"] = lineas_df["receta_id"].apply(
+            lambda receta_id: recetas_por_id.get(str(receta_id), {}).get("nombre")
+        )
+        lineas_df["coste_receta"] = lineas_df["receta_id"].apply(
+            lambda receta_id: recetas_por_id.get(str(receta_id), {}).get("coste_total")
+        )
+        lineas_df["precio_receta_sin_iva"] = lineas_df["receta_id"].apply(
+            lambda receta_id: recetas_por_id.get(str(receta_id), {}).get("precio_venta_sin_iva")
+        )
+        lineas_df["precio_receta_con_iva"] = lineas_df["receta_id"].apply(
+            lambda receta_id: recetas_por_id.get(str(receta_id), {}).get("precio_venta_con_iva")
+        )
+        return cabecera, lineas_df.copy()
+    except Exception:
+        return {}, lineas_vacias
+
+
+def calcular_totales_menu(lineas_menu):
+    """
+    Calcula coste total y, si hay datos de precio, precio total del menu.
+    """
+    if lineas_menu is None:
+        return {"coste_total": 0.0, "precio_total": None}
+
+    if isinstance(lineas_menu, pd.DataFrame):
+        lineas = lineas_menu.to_dict(orient="records")
+    else:
+        lineas = list(lineas_menu)
+
+    coste_total = 0.0
+    precio_total = 0.0
+    hay_precio = False
+
+    for linea in lineas:
+        raciones = numero_seguro(linea.get("raciones", 1.0), 1.0)
+        coste_receta = linea.get("coste_receta", linea.get("coste_total", None))
+        precio_receta = linea.get(
+            "precio_receta_con_iva",
+            linea.get("precio_venta_con_iva", linea.get("precio_total", None))
+        )
+
+        coste_total += numero_seguro(coste_receta, 0.0) * raciones
+        if precio_receta is not None and not pd.isna(precio_receta):
+            precio_total += numero_seguro(precio_receta, 0.0) * raciones
+            hay_precio = True
+
+    return {
+        "coste_total": coste_total,
+        "precio_total": precio_total if hay_precio else None
+    }
+
+
+def preparar_lineas_menu_para_supabase(lineas_menu):
+    """
+    Convierte lineas de menu al formato de public.menu_recetas.
+    """
+    if lineas_menu is None:
+        return []
+
+    if isinstance(lineas_menu, pd.DataFrame):
+        lineas = lineas_menu.to_dict(orient="records")
+    else:
+        lineas = list(lineas_menu)
+
+    lineas_preparadas = []
+    for orden, linea in enumerate(lineas, start=1):
+        receta_id = linea.get("receta_id", linea.get("id_receta", linea.get("id", None)))
+        if not receta_id:
+            continue
+        lineas_preparadas.append({
+            "receta_id": receta_id,
+            "raciones": numero_seguro(linea.get("raciones", 1.0), 1.0),
+            "orden": int(numero_seguro(linea.get("orden", orden), orden)),
+            "seccion": str(linea.get("seccion", "") or "").strip() or None
+        })
+    return lineas_preparadas
+
+
+def guardar_menu_supabase(datos_menu, lineas_menu):
+    """
+    Crea un menu nuevo y sus recetas asociadas. No modifica recetas.
+    """
+    if not supabase_disponible or supabase is None:
+        return False, "Supabase no está conectado correctamente.", None
+
+    lineas_preparadas = preparar_lineas_menu_para_supabase(lineas_menu)
+    if not lineas_preparadas:
+        return False, "Añade al menos una receta al menú antes de guardar.", None
+
+    try:
+        datos_guardar = dict(datos_menu)
+        datos_guardar["user_id"] = None
+        totales = calcular_totales_menu(lineas_menu)
+        if datos_guardar.get("coste_total") is None:
+            datos_guardar["coste_total"] = totales["coste_total"]
+        datos_guardar["coste_total"] = numero_seguro(datos_guardar.get("coste_total", 0.0))
+        if datos_guardar.get("precio_total") is None:
+            datos_guardar.pop("precio_total", None)
+        if "precio_total" not in datos_guardar and totales["precio_total"] is not None:
+            datos_guardar["precio_total"] = totales["precio_total"]
+
+        respuesta_menu = (
+            supabase
+            .table("menus")
+            .insert(datos_guardar)
+            .execute()
+        )
+        menu_guardado = (respuesta_menu.data or [{}])[0]
+        menu_id = menu_guardado.get("id")
+        if not menu_id:
+            return False, "No se pudo obtener el identificador del menú guardado.", None
+
+        for linea in lineas_preparadas:
+            linea["menu_id"] = menu_id
+
+        (
+            supabase
+            .table("menu_recetas")
+            .insert(lineas_preparadas)
+            .execute()
+        )
+
+        try:
+            cargar_menus_supabase.clear()
+        except Exception:
+            pass
+
+        return True, "Menú guardado correctamente.", menu_guardado
+    except Exception as e:
+        return False, f"Error al guardar el menú en Supabase: {e}", None
+
+
+def actualizar_menu_supabase(menu_id, datos_menu, lineas_menu):
+    """
+    Actualiza un menu y reemplaza solo sus lineas en public.menu_recetas.
+    """
+    if not menu_id:
+        return False, "No hay un menú seleccionado para actualizar."
+    if not supabase_disponible or supabase is None:
+        return False, "Supabase no está conectado correctamente."
+
+    lineas_preparadas = preparar_lineas_menu_para_supabase(lineas_menu)
+    if not lineas_preparadas:
+        return False, "Añade al menos una receta al menú antes de actualizar."
+
+    try:
+        datos_actualizar = dict(datos_menu)
+        totales = calcular_totales_menu(lineas_menu)
+        if datos_actualizar.get("coste_total") is None:
+            datos_actualizar["coste_total"] = totales["coste_total"]
+        datos_actualizar["coste_total"] = numero_seguro(datos_actualizar.get("coste_total", 0.0))
+        if datos_actualizar.get("precio_total") is None:
+            datos_actualizar.pop("precio_total", None)
+        if "precio_total" not in datos_actualizar and totales["precio_total"] is not None:
+            datos_actualizar["precio_total"] = totales["precio_total"]
+
+        (
+            supabase
+            .table("menus")
+            .update(datos_actualizar)
+            .eq("id", menu_id)
+            .execute()
+        )
+
+        (
+            supabase
+            .table("menu_recetas")
+            .delete()
+            .eq("menu_id", menu_id)
+            .execute()
+        )
+
+        for linea in lineas_preparadas:
+            linea["menu_id"] = menu_id
+
+        (
+            supabase
+            .table("menu_recetas")
+            .insert(lineas_preparadas)
+            .execute()
+        )
+
+        try:
+            cargar_menus_supabase.clear()
+        except Exception:
+            pass
+
+        return True, "Menú actualizado correctamente."
+    except Exception as e:
+        return False, f"Error al actualizar el menú en Supabase: {e}"
 
 
 def preparar_ingredientes_receta_para_sesion(ingredientes_df):
