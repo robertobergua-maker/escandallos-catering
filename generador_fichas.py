@@ -493,6 +493,17 @@ def cargar_recetas_supabase():
         return pd.DataFrame(columns=RECETAS_COLUMNAS)
 
 
+def limpiar_cache_recetas_guardadas():
+    """
+    Invalida el listado cacheado de recetas guardadas si la funcion esta cacheada.
+    """
+    try:
+        cargar_recetas_supabase.clear()
+        return True
+    except Exception:
+        return False
+
+
 def cargar_receta_detalle_supabase(receta_id):
     """
     Lee cabecera de public.recetas e ingredientes de public.receta_ingredientes.
@@ -566,10 +577,7 @@ def guardar_receta_nueva_supabase(datos_receta, ingredientes):
                 .execute()
             )
 
-        try:
-            cargar_recetas_supabase.clear()
-        except Exception:
-            pass
+        limpiar_cache_recetas_guardadas()
 
         return True, "Receta guardada correctamente.", receta_guardada
     except Exception as e:
@@ -616,10 +624,7 @@ def actualizar_receta_supabase(receta_id, datos_receta, ingredientes):
                 .execute()
             )
 
-        try:
-            cargar_recetas_supabase.clear()
-        except Exception:
-            pass
+        limpiar_cache_recetas_guardadas()
 
         return True, "Receta actualizada correctamente."
     except Exception as e:
@@ -1847,6 +1852,10 @@ with main_tab_guardadas:
             if not opciones_recetas:
                 st.info("Hay recetas guardadas, pero no se pudo leer su identificador.")
             else:
+                receta_pendiente_selector = st.session_state.pop("selector_receta_guardada_pendiente", None)
+                if receta_pendiente_selector and str(receta_pendiente_selector) in opciones_recetas:
+                    st.session_state["selector_receta_guardada"] = str(receta_pendiente_selector)
+
                 cargar_col1, cargar_col2 = st.columns([3, 1])
                 with cargar_col1:
                     receta_id_seleccionada = st.selectbox(
@@ -1985,7 +1994,13 @@ with main_tab_guardadas:
                     )
                     if ok:
                         st.session_state["codigo_receta_cargada"] = codigo_receta
-                        st.success(f"Receta actualizada correctamente con código {codigo_receta}.")
+                        limpiar_cache_recetas_guardadas()
+                        st.session_state["selector_receta_guardada_pendiente"] = receta_id_cargada
+                        st.session_state["mensaje_receta_cargada"] = (
+                            f"Receta actualizada correctamente con código {codigo_receta}. "
+                            "Listado de recetas actualizado."
+                        )
+                        st.rerun()
                     else:
                         st.error(mensaje)
                 elif duplicar_existente:
@@ -2000,7 +2015,12 @@ with main_tab_guardadas:
                         st.session_state["codigo_receta_cargada"] = nuevo_codigo
                         st.session_state["receta_nombre"] = nuevo_nombre
                         st.session_state["sincronizar_campos_receta"] = True
-                        st.session_state["mensaje_receta_cargada"] = f"Receta duplicada correctamente con código {nuevo_codigo}."
+                        limpiar_cache_recetas_guardadas()
+                        st.session_state["selector_receta_guardada_pendiente"] = receta_guardada.get("id")
+                        st.session_state["mensaje_receta_cargada"] = (
+                            f"Receta duplicada correctamente con código {nuevo_codigo}. "
+                            "Listado de recetas actualizado."
+                        )
                         st.rerun()
                     else:
                         st.error(mensaje)
@@ -2013,7 +2033,13 @@ with main_tab_guardadas:
                         codigo_mostrado = receta_guardada.get("codigo_receta", codigo_receta)
                         st.session_state["receta_id_cargada"] = receta_guardada.get("id")
                         st.session_state["codigo_receta_cargada"] = codigo_mostrado
-                        st.success(f"Receta guardada correctamente con código {codigo_mostrado}.")
+                        limpiar_cache_recetas_guardadas()
+                        st.session_state["selector_receta_guardada_pendiente"] = receta_guardada.get("id")
+                        st.session_state["mensaje_receta_cargada"] = (
+                            f"Receta guardada correctamente con código {codigo_mostrado}. "
+                            "Listado de recetas actualizado."
+                        )
+                        st.rerun()
                     else:
                         st.error(mensaje)
 
