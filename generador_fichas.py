@@ -2023,6 +2023,9 @@ with main_tab_menus:
             key="menu_tipo"
         )
 
+    if st.session_state.get("menu_id"):
+        st.caption(f"Menú cargado para actualizar: {st.session_state['menu_id']}")
+
     numero_comensales = st.number_input(
         "Número de comensales",
         min_value=1,
@@ -2157,7 +2160,7 @@ with main_tab_menus:
             st.metric("Precio total del menú", "Sin datos")
             st.metric("Precio por comensal", "Sin datos")
 
-    accion_menu_col1, accion_menu_col2 = st.columns(2)
+    accion_menu_col1, accion_menu_col2, accion_menu_col3 = st.columns(3)
     with accion_menu_col1:
         if st.button("Guardar menú", type="primary", use_container_width=True):
             nombre_menu_limpio = str(nombre_menu or "").strip()
@@ -2184,6 +2187,32 @@ with main_tab_menus:
                 else:
                     st.error(mensaje)
     with accion_menu_col2:
+        if st.button("Actualizar menú seleccionado", use_container_width=True):
+            menu_id_actual = st.session_state.get("menu_id")
+            nombre_menu_limpio = str(nombre_menu or "").strip()
+            if not supabase_disponible or supabase is None:
+                st.error("Supabase no está conectado correctamente.")
+            elif not menu_id_actual:
+                st.warning("Carga un menú guardado antes de actualizarlo.")
+            elif not nombre_menu_limpio:
+                st.error("Indica un nombre de menú antes de actualizar.")
+            elif not lineas_menu_actual:
+                st.warning("Añade al menos una receta antes de actualizar el menú.")
+            else:
+                datos_menu = {
+                    "nombre": nombre_menu_limpio,
+                    "tipo_menu": tipo_menu,
+                    "descripcion": "",
+                    "numero_comensales": int(numero_comensales),
+                    "coste_total": float(total_coste_menu),
+                    "precio_total": float(total_precio_menu) if hay_precio_menu else None
+                }
+                ok, mensaje = actualizar_menu_supabase(menu_id_actual, datos_menu, lineas_menu_actual)
+                if ok:
+                    st.success("Menú actualizado correctamente.")
+                else:
+                    st.error(mensaje)
+    with accion_menu_col3:
         if st.button("Limpiar menú actual", use_container_width=True):
             st.session_state["menu_actual"] = []
             st.session_state["menu_id"] = None
