@@ -49,14 +49,29 @@ if 'factor_raciones' not in st.session_state:
 if 'ingredientes_base_raciones' not in st.session_state:
     st.session_state['ingredientes_base_raciones'] = st.session_state.get('ingredientes_originales_raciones', None)
 
+if 'receta_nombre' not in st.session_state:
+    st.session_state['receta_nombre'] = st.session_state.get('nombre_plato', "Mi Receta")
+
+if 'receta_raciones_base' not in st.session_state:
+    st.session_state['receta_raciones_base'] = float(st.session_state['raciones_base'])
+
+if 'receta_raciones_deseadas' not in st.session_state:
+    st.session_state['receta_raciones_deseadas'] = float(st.session_state['raciones_deseadas'])
+
+if 'input_nombre_plato' not in st.session_state:
+    st.session_state['input_nombre_plato'] = st.session_state['receta_nombre']
+
 if 'input_raciones_base' not in st.session_state:
-    st.session_state['input_raciones_base'] = float(st.session_state['raciones_base'])
+    st.session_state['input_raciones_base'] = float(st.session_state['receta_raciones_base'])
 
 if 'input_raciones_deseadas' not in st.session_state:
-    st.session_state['input_raciones_deseadas'] = float(st.session_state['raciones_deseadas'])
+    st.session_state['input_raciones_deseadas'] = float(st.session_state['receta_raciones_deseadas'])
 
 if 'sincronizar_inputs_raciones' not in st.session_state:
     st.session_state['sincronizar_inputs_raciones'] = False
+
+if 'sincronizar_campos_receta' not in st.session_state:
+    st.session_state['sincronizar_campos_receta'] = False
 
 if 'raciones_base_aplicadas' not in st.session_state:
     st.session_state['raciones_base_aplicadas'] = float(st.session_state['raciones_base'])
@@ -69,16 +84,25 @@ if 'db_trigger' not in st.session_state:
     st.session_state['db_trigger'] = 0
 
 if 'nombre_plato' not in st.session_state:
-    st.session_state['nombre_plato'] = "Mi Receta"
+    st.session_state['nombre_plato'] = st.session_state['receta_nombre']
 
 if 'receta_categoria' not in st.session_state:
     st.session_state['receta_categoria'] = ""
 
+if 'input_receta_categoria' not in st.session_state:
+    st.session_state['input_receta_categoria'] = st.session_state['receta_categoria']
+
 if 'receta_tipo_plato' not in st.session_state:
     st.session_state['receta_tipo_plato'] = ""
 
+if 'input_receta_tipo_plato' not in st.session_state:
+    st.session_state['input_receta_tipo_plato'] = st.session_state['receta_tipo_plato']
+
 if 'receta_observaciones' not in st.session_state:
     st.session_state['receta_observaciones'] = ""
+
+if 'input_receta_observaciones' not in st.session_state:
+    st.session_state['input_receta_observaciones'] = st.session_state['receta_observaciones']
 
 if 'receta_id_cargada' not in st.session_state:
     st.session_state['receta_id_cargada'] = None
@@ -99,6 +123,8 @@ if 'menu_actual' not in st.session_state:
     st.session_state['menu_actual'] = []
 if 'menu_id' not in st.session_state:
     st.session_state['menu_id'] = None
+if 'sincronizar_campos_menu' not in st.session_state:
+    st.session_state['sincronizar_campos_menu'] = False
 
 # =============================================================================
 # 📥 FUNCIÓN CACHÉ PARA CARGAR INVENTARIO DESDE SUPABASE
@@ -1063,6 +1089,8 @@ def incorporar_ingredientes_ia(respuesta_ia):
     if raciones_base_detectadas is not None:
         st.session_state['raciones_base'] = raciones_base_detectadas
         st.session_state['raciones_deseadas'] = raciones_base_detectadas
+        st.session_state['receta_raciones_base'] = raciones_base_detectadas
+        st.session_state['receta_raciones_deseadas'] = raciones_base_detectadas
         st.session_state['sincronizar_inputs_raciones'] = True
 
     return True
@@ -1074,12 +1102,34 @@ def marcar_receta_modificada_manualmente():
 
 
 def sincronizar_inputs_raciones():
+    if st.session_state.get('sincronizar_campos_receta', False):
+        st.session_state['input_nombre_plato'] = st.session_state.get('receta_nombre', "Mi Receta")
+        st.session_state['input_receta_categoria'] = st.session_state.get('receta_categoria', "")
+        st.session_state['input_receta_tipo_plato'] = st.session_state.get('receta_tipo_plato', "")
+        st.session_state['input_receta_observaciones'] = st.session_state.get('receta_observaciones', "")
+        st.session_state['sincronizar_campos_receta'] = False
+
     if st.session_state.get('sincronizar_inputs_raciones', False):
-        st.session_state['input_raciones_base'] = float(st.session_state['raciones_base'])
-        st.session_state['input_raciones_deseadas'] = float(st.session_state['raciones_deseadas'])
-        st.session_state['raciones_base_aplicadas'] = float(st.session_state['raciones_base'])
-        st.session_state['raciones_deseadas_aplicadas'] = float(st.session_state['raciones_deseadas'])
+        raciones_base = float(st.session_state.get('receta_raciones_base', st.session_state['raciones_base']))
+        raciones_deseadas = float(st.session_state.get('receta_raciones_deseadas', st.session_state['raciones_deseadas']))
+        st.session_state['input_raciones_base'] = raciones_base
+        st.session_state['input_raciones_deseadas'] = raciones_deseadas
+        st.session_state['raciones_base'] = raciones_base
+        st.session_state['raciones_deseadas'] = raciones_deseadas
+        st.session_state['raciones_base_aplicadas'] = raciones_base
+        st.session_state['raciones_deseadas_aplicadas'] = raciones_deseadas
         st.session_state['sincronizar_inputs_raciones'] = False
+
+
+def sincronizar_widgets_menu():
+    if st.session_state.get('sincronizar_campos_menu', False):
+        if 'menu_nombre_pendiente' in st.session_state:
+            st.session_state['menu_nombre'] = st.session_state.pop('menu_nombre_pendiente')
+        if 'menu_tipo_pendiente' in st.session_state:
+            st.session_state['menu_tipo'] = st.session_state.pop('menu_tipo_pendiente')
+        if 'menu_numero_comensales_pendiente' in st.session_state:
+            st.session_state['menu_numero_comensales'] = st.session_state.pop('menu_numero_comensales_pendiente')
+        st.session_state['sincronizar_campos_menu'] = False
 
 # =============================================================================
 # 📊 GENERADOR DE EXCEL CON FÓRMULAS CONSOLIDADAS
@@ -1391,11 +1441,13 @@ main_tab_receta, main_tab_guardadas, main_tab_menus, main_tab_costes, main_tab_b
 
 with main_tab_receta:
     st.subheader("Receta activa")
-    # Inputs generales del plato
-    nombre_plato = st.text_input("Nombre del Plato", key="nombre_plato")
-    st.caption("Ajusta raciones y alimenta la receta desde entrada manual, texto o imagen.")
-
     sincronizar_inputs_raciones()
+
+    # Inputs generales del plato
+    nombre_plato = st.text_input("Nombre del Plato", key="input_nombre_plato")
+    st.session_state['receta_nombre'] = nombre_plato
+    st.session_state['nombre_plato'] = nombre_plato
+    st.caption("Ajusta raciones y alimenta la receta desde entrada manual, texto o imagen.")
 
     col_r1, col_r2, col_r3, col_r4 = st.columns([1, 1, 1, 1])
     with col_r1:
@@ -1415,6 +1467,8 @@ with main_tab_receta:
 
     st.session_state['raciones_base'] = float(raciones_base)
     st.session_state['raciones_deseadas'] = float(raciones_deseadas)
+    st.session_state['receta_raciones_base'] = float(raciones_base)
+    st.session_state['receta_raciones_deseadas'] = float(raciones_deseadas)
 
     factor_raciones_preview = raciones_deseadas / raciones_base if raciones_base > 0 and raciones_deseadas > 0 else 0.0
     with col_r3:
@@ -1431,6 +1485,8 @@ with main_tab_receta:
                 st.session_state['raciones_base_aplicadas'] = float(raciones_base)
                 st.session_state['raciones_deseadas_aplicadas'] = float(raciones_base)
                 st.session_state['raciones_deseadas'] = float(raciones_base)
+                st.session_state['receta_raciones_base'] = float(raciones_base)
+                st.session_state['receta_raciones_deseadas'] = float(raciones_base)
                 st.session_state['sincronizar_inputs_raciones'] = True
                 st.success("Cantidades base restablecidas.")
                 st.rerun()
@@ -1818,17 +1874,18 @@ with main_tab_guardadas:
                         st.session_state["factor_raciones"] = 1.0
                         st.session_state["raciones_base"] = raciones_cargadas
                         st.session_state["raciones_deseadas"] = raciones_cargadas
+                        st.session_state["receta_raciones_base"] = raciones_cargadas
+                        st.session_state["receta_raciones_deseadas"] = raciones_cargadas
                         st.session_state["raciones_base_aplicadas"] = raciones_cargadas
                         st.session_state["raciones_deseadas_aplicadas"] = raciones_cargadas
-                        st.session_state["input_raciones_base"] = raciones_cargadas
-                        st.session_state["input_raciones_deseadas"] = raciones_cargadas
                         st.session_state["sincronizar_inputs_raciones"] = True
-                        st.session_state["nombre_plato"] = str(cabecera.get("nombre", "") or "Mi Receta")
+                        st.session_state["receta_nombre"] = str(cabecera.get("nombre", "") or "Mi Receta")
                         st.session_state["receta_categoria"] = str(cabecera.get("categoria", "") or "")
                         st.session_state["receta_tipo_plato"] = str(cabecera.get("tipo_plato", "") or "")
                         st.session_state["receta_observaciones"] = str(
                             cabecera.get("observaciones") or cabecera.get("descripcion") or ""
                         )
+                        st.session_state["sincronizar_campos_receta"] = True
                         codigo_cargado = str(cabecera.get("codigo_receta", "") or "").strip()
                         nombre_cargado = str(cabecera.get("nombre", "") or "receta").strip()
                         st.session_state["receta_id_cargada"] = str(cabecera.get("id", receta_id_seleccionada))
@@ -1862,16 +1919,16 @@ with main_tab_guardadas:
         st.caption(f"Receta cargada para actualizar: {st.session_state.get('codigo_receta_cargada', 'sin código')}")
 
     with st.form("form_guardar_receta_nueva"):
-        nombre_receta_guardar = st.text_input("Nombre de receta", value=nombre_plato)
-        categoria_receta = st.text_input("Categoría", key="receta_categoria")
-        tipo_plato_receta = st.text_input("Tipo de plato", key="receta_tipo_plato")
+        nombre_receta_guardar = st.text_input("Nombre de receta", value=st.session_state.get("receta_nombre", nombre_plato))
+        categoria_receta = st.text_input("Categoría", key="input_receta_categoria")
+        tipo_plato_receta = st.text_input("Tipo de plato", key="input_receta_tipo_plato")
         raciones_base_receta = st.number_input(
             "Raciones base",
             min_value=0.0,
             step=1.0,
-            value=float(st.session_state.get('raciones_base', 1.0))
+            value=float(st.session_state.get('receta_raciones_base', st.session_state.get('raciones_base', 1.0)))
         )
-        observaciones_receta = st.text_area("Descripción / observaciones", key="receta_observaciones", height=90)
+        observaciones_receta = st.text_area("Descripción / observaciones", key="input_receta_observaciones", height=90)
 
         guardar_col, actualizar_col, duplicar_col = st.columns(3)
         with guardar_col:
@@ -1882,6 +1939,11 @@ with main_tab_guardadas:
             duplicar_existente = st.form_submit_button("Duplicar receta seleccionada", use_container_width=True)
 
         if guardar_nueva or actualizar_existente or duplicar_existente:
+            st.session_state["receta_nombre"] = str(nombre_receta_guardar or "").strip() or st.session_state.get("receta_nombre", "Mi Receta")
+            st.session_state["receta_categoria"] = categoria_receta
+            st.session_state["receta_tipo_plato"] = tipo_plato_receta
+            st.session_state["receta_observaciones"] = observaciones_receta
+            st.session_state["receta_raciones_base"] = float(raciones_base_receta)
             nombre_limpio = nombre_receta_guardar.strip()
             receta_id_cargada = st.session_state.get("receta_id_cargada")
             codigo_receta_cargada = st.session_state.get("codigo_receta_cargada", "")
@@ -1936,7 +1998,8 @@ with main_tab_guardadas:
                         nuevo_nombre = receta_guardada.get("nombre", nombre_limpio)
                         st.session_state["receta_id_cargada"] = receta_guardada.get("id")
                         st.session_state["codigo_receta_cargada"] = nuevo_codigo
-                        st.session_state["nombre_plato"] = nuevo_nombre
+                        st.session_state["receta_nombre"] = nuevo_nombre
+                        st.session_state["sincronizar_campos_receta"] = True
                         st.session_state["mensaje_receta_cargada"] = f"Receta duplicada correctamente con código {nuevo_codigo}."
                         st.rerun()
                     else:
@@ -1957,6 +2020,7 @@ with main_tab_guardadas:
 with main_tab_menus:
     st.subheader("Menús")
     st.caption("Construye un menú básico combinando recetas guardadas.")
+    sincronizar_widgets_menu()
 
     mensaje_menu_cargado = st.session_state.pop("mensaje_menu_cargado", None)
     if mensaje_menu_cargado:
@@ -2267,8 +2331,11 @@ with main_tab_menus:
                 ok, mensaje, menu_guardado = guardar_menu_supabase(datos_menu, lineas_menu_actual)
                 if ok:
                     st.session_state["menu_id"] = menu_guardado.get("id")
-                    st.session_state["menu_nombre"] = menu_guardado.get("nombre", nuevo_nombre_menu)
-                    st.session_state["mensaje_menu_cargado"] = f"Menú duplicado correctamente: {st.session_state['menu_nombre']}."
+                    st.session_state["menu_nombre_pendiente"] = menu_guardado.get("nombre", nuevo_nombre_menu)
+                    st.session_state["menu_tipo_pendiente"] = tipo_menu
+                    st.session_state["menu_numero_comensales_pendiente"] = int(numero_comensales)
+                    st.session_state["sincronizar_campos_menu"] = True
+                    st.session_state["mensaje_menu_cargado"] = f"Menú duplicado correctamente: {st.session_state['menu_nombre_pendiente']}."
                     st.rerun()
                 else:
                     st.error(mensaje)
