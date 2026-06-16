@@ -33,3 +33,9 @@ Agrupa la creación, listado, edición y eliminación de clientes.
 ## Facturas
 
 Agrupa presupuestos, facturas, documentos guardados, creación de documentos desde menú y descarga de documentos.
+
+Cada presupuesto o factura debe estar asociado a un cliente mediante `facturas.cliente_id`.
+
+Los documentos pueden crearse desde un menú. Mientras no exista una relación directa en `facturas`, la relación menú-documento se conserva temporalmente en las líneas mediante `factura_lineas.origen_tipo` y `factura_lineas.origen_id`.
+
+Cuando el documento se genera desde menú, las líneas guardan `origen_tipo = "menu"` y `origen_id` con el identificador del menú. Queda pendiente una migración futura para añadir `facturas.menu_id` y representar esta relación de forma directa.

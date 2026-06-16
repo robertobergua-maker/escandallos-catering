@@ -1444,7 +1444,7 @@ def calcular_linea_factura(linea):
     base_linea = cantidad * precio_unitario * (1 - descuento_pct / 100)
     iva_linea = base_linea * iva_pct / 100
     total_linea = base_linea + iva_linea
-    return {
+    linea_calculada = {
         "descripcion": str(linea.get("descripcion", "") or "").strip(),
         "cantidad": cantidad,
         "unidad": str(linea.get("unidad", "ud") or "ud").strip() or "ud",
@@ -1455,6 +1455,40 @@ def calcular_linea_factura(linea):
         "iva_linea": round(iva_linea, 2),
         "total_linea": round(total_linea, 2)
     }
+    origen_tipo = str(linea.get("origen_tipo", "") or "").strip()
+    if origen_tipo:
+        linea_calculada["origen_tipo"] = origen_tipo
+    if linea.get("origen_id") is not None and str(linea.get("origen_id") or "").strip():
+        linea_calculada["origen_id"] = linea.get("origen_id")
+    for campo_auxiliar in ["origen_receta_tipo", "origen_receta_id", "menu_origen_id"]:
+        if linea.get(campo_auxiliar) is not None and str(linea.get(campo_auxiliar) or "").strip():
+            linea_calculada[campo_auxiliar] = linea.get(campo_auxiliar)
+    return linea_calculada
+
+
+def obtener_menu_id_desde_lineas_factura(lineas):
+    for linea in lineas or []:
+        origen_tipo = str(linea.get("origen_tipo", "") or "").strip()
+        origen_id = str(linea.get("origen_id", "") or "").strip()
+        menu_origen_id = str(linea.get("menu_origen_id", "") or "").strip()
+        if origen_tipo == "menu" and origen_id:
+            return origen_id
+        if menu_origen_id:
+            return menu_origen_id
+    return None
+
+
+def obtener_nombre_menu_por_id(menu_id):
+    menu_id_limpio = str(menu_id or "").strip()
+    if not menu_id_limpio:
+        return None
+    menus_df = cargar_menus_supabase(obtener_user_id_actual())
+    if menus_df.empty:
+        return None
+    coincidencias = menus_df[menus_df["id"].astype(str) == menu_id_limpio]
+    if coincidencias.empty:
+        return None
+    return str(coincidencias.iloc[0].get("nombre") or "").strip() or None
 
 
 def calcular_totales_factura(lineas, iva_pct=21, retencion_pct=0):
@@ -1503,6 +1537,10 @@ def generar_pdf_factura(factura, lineas, cliente):
     numero = str(factura.get("numero_factura") or "sin_numero").strip() or "sin_numero"
     extension_base = "presupuesto" if tipo_documento == "presupuesto" else "factura"
     numero_archivo = re.sub(r"[^A-Za-z0-9_-]+", "_", numero).strip("_") or "sin_numero"
+    menu_id_asociado = obtener_menu_id_desde_lineas_factura(lineas_validas)
+    nombre_menu_asociado = str(factura.get("menu_nombre_asociado") or "").strip()
+    if menu_id_asociado and not nombre_menu_asociado:
+        nombre_menu_asociado = obtener_nombre_menu_por_id(menu_id_asociado) or ""
 
     datos_cliente = [
         cliente.get("nombre"),
@@ -1544,6 +1582,8 @@ def generar_pdf_factura(factura, lineas, cliente):
             elementos.append(Paragraph(html.escape(dato), estilos["Normal"]))
         if factura.get("concepto"):
             elementos.extend([Spacer(1, 8), Paragraph(f"Concepto: {html.escape(str(factura.get('concepto')))}", estilos["Normal"])])
+        if nombre_menu_asociado:
+            elementos.append(Paragraph(f"Documento asociado a menú: {html.escape(nombre_menu_asociado)}", estilos["Normal"]))
 
         tabla = [["Descripción", "Cant.", "Ud.", "Precio", "Dto.", "IVA", "Base", "Total"]]
         for linea in lineas_validas:
@@ -1620,6 +1660,14 @@ def generar_pdf_factura(factura, lineas, cliente):
           <strong>{formatear_importe_euros(totales['retencion_importe'])}</strong>
         </div>
         """
+    menu_asociado_html = ""
+    if nombre_menu_asociado:
+        menu_asociado_html = f"""
+        <section>
+          <div class="label">Documento asociado a menú</div>
+          <div>{escapar(nombre_menu_asociado)}</div>
+        </section>
+        """
     html_documento = f"""<!doctype html>
 <html lang="es">
 <head>
@@ -1664,6 +1712,7 @@ def generar_pdf_factura(factura, lineas, cliente):
     <div class="label">Concepto</div>
     <div>{escapar(factura.get('concepto'))}</div>
   </section>
+  {menu_asociado_html}
   <table>
     <thead>
       <tr>
@@ -1866,7 +1915,8 @@ def guardar_factura_supabase(factura, lineas):
         for orden, linea in enumerate(lineas_validas, start=1):
             lineas_guardar.append({
                 "factura_id": factura_id,
-                "origen_tipo": "manual",
+                "origen_tipo": linea.get("origen_tipo", "manual") or "manual",
+                "origen_id": linea.get("origen_id"),
                 "descripcion": linea["descripcion"],
                 "cantidad": linea["cantidad"],
                 "unidad": linea["unidad"],
@@ -2081,6 +2131,7 @@ def crear_lineas_factura_desde_menu(cabecera_menu, lineas_menu_df, desglosar=Fal
     """
     cabecera_menu = cabecera_menu or {}
     lineas_menu = lineas_menu_df.to_dict(orient="records") if isinstance(lineas_menu_df, pd.DataFrame) else list(lineas_menu_df or [])
+    menu_id = str(cabecera_menu.get("id", "") or "").strip()
     nombre_menu = str(cabecera_menu.get("nombre", "") or "Menú").strip()
     numero_comensales = int(numero_seguro(cabecera_menu.get("numero_comensales", 1), 1))
     aviso_precio = False
@@ -2104,7 +2155,9 @@ def crear_lineas_factura_desde_menu(cabecera_menu, lineas_menu_df, desglosar=Fal
                 "unidad": "servicio",
                 "precio_unitario": precio_unitario,
                 "descuento_pct": 0.0,
-                "iva_pct": 21.0
+                "iva_pct": 21.0,
+                "origen_tipo": "menu",
+                "origen_id": menu_id
             })
         ], aviso_precio
 
@@ -2125,7 +2178,12 @@ def crear_lineas_factura_desde_menu(cabecera_menu, lineas_menu_df, desglosar=Fal
             "unidad": "ración",
             "precio_unitario": precio_unitario,
             "descuento_pct": 0.0,
-            "iva_pct": 21.0
+            "iva_pct": 21.0,
+            "origen_tipo": "menu",
+            "origen_id": menu_id,
+            "origen_receta_tipo": "menu_receta",
+            "origen_receta_id": linea.get("receta_id"),
+            "menu_origen_id": menu_id
         }))
 
     return lineas_factura, aviso_precio
@@ -3571,6 +3629,17 @@ with main_tab_facturas:
                         ),
                         key="selector_factura_guardada"
                     )
+                    ok_origen_doc, _, _, lineas_origen_doc = cargar_factura_detalle_supabase(factura_guardada_id)
+                    if ok_origen_doc and not lineas_origen_doc.empty:
+                        menu_id_documento = obtener_menu_id_desde_lineas_factura(lineas_origen_doc.to_dict(orient="records"))
+                        if menu_id_documento:
+                            nombre_menu_documento = obtener_nombre_menu_por_id(menu_id_documento)
+                            etiqueta_menu_documento = (
+                                f"Documento creado desde menú: {nombre_menu_documento}"
+                                if nombre_menu_documento else
+                                "Documento creado desde menú"
+                            )
+                            st.info(etiqueta_menu_documento)
                     cargar_col, duplicar_col = st.columns(2)
                     with cargar_col:
                         if st.button("Cargar documento", use_container_width=True):
@@ -3725,12 +3794,20 @@ with main_tab_facturas:
                         with menu_doc_col3:
                             desglosar_menu = st.checkbox("Desglosar recetas del menú", key="factura_desglosar_menu")
 
+                        st.info("Este documento se generará desde el menú seleccionado y quedará vinculado mediante sus líneas.")
+
                         if tipo_documento not in ["presupuesto", "factura"]:
                             st.warning("Para documentos desde menú, selecciona presupuesto o factura en el tipo principal antes de guardar.")
                         elif tipo_documento != tipo_documento_menu:
                             st.info("El tipo elegido aquí es orientativo; el guardado usará el tipo de documento principal.")
 
                         if st.button("Crear líneas desde menú", use_container_width=True):
+                            if not factura_cliente_id:
+                                st.warning("Selecciona un cliente antes de crear líneas desde un menú.")
+                                st.stop()
+                            if not menu_factura_id:
+                                st.warning("Selecciona un menú antes de crear líneas.")
+                                st.stop()
                             cabecera_menu, lineas_menu_df = cargar_menu_detalle_supabase(menu_factura_id)
                             if not cabecera_menu:
                                 st.error("No se pudo cargar el menú seleccionado.")
@@ -3773,10 +3850,18 @@ with main_tab_facturas:
                 if not st.session_state["factura_lineas_actual"]:
                     st.session_state["factura_lineas_actual"] = [linea_factura_vacia()]
 
+                columnas_editor_factura = [
+                    "descripcion", "cantidad", "unidad", "precio_unitario",
+                    "descuento_pct", "iva_pct", "base_linea", "iva_linea", "total_linea"
+                ]
                 lineas_df = pd.DataFrame([
                     calcular_linea_factura(linea)
                     for linea in st.session_state["factura_lineas_actual"]
                 ])
+                for columna_editor in columnas_editor_factura:
+                    if columna_editor not in lineas_df.columns:
+                        lineas_df[columna_editor] = None
+                lineas_df = lineas_df[columnas_editor_factura]
                 lineas_editadas_df = st.data_editor(
                     lineas_df,
                     num_rows="fixed",
@@ -3797,10 +3882,17 @@ with main_tab_facturas:
                     key="editor_factura_lineas"
                 )
 
-                lineas_actualizadas = [
-                    calcular_linea_factura(linea)
-                    for linea in lineas_editadas_df.to_dict(orient="records")
-                ]
+                lineas_actualizadas = []
+                for idx, linea_editada in enumerate(lineas_editadas_df.to_dict(orient="records")):
+                    linea_origen = (
+                        st.session_state["factura_lineas_actual"][idx]
+                        if idx < len(st.session_state["factura_lineas_actual"])
+                        else {}
+                    )
+                    for campo_origen in ["origen_tipo", "origen_id", "origen_receta_tipo", "origen_receta_id", "menu_origen_id"]:
+                        if linea_origen.get(campo_origen) is not None:
+                            linea_editada[campo_origen] = linea_origen.get(campo_origen)
+                    lineas_actualizadas.append(calcular_linea_factura(linea_editada))
                 if lineas_actualizadas != st.session_state["factura_lineas_actual"]:
                     st.session_state["factura_lineas_actual"] = lineas_actualizadas
                     st.rerun()
@@ -3833,12 +3925,16 @@ with main_tab_facturas:
                     "estado_cobro": estado_cobro,
                     "notas": str(notas or "").strip() or None
                 }
+                # TODO: valorar migración futura facturas.menu_id para relación directa menú-documento.
                 cliente_actual_factura = clientes_por_id_factura.get(str(factura_cliente_id), {})
                 lineas_validas_descarga = [
                     calcular_linea_factura(linea)
                     for linea in st.session_state["factura_lineas_actual"]
                     if str(linea.get("descripcion", "") or "").strip()
                 ]
+                menu_id_descarga = obtener_menu_id_desde_lineas_factura(lineas_validas_descarga)
+                if menu_id_descarga:
+                    factura_actual["menu_nombre_asociado"] = obtener_nombre_menu_por_id(menu_id_descarga)
 
                 descarga_col, guardar_col, actualizar_col = st.columns(3)
                 with descarga_col:
