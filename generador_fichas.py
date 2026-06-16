@@ -3005,17 +3005,16 @@ with st.sidebar:
 
 st.divider()
 
-main_tab_receta, main_tab_guardadas, main_tab_menus, main_tab_facturacion, main_tab_costes, main_tab_base = st.tabs([
-    "Receta activa",
-    "Recetas guardadas",
+main_tab_ingredientes, main_tab_recetas, main_tab_menus, main_tab_clientes, main_tab_facturas = st.tabs([
+    "Ingredientes",
+    "Recetas",
     "Menús",
-    "Facturación",
-    "Costes y exportacion",
-    "Base de ingredientes"
+    "Clientes",
+    "Facturas"
 ])
 
-with main_tab_receta:
-    st.subheader("Receta activa")
+with main_tab_recetas:
+    st.subheader("Crear receta")
     sincronizar_inputs_raciones()
 
     # Inputs generales del plato
@@ -3408,9 +3407,8 @@ with main_tab_receta:
         st.info("Empieza agregando ingredientes usando entrada manual, texto o imagen.")
 
 
-with main_tab_facturacion:
-    st.subheader("Facturación")
-    st.markdown("#### Clientes")
+with main_tab_clientes:
+    st.subheader("Clientes")
 
     usuario_id_facturacion = obtener_user_id_actual()
     if not usuario_id_facturacion:
@@ -3543,7 +3541,18 @@ with main_tab_facturacion:
                         else:
                             st.error(mensaje_eliminar)
 
-            st.divider()
+
+
+with main_tab_facturas:
+    st.subheader("Facturas")
+    usuario_id_facturas = obtener_user_id_actual()
+    if not usuario_id_facturas:
+        st.info("Inicia sesión para crear presupuestos y facturas en tu cuenta")
+    else:
+        ok_clientes_facturas, mensaje_clientes_facturas, clientes_df = cargar_clientes_supabase()
+        if not ok_clientes_facturas:
+            st.warning(mensaje_clientes_facturas)
+        else:
             st.markdown("#### Presupuestos y facturas")
             st.info("Módulo de facturación interna. No usar como sistema fiscal definitivo sin revisión legal/fiscal.")
             feedback_menu_factura = st.session_state.pop("factura_menu_feedback", None)
@@ -3940,7 +3949,7 @@ with main_tab_facturacion:
                     st.dataframe(facturas_resumen.fillna(""), use_container_width=True, hide_index=True)
 
 
-with main_tab_costes:
+with main_tab_recetas:
     st.subheader("Costes y exportacion")
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -3998,7 +4007,7 @@ with main_tab_costes:
     else:
         st.info("Anade ingredientes para ver costes y exportar la ficha.")
 
-with main_tab_guardadas:
+with main_tab_recetas:
     st.subheader("Cargar receta guardada")
     mensaje_receta_cargada = st.session_state.pop("mensaje_receta_cargada", None)
     if mensaje_receta_cargada:
@@ -4710,8 +4719,8 @@ with main_tab_menus:
             st.rerun()
 
 
-with main_tab_base:
-    st.subheader("🎒 Catálogo relacional de ingredientes")
+with main_tab_ingredientes:
+    st.subheader("Inventario de ingredientes")
     st.markdown("Busca, añade, modifica o elimina productos de tu inventario en la nube. **Los cambios realizados aquí se sincronizarán directamente.**")
 
     if not inventario_df.empty:
