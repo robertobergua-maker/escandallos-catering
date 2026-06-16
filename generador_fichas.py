@@ -9,6 +9,7 @@ import html
 import json
 import re
 import unicodedata
+from pathlib import Path
 from difflib import SequenceMatcher
 from openai import OpenAI
 from supabase import create_client, Client
@@ -33,6 +34,22 @@ if supabase_disponible:
     except Exception as e:
         st.error(f"⚠️ Error al conectar con el inventario: {e}")
         supabase_disponible = False
+
+BASE_DIR = Path(__file__).resolve().parent
+LOGO_SAMIRARTE_PATH = BASE_DIR / "assets" / "logo_samirarte.png"
+
+
+def logo_samirarte_existe():
+    return LOGO_SAMIRARTE_PATH.exists()
+
+
+def logo_samirarte_base64():
+    if not logo_samirarte_existe():
+        return ""
+    try:
+        return base64.b64encode(LOGO_SAMIRARTE_PATH.read_bytes()).decode("ascii")
+    except Exception:
+        return ""
 
 
 def _obtener_campo_auth(objeto, campo, valor_por_defecto=None):
@@ -1474,19 +1491,22 @@ def generar_pdf_factura(factura, lineas, cliente):
         from reportlab.lib import colors
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.styles import getSampleStyleSheet
-        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+        from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
         buffer = io.BytesIO()
         doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
         estilos = getSampleStyleSheet()
-        elementos = [
+        elementos = []
+        if logo_samirarte_existe():
+            elementos.extend([Image(str(LOGO_SAMIRARTE_PATH), width=120, height=60), Spacer(1, 8)])
+        elementos.extend([
             Paragraph("Samirarte", estilos["Title"]),
             Paragraph(f"{tipo_visible} {html.escape(numero)}", estilos["Heading2"]),
             Paragraph(f"Fecha emisión: {factura.get('fecha_emision') or ''}", estilos["Normal"]),
             Paragraph(f"Fecha vencimiento: {factura.get('fecha_vencimiento') or ''}", estilos["Normal"]),
             Spacer(1, 12),
             Paragraph("Cliente", estilos["Heading3"]),
-        ]
+        ])
         for dato in datos_cliente:
             elementos.append(Paragraph(html.escape(dato), estilos["Normal"]))
         if factura.get("concepto"):
@@ -1555,6 +1575,10 @@ def generar_pdf_factura(factura, lineas, cliente):
         for linea in lineas_validas
     )
     cliente_html = "".join(f"<div>{escapar(dato)}</div>" for dato in datos_cliente)
+    logo_b64 = logo_samirarte_base64()
+    logo_html = ""
+    if logo_b64:
+        logo_html = f'<img class="logo" src="data:image/png;base64,{logo_b64}" alt="Samirarte">'
     retencion_html = ""
     if numero_seguro(totales.get("retencion_importe"), 0.0):
         retencion_html = f"""
@@ -1571,6 +1595,7 @@ def generar_pdf_factura(factura, lineas, cliente):
   <style>
     body {{ font-family: Arial, Helvetica, sans-serif; color: #111; margin: 36px; }}
     header {{ border-bottom: 2px solid #111; padding-bottom: 16px; margin-bottom: 24px; }}
+    .logo {{ display: block; max-width: 180px; height: auto; margin-bottom: 10px; }}
     h1 {{ margin: 0; font-size: 28px; }}
     h2 {{ margin: 8px 0 0; font-size: 20px; font-weight: normal; }}
     .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-bottom: 24px; }}
@@ -1587,6 +1612,7 @@ def generar_pdf_factura(factura, lineas, cliente):
 </head>
 <body>
   <header>
+    {logo_html}
     <h1>Samirarte</h1>
     <h2>{escapar(tipo_visible)} {escapar(numero)}</h2>
   </header>
@@ -2754,6 +2780,11 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+if logo_samirarte_existe():
+    st.image(str(LOGO_SAMIRARTE_PATH), width=220)
+else:
+    st.caption("Logo de Samirarte no encontrado. La app seguirá funcionando sin logo.")
+
 st.title("👨‍🍳 Gestor de Escandallos Inteligente Samirarte")
 
 usuario_actual = obtener_usuario_actual()
@@ -2762,6 +2793,11 @@ if usuario_actual is None:
 
 # Panel lateral indicador de conexiones activas
 with st.sidebar:
+    if logo_samirarte_existe():
+        st.image(str(LOGO_SAMIRARTE_PATH), width=160)
+    else:
+        st.caption("Logo no disponible")
+
     st.header("⚙️ Estado de Conexiones")
     if supabase_disponible:
         st.success("⚡ Inventario: Conectado")
