@@ -2053,9 +2053,7 @@ def calcular_totales_menu(lineas_menu):
     hay_precio = False
 
     for linea in lineas:
-        raciones = numero_seguro(linea.get("raciones", 1.0), 1.0)
-        raciones_base = numero_seguro(linea.get("raciones_base", 0.0), 0.0)
-        factor = raciones / raciones_base if raciones_base > 0 else 1.0
+        factor = factor_linea_menu(linea)
         coste_receta = linea.get("coste_receta", linea.get("coste_total", None))
         precio_receta = linea.get(
             "precio_receta_con_iva",
@@ -2101,7 +2099,7 @@ def crear_lineas_factura_desde_menu(cabecera_menu, lineas_menu_df, desglosar=Fal
             aviso_precio = True
         return [
             calcular_linea_factura({
-                "descripcion": f"Menú: {nombre_menu} - {numero_comensales} comensales",
+                "descripcion": f"Menú: {nombre_menu} - {numero_comensales} raciones base",
                 "cantidad": 1.0,
                 "unidad": "servicio",
                 "precio_unitario": precio_unitario,
@@ -2136,14 +2134,27 @@ def crear_lineas_factura_desde_menu(cabecera_menu, lineas_menu_df, desglosar=Fal
 SECCIONES_MENU = ["", "Aperitivo", "Entrante", "Principal", "Postre", "Bebida", "Otro"]
 
 
+def factor_linea_menu(linea):
+    """
+    Devuelve el multiplicador de coste/precio para una linea de menu.
+    Las recetas normalizadas representan 1 racion; las antiguas mantienen
+    compatibilidad usando su base original.
+    """
+    raciones = numero_seguro(linea.get("raciones", 1.0), 1.0)
+    raciones_base = numero_seguro(linea.get("raciones_base", 1.0), 1.0)
+    if raciones_base > 0 and float(raciones_base) != 1.0:
+        return raciones / raciones_base
+    return raciones
+
+
 def recalcular_linea_menu(linea):
     """
     Recalcula factor, coste y precio de una linea de menu sin modificar recetas.
     """
     linea_recalculada = dict(linea)
     raciones = numero_seguro(linea_recalculada.get("raciones", 1.0), 1.0)
-    raciones_base = numero_seguro(linea_recalculada.get("raciones_base", 0.0), 0.0)
-    factor = raciones / raciones_base if raciones_base > 0 else 1.0
+    raciones_base = numero_seguro(linea_recalculada.get("raciones_base", 1.0), 1.0)
+    factor = factor_linea_menu(linea_recalculada)
     coste_receta = numero_seguro(linea_recalculada.get("coste_receta", 0.0), 0.0)
     precio_receta = linea_recalculada.get("precio_receta", None)
     hay_precio = precio_receta is not None and not pd.isna(precio_receta)
@@ -2180,7 +2191,7 @@ def crear_linea_menu_desde_receta(receta_id, receta, raciones, orden, seccion=""
     """
     Construye una linea de menu desde una receta guardada.
     """
-    raciones_base = numero_seguro(receta.get("raciones_base", 0.0), 0.0)
+    raciones_base = numero_seguro(receta.get("raciones_base", 1.0), 1.0)
     coste_receta = numero_seguro(receta.get("coste_total", 0.0), 0.0)
     precio_receta = receta.get("precio_venta_con_iva", None)
     if precio_receta is None or pd.isna(precio_receta):
@@ -3687,7 +3698,7 @@ with main_tab_facturas:
                         menus_factura_df["etiqueta_selector"] = menus_factura_df.apply(
                             lambda row: (
                                 f"{row.get('nombre', '')} · {row.get('tipo_menu', '')} · "
-                                f"{int(numero_seguro(row.get('numero_comensales', 0), 0))} comensales"
+                                f"{int(numero_seguro(row.get('numero_comensales', 0), 0))} raciones base"
                             ).strip(" ·"),
                             axis=1
                         )
@@ -4348,7 +4359,7 @@ with main_tab_menus:
                                     "codigo_receta": str(linea.get("codigo_receta", "") or ""),
                                     "nombre_receta": str(linea.get("nombre_receta", "") or "Receta sin nombre"),
                                     "raciones": float(numero_seguro(linea.get("raciones", 1.0), 1.0)),
-                                    "raciones_base": float(numero_seguro(linea.get("raciones_base", 0.0), 0.0)),
+                                    "raciones_base": float(numero_seguro(linea.get("raciones_base", 1.0), 1.0)),
                                     "coste_receta": float(numero_seguro(linea.get("coste_receta", 0.0), 0.0)),
                                     "precio_receta": float(numero_seguro(precio_receta, 0.0)) if hay_precio_receta else None,
                                     "orden": int(numero_seguro(linea.get("orden", orden), orden)),
@@ -4385,13 +4396,15 @@ with main_tab_menus:
         st.info("Inicia sesión para guardar menús en tu cuenta")
 
     numero_comensales = st.number_input(
-        "Número de comensales",
+        "Raciones base del menú",
         min_value=1,
         step=1,
         value=int(st.session_state.get("menu_numero_comensales", 1) or 1),
+        help="Número base de raciones que se aplicará por defecto a las recetas añadidas.",
         key="menu_numero_comensales"
     )
-    raciones_nueva_linea_default = float(numero_comensales) if numero_comensales and numero_comensales > 0 else 1.0
+    raciones_base_menu = int(numero_seguro(numero_comensales, 1))
+    raciones_nueva_linea_default = float(raciones_base_menu) if raciones_base_menu > 0 else 1.0
     if st.session_state.get("menu_comensales_raciones_sync") != int(numero_comensales):
         st.session_state["menu_raciones_receta"] = raciones_nueva_linea_default
         st.session_state["menu_comensales_raciones_sync"] = int(numero_comensales)
@@ -4477,20 +4490,42 @@ with main_tab_menus:
         st.session_state["menu_actual"] = lineas_menu_actual
 
     if lineas_menu_actual:
-        if any(numero_seguro(linea.get("raciones_base", 0.0), 0.0) <= 0 for linea in lineas_menu_actual):
-            st.warning("Hay recetas sin raciones base. Para esas líneas se usa factor 1 al calcular costes.")
+        recetas_no_normalizadas = [
+            linea for linea in lineas_menu_actual
+            if numero_seguro(linea.get("raciones_base", 1.0), 1.0) != 1.0
+        ]
+        for linea in recetas_no_normalizadas:
+            st.warning(
+                f"La receta {linea.get('nombre_receta', 'sin nombre')} no está normalizada a 1 ración. "
+                "El cálculo puede no ser correcto hasta normalizarla."
+            )
+
+        recetas_con_racion_ajustada = [
+            linea for linea in lineas_menu_actual
+            if numero_seguro(linea.get("raciones", 1.0), 1.0) != float(raciones_base_menu)
+        ]
+        if recetas_con_racion_ajustada:
+            nombres_ajustados = ", ".join(
+                str(linea.get("nombre_receta", "") or "Receta sin nombre")
+                for linea in recetas_con_racion_ajustada
+            )
+            st.info(f"Ración ajustada respecto al menú base: {nombres_ajustados}")
 
         menu_editor_df = pd.DataFrame([
             {
                 "orden": linea.get("orden", idx + 1),
-                "codigo_receta": linea.get("codigo_receta", ""),
+                "seccion": linea.get("seccion", ""),
                 "nombre_receta": linea.get("nombre_receta", ""),
+                "raciones_base_menu": raciones_base_menu,
                 "raciones": linea.get("raciones", 1.0),
-                "raciones_base": linea.get("raciones_base", 0.0),
-                "coste_receta": linea.get("coste_receta", 0.0),
+                "coste_por_racion": numero_seguro(linea.get("coste_receta", 0.0), 0.0) / max(numero_seguro(linea.get("raciones_base", 1.0), 1.0), 1.0),
                 "coste_total_linea": linea.get("coste_total_linea", 0.0),
+                "precio_por_racion": (
+                    numero_seguro(linea.get("precio_receta", 0.0), 0.0) / max(numero_seguro(linea.get("raciones_base", 1.0), 1.0), 1.0)
+                    if linea.get("precio_receta") is not None and not pd.isna(linea.get("precio_receta"))
+                    else None
+                ),
                 "precio_total_linea": linea.get("precio_total_linea", None),
-                "seccion": linea.get("seccion", "")
             }
             for idx, linea in enumerate(lineas_menu_actual)
         ])
@@ -4501,20 +4536,27 @@ with main_tab_menus:
             hide_index=True,
             column_config={
                 "orden": st.column_config.NumberColumn("Orden", min_value=1, step=1, width="small"),
-                "codigo_receta": st.column_config.TextColumn("Código receta", width="small"),
-                "nombre_receta": st.column_config.TextColumn("Receta", width="medium"),
-                "raciones": st.column_config.NumberColumn("Raciones", min_value=0.0, step=1.0, format="%.2f"),
-                "raciones_base": st.column_config.NumberColumn("Raciones base", format="%.2f"),
-                "coste_receta": st.column_config.NumberColumn("Coste receta", format="%.2f €"),
-                "coste_total_linea": st.column_config.NumberColumn("Coste línea", format="%.2f €"),
-                "precio_total_linea": st.column_config.NumberColumn("Precio línea", format="%.2f €"),
                 "seccion": st.column_config.SelectboxColumn(
                     "Sección",
                     options=SECCIONES_MENU,
                     help="Se guarda en menu_recetas.seccion si la columna existe."
-                )
+                ),
+                "nombre_receta": st.column_config.TextColumn("Receta", width="medium"),
+                "raciones_base_menu": st.column_config.NumberColumn("Raciones base del menú", format="%.2f"),
+                "raciones": st.column_config.NumberColumn("Raciones de esta receta", min_value=0.0, step=1.0, format="%.2f"),
+                "coste_por_racion": st.column_config.NumberColumn("Coste por ración", format="%.2f €"),
+                "coste_total_linea": st.column_config.NumberColumn("Coste línea", format="%.2f €"),
+                "precio_por_racion": st.column_config.NumberColumn("Precio por ración", format="%.2f €"),
+                "precio_total_linea": st.column_config.NumberColumn("Precio línea", format="%.2f €"),
             },
-            disabled=["codigo_receta", "nombre_receta", "raciones_base", "coste_receta", "coste_total_linea", "precio_total_linea"],
+            disabled=[
+                "nombre_receta",
+                "raciones_base_menu",
+                "coste_por_racion",
+                "coste_total_linea",
+                "precio_por_racion",
+                "precio_total_linea"
+            ],
             key="editor_lineas_menu"
         )
 
@@ -4575,17 +4617,17 @@ with main_tab_menus:
     resumen_col1, resumen_col2, resumen_col3 = st.columns(3)
     with resumen_col1:
         st.metric("Recetas / platos", f"{len(lineas_menu_actual)}")
-        st.metric("Comensales", f"{int(numero_comensales)}")
+        st.metric("Raciones base", f"{int(numero_comensales)}")
     with resumen_col2:
         st.metric("Coste total del menú", f"{total_coste_menu:.2f} €")
-        st.metric("Coste por comensal", f"{coste_por_comensal:.2f} €")
+        st.metric("Coste por ración base", f"{coste_por_comensal:.2f} €")
     with resumen_col3:
         if hay_precio_menu:
             st.metric("Precio total del menú", f"{total_precio_menu:.2f} €")
-            st.metric("Precio por comensal", f"{precio_por_comensal:.2f} €")
+            st.metric("Precio por ración base", f"{precio_por_comensal:.2f} €")
         else:
             st.metric("Precio total del menú", "Sin datos")
-            st.metric("Precio por comensal", "Sin datos")
+            st.metric("Precio por ración base", "Sin datos")
 
     accion_menu_col1, accion_menu_col2, accion_menu_col3, accion_menu_col4 = st.columns(4)
     with accion_menu_col1:

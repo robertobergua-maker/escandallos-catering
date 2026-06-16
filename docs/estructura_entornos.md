@@ -18,7 +18,13 @@ La normalización automática a 1 ración queda pendiente para una fase posterio
 
 ## Menús
 
-Agrupa la creación y carga de menús, guardado, actualización, duplicado, recetas incluidas dentro del menú y gestión de raciones o comensales del menú.
+Agrupa la creación y carga de menús, guardado, actualización, duplicado, recetas incluidas dentro del menú y gestión de raciones del menú.
+
+Cada menú tiene unas raciones base. Ese valor se guarda en `menus.numero_comensales` por compatibilidad con la estructura actual y se aplica por defecto a las recetas añadidas al menú.
+
+Cada receta incluida en un menú puede tener raciones propias distintas de las raciones base del menú. Esas raciones específicas se guardan en `menu_recetas.raciones`.
+
+Las recetas normalizadas se calculan como 1 ración: el coste y el precio de línea se obtienen multiplicando el coste o precio por ración de la receta por las raciones específicas de esa receta dentro del menú.
 
 ## Clientes
 
