@@ -5,6 +5,7 @@ from openpyxl.styles import Font, Alignment, PatternFill
 from openpyxl.utils import get_column_letter
 import io
 import base64
+import html
 import json
 import re
 import unicodedata
@@ -1420,6 +1421,216 @@ def calcular_totales_factura(lineas, iva_pct=21, retencion_pct=0):
         "retencion_pct": retencion_pct_num,
         "retencion_importe": round(retencion_importe, 2),
         "total": round(total, 2)
+    }
+
+
+def formatear_importe_euros(valor):
+    importe = numero_seguro(valor, 0.0)
+    return f"{importe:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def generar_pdf_factura(factura, lineas, cliente):
+    """
+    Genera un documento descargable. Usa PDF si reportlab esta disponible;
+    si no, devuelve HTML imprimible sin requerir dependencias nuevas.
+    """
+    factura = factura or {}
+    cliente = cliente or {}
+    lineas_validas = [
+        calcular_linea_factura(linea)
+        for linea in (lineas or [])
+        if str(linea.get("descripcion", "") or "").strip()
+    ]
+    totales = calcular_totales_factura(
+        lineas_validas,
+        factura.get("iva_pct", 21),
+        factura.get("retencion_pct", 0)
+    )
+    tipo_documento = str(factura.get("tipo_documento") or "factura").strip() or "factura"
+    tipo_visible = tipo_documento.replace("_", " ").title()
+    numero = str(factura.get("numero_factura") or "sin_numero").strip() or "sin_numero"
+    extension_base = "presupuesto" if tipo_documento == "presupuesto" else "factura"
+    numero_archivo = re.sub(r"[^A-Za-z0-9_-]+", "_", numero).strip("_") or "sin_numero"
+
+    datos_cliente = [
+        cliente.get("nombre"),
+        cliente.get("nif_cif"),
+        cliente.get("email"),
+        cliente.get("telefono"),
+        cliente.get("direccion"),
+        " ".join(
+            str(valor or "").strip()
+            for valor in [cliente.get("codigo_postal"), cliente.get("ciudad")]
+            if str(valor or "").strip()
+        ),
+        cliente.get("provincia"),
+        cliente.get("pais"),
+    ]
+    datos_cliente = [str(valor).strip() for valor in datos_cliente if str(valor or "").strip()]
+
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
+        estilos = getSampleStyleSheet()
+        elementos = [
+            Paragraph("Samirarte", estilos["Title"]),
+            Paragraph(f"{tipo_visible} {html.escape(numero)}", estilos["Heading2"]),
+            Paragraph(f"Fecha emisión: {factura.get('fecha_emision') or ''}", estilos["Normal"]),
+            Paragraph(f"Fecha vencimiento: {factura.get('fecha_vencimiento') or ''}", estilos["Normal"]),
+            Spacer(1, 12),
+            Paragraph("Cliente", estilos["Heading3"]),
+        ]
+        for dato in datos_cliente:
+            elementos.append(Paragraph(html.escape(dato), estilos["Normal"]))
+        if factura.get("concepto"):
+            elementos.extend([Spacer(1, 8), Paragraph(f"Concepto: {html.escape(str(factura.get('concepto')))}", estilos["Normal"])])
+
+        tabla = [["Descripción", "Cant.", "Ud.", "Precio", "Dto.", "IVA", "Base", "Total"]]
+        for linea in lineas_validas:
+            tabla.append([
+                Paragraph(html.escape(linea["descripcion"]), estilos["BodyText"]),
+                f"{linea['cantidad']:.3f}",
+                html.escape(linea["unidad"]),
+                formatear_importe_euros(linea["precio_unitario"]),
+                f"{linea['descuento_pct']:.2f}%",
+                f"{linea['iva_pct']:.2f}%",
+                formatear_importe_euros(linea["base_linea"]),
+                formatear_importe_euros(linea["total_linea"]),
+            ])
+        tabla_pdf = Table(tabla, repeatRows=1, colWidths=[150, 45, 35, 58, 42, 42, 58, 58])
+        tabla_pdf.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.white),
+            ("TEXTCOLOR", (0, 0), (-1, -1), colors.black),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ]))
+        elementos.extend([Spacer(1, 14), tabla_pdf, Spacer(1, 14)])
+        elementos.extend([
+            Paragraph(f"Base imponible: {formatear_importe_euros(totales['base_imponible'])}", estilos["Normal"]),
+            Paragraph(f"IVA: {formatear_importe_euros(totales['iva_importe'])}", estilos["Normal"]),
+        ])
+        if numero_seguro(totales.get("retencion_importe"), 0.0):
+            elementos.append(Paragraph(f"Retención: {formatear_importe_euros(totales['retencion_importe'])}", estilos["Normal"]))
+        elementos.append(Paragraph(f"Total: {formatear_importe_euros(totales['total'])}", estilos["Heading3"]))
+        if factura.get("metodo_pago"):
+            elementos.append(Paragraph(f"Método de pago: {html.escape(str(factura.get('metodo_pago')))}", estilos["Normal"]))
+        if factura.get("notas"):
+            elementos.append(Paragraph(f"Notas: {html.escape(str(factura.get('notas')))}", estilos["Normal"]))
+        elementos.extend([Spacer(1, 12), Paragraph("Documento generado por Samirarte. Módulo de facturación interna.", estilos["Italic"])])
+        doc.build(elementos)
+        return {
+            "data": buffer.getvalue(),
+            "file_name": f"{extension_base}_{numero_archivo}.pdf",
+            "mime": "application/pdf",
+            "label": "Descargar PDF",
+            "formato": "pdf"
+        }
+    except Exception:
+        pass
+
+    escapar = lambda valor: html.escape(str(valor or ""))
+    filas_html = "\n".join(
+        f"""
+        <tr>
+          <td>{escapar(linea['descripcion'])}</td>
+          <td class="num">{linea['cantidad']:.3f}</td>
+          <td>{escapar(linea['unidad'])}</td>
+          <td class="num">{formatear_importe_euros(linea['precio_unitario'])}</td>
+          <td class="num">{linea['descuento_pct']:.2f}%</td>
+          <td class="num">{linea['iva_pct']:.2f}%</td>
+          <td class="num">{formatear_importe_euros(linea['base_linea'])}</td>
+          <td class="num">{formatear_importe_euros(linea['iva_linea'])}</td>
+          <td class="num">{formatear_importe_euros(linea['total_linea'])}</td>
+        </tr>
+        """
+        for linea in lineas_validas
+    )
+    cliente_html = "".join(f"<div>{escapar(dato)}</div>" for dato in datos_cliente)
+    retencion_html = ""
+    if numero_seguro(totales.get("retencion_importe"), 0.0):
+        retencion_html = f"""
+        <div class="total-row">
+          <span>Retención ({totales['retencion_pct']:.2f}%)</span>
+          <strong>{formatear_importe_euros(totales['retencion_importe'])}</strong>
+        </div>
+        """
+    html_documento = f"""<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>{escapar(tipo_visible)} {escapar(numero)}</title>
+  <style>
+    body {{ font-family: Arial, Helvetica, sans-serif; color: #111; margin: 36px; }}
+    header {{ border-bottom: 2px solid #111; padding-bottom: 16px; margin-bottom: 24px; }}
+    h1 {{ margin: 0; font-size: 28px; }}
+    h2 {{ margin: 8px 0 0; font-size: 20px; font-weight: normal; }}
+    .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-bottom: 24px; }}
+    .label {{ font-weight: bold; margin-bottom: 6px; }}
+    table {{ width: 100%; border-collapse: collapse; margin-top: 18px; }}
+    th, td {{ border: 1px solid #111; padding: 7px; font-size: 12px; vertical-align: top; }}
+    th {{ text-align: left; }}
+    .num {{ text-align: right; white-space: nowrap; }}
+    .totals {{ margin-left: auto; margin-top: 18px; width: 310px; }}
+    .total-row {{ display: flex; justify-content: space-between; border-bottom: 1px solid #999; padding: 6px 0; }}
+    .grand {{ font-size: 18px; border-bottom: 2px solid #111; }}
+    footer {{ margin-top: 36px; font-size: 11px; color: #333; }}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Samirarte</h1>
+    <h2>{escapar(tipo_visible)} {escapar(numero)}</h2>
+  </header>
+  <section class="grid">
+    <div>
+      <div class="label">Cliente</div>
+      {cliente_html}
+    </div>
+    <div>
+      <div><strong>Fecha emisión:</strong> {escapar(factura.get('fecha_emision'))}</div>
+      <div><strong>Fecha vencimiento:</strong> {escapar(factura.get('fecha_vencimiento'))}</div>
+      <div><strong>Método de pago:</strong> {escapar(factura.get('metodo_pago'))}</div>
+    </div>
+  </section>
+  <section>
+    <div class="label">Concepto</div>
+    <div>{escapar(factura.get('concepto'))}</div>
+  </section>
+  <table>
+    <thead>
+      <tr>
+        <th>Descripción</th><th>Cant.</th><th>Ud.</th><th>Precio</th>
+        <th>Dto.</th><th>IVA</th><th>Base</th><th>IVA línea</th><th>Total</th>
+      </tr>
+    </thead>
+    <tbody>{filas_html}</tbody>
+  </table>
+  <section class="totals">
+    <div class="total-row"><span>Base imponible</span><strong>{formatear_importe_euros(totales['base_imponible'])}</strong></div>
+    <div class="total-row"><span>IVA</span><strong>{formatear_importe_euros(totales['iva_importe'])}</strong></div>
+    {retencion_html}
+    <div class="total-row grand"><span>Total</span><strong>{formatear_importe_euros(totales['total'])}</strong></div>
+  </section>
+  <section>
+    <div class="label">Notas</div>
+    <div>{escapar(factura.get('notas'))}</div>
+  </section>
+  <footer>Documento generado por Samirarte. Módulo de facturación interna.</footer>
+</body>
+</html>"""
+    return {
+        "data": html_documento.encode("utf-8"),
+        "file_name": f"{extension_base}_{numero_archivo}.html",
+        "mime": "text/html",
+        "label": "Descargar documento",
+        "formato": "html"
     }
 
 
@@ -3242,23 +3453,52 @@ with main_tab_facturacion:
                 with total_col4:
                     st.metric("Total", f"{totales_factura['total']:.2f} €")
 
-                if st.button("Guardar documento", type="primary", use_container_width=True):
-                    factura = {
-                        "cliente_id": factura_cliente_id,
-                        "numero_factura": str(numero_factura or "").strip(),
-                        "tipo_documento": tipo_documento,
-                        "estado": estado,
-                        "fecha_emision": fecha_emision.isoformat() if fecha_emision else None,
-                        "fecha_vencimiento": fecha_vencimiento.isoformat() if fecha_vencimiento else None,
-                        "concepto": str(concepto or "").strip() or None,
-                        "iva_pct": 21.0,
-                        "retencion_pct": float(retencion_pct),
-                        "metodo_pago": str(metodo_pago or "").strip() or None,
-                        "estado_cobro": estado_cobro,
-                        "notas": str(notas or "").strip() or None
-                    }
+                factura_actual = {
+                    "cliente_id": factura_cliente_id,
+                    "numero_factura": str(numero_factura or "").strip(),
+                    "tipo_documento": tipo_documento,
+                    "estado": estado,
+                    "fecha_emision": fecha_emision.isoformat() if fecha_emision else None,
+                    "fecha_vencimiento": fecha_vencimiento.isoformat() if fecha_vencimiento else None,
+                    "concepto": str(concepto or "").strip() or None,
+                    "iva_pct": 21.0,
+                    "retencion_pct": float(retencion_pct),
+                    "metodo_pago": str(metodo_pago or "").strip() or None,
+                    "estado_cobro": estado_cobro,
+                    "notas": str(notas or "").strip() or None
+                }
+                cliente_actual_factura = clientes_por_id_factura.get(str(factura_cliente_id), {})
+                lineas_validas_descarga = [
+                    calcular_linea_factura(linea)
+                    for linea in st.session_state["factura_lineas_actual"]
+                    if str(linea.get("descripcion", "") or "").strip()
+                ]
+
+                descarga_col, guardar_col = st.columns(2)
+                with descarga_col:
+                    if not cliente_actual_factura or not lineas_validas_descarga:
+                        st.warning("Selecciona un cliente y añade al menos una línea para descargar el documento.")
+                        st.button("Descargar documento", disabled=True, use_container_width=True)
+                    else:
+                        documento_descarga = generar_pdf_factura(
+                            factura_actual,
+                            lineas_validas_descarga,
+                            cliente_actual_factura
+                        )
+                        st.download_button(
+                            documento_descarga["label"],
+                            data=documento_descarga["data"],
+                            file_name=documento_descarga["file_name"],
+                            mime=documento_descarga["mime"],
+                            use_container_width=True
+                        )
+
+                with guardar_col:
+                    guardar_documento = st.button("Guardar documento", type="primary", use_container_width=True)
+
+                if guardar_documento:
                     ok_guardar_doc, mensaje_guardar_doc, factura_guardada = guardar_factura_supabase(
-                        factura,
+                        factura_actual,
                         st.session_state["factura_lineas_actual"]
                     )
                     if ok_guardar_doc:
