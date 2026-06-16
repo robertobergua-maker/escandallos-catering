@@ -145,6 +145,39 @@ def registrar_usuario_supabase(email, password):
         return False, f"No se pudo crear la cuenta: {mensaje_error}"
 
 
+def cambiar_password_usuario(nueva_password):
+    """
+    Actualiza la contraseña del usuario conectado mediante Inventario/Auth.
+    """
+    if not supabase_disponible or supabase is None:
+        return False, "El inventario no está conectado correctamente."
+
+    if not obtener_usuario_actual():
+        return False, "La sesión ha caducado. Vuelve a iniciar sesión para cambiar la contraseña."
+
+    nueva_password_limpia = str(nueva_password or "")
+    if not nueva_password_limpia:
+        return False, "Introduce una nueva contraseña."
+    if len(nueva_password_limpia) < 6:
+        return False, "La contraseña debe tener al menos 6 caracteres."
+
+    try:
+        supabase.auth.update_user({"password": nueva_password_limpia})
+        return True, "Contraseña actualizada correctamente."
+    except Exception as e:
+        mensaje_error = str(e)
+        mensaje_error_lower = mensaje_error.lower()
+        if (
+            "session" in mensaje_error_lower
+            or "jwt" in mensaje_error_lower
+            or "expired" in mensaje_error_lower
+            or "not authenticated" in mensaje_error_lower
+            or "auth session missing" in mensaje_error_lower
+        ):
+            return False, "La sesión ha caducado. Vuelve a iniciar sesión para cambiar la contraseña."
+        return False, f"No se pudo actualizar la contraseña: {mensaje_error}"
+
+
 def logout_supabase():
     """
     Cierra la sesion y limpia los datos de autenticacion locales.
@@ -2831,6 +2864,29 @@ with st.sidebar:
                 st.rerun()
             else:
                 st.error(mensaje_logout)
+
+        st.markdown("#### Cambiar contraseña")
+        with st.form("form_cambiar_password", clear_on_submit=True):
+            nueva_password = st.text_input("Nueva contraseña", type="password")
+            repetir_password = st.text_input("Repetir nueva contraseña", type="password")
+            actualizar_password = st.form_submit_button("Actualizar contraseña", use_container_width=True)
+
+            if actualizar_password:
+                if not obtener_usuario_actual():
+                    st.error("La sesión ha caducado. Vuelve a iniciar sesión para cambiar la contraseña.")
+                elif not nueva_password:
+                    st.error("Introduce una nueva contraseña.")
+                elif len(str(nueva_password)) < 6:
+                    st.error("La contraseña debe tener al menos 6 caracteres.")
+                elif nueva_password != repetir_password:
+                    st.error("Las contraseñas no coinciden.")
+                else:
+                    ok_password, mensaje_password = cambiar_password_usuario(nueva_password)
+                    if ok_password:
+                        st.session_state["auth_feedback"] = ("success", mensaje_password)
+                        st.rerun()
+                    else:
+                        st.error(mensaje_password)
     else:
         st.info("Inicia sesión para guardar tus recetas y menús en tu cuenta")
         with st.form("form_acceso_supabase"):
