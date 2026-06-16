@@ -14,7 +14,9 @@ Las recetas nuevas se guardan siempre dimensionadas a 1 ración. El coste total 
 
 Las recetas antiguas pueden tener una base de raciones distinta de 1. Al cargarlas, la app avisa de que pueden necesitar normalización antes de usarlas en menús.
 
-La normalización automática a 1 ración queda pendiente para una fase posterior; por ahora no se dividen cantidades antiguas automáticamente.
+Las recetas antiguas se normalizan mediante copia manual: la app crea una receta nueva a 1 ración dividiendo las cantidades entre la base antigua y no modifica la receta original.
+
+Los menús que usen la receta antigua no se actualizan automáticamente. Si se quiere usar la copia normalizada, debe sustituirse manualmente la receta dentro del menú.
 
 ## Menús
 

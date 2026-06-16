@@ -1073,6 +1073,84 @@ def duplicar_receta_supabase(datos_receta, ingredientes):
     return guardar_receta_nueva_supabase(datos_copia, ingredientes)
 
 
+def receta_esta_usada_en_menus(receta_id):
+    """
+    Comprueba si una receta aparece en alguna linea de menu sin modificar datos.
+    """
+    receta_id_limpio = str(receta_id or "").strip()
+    if not receta_id_limpio or not supabase_disponible or supabase is None:
+        return False
+
+    try:
+        respuesta = (
+            supabase
+            .table("menu_recetas")
+            .select("id")
+            .eq("receta_id", receta_id_limpio)
+            .limit(1)
+            .execute()
+        )
+        return bool(respuesta.data)
+    except Exception:
+        return False
+
+
+def normalizar_ingredientes_a_una_racion(ingredientes, raciones_base):
+    raciones_base_num = pd.to_numeric(raciones_base, errors="coerce")
+    if pd.isna(raciones_base_num) or float(raciones_base_num) <= 0:
+        return None
+
+    divisor = float(raciones_base_num)
+    ingredientes_normalizados = []
+    for ing in ingredientes or []:
+        ing_normalizado = dict(ing)
+        cantidad_bruta = numero_seguro(ing_normalizado.get("cantidad_bruta", 0.0), 0.0)
+        ing_normalizado["cantidad_bruta"] = cantidad_bruta / divisor
+        ingredientes_normalizados.append(ing_normalizado)
+    return ingredientes_normalizados
+
+
+def crear_copia_receta_normalizada_supabase(datos_receta, ingredientes, raciones_base):
+    """
+    Crea una copia nueva de una receta antigua dimensionada a 1 racion.
+    No modifica la receta original ni los menus que la usen.
+    """
+    ingredientes_normalizados = normalizar_ingredientes_a_una_racion(ingredientes, raciones_base)
+    if ingredientes_normalizados is None:
+        return False, "La base de raciones no es válida. No se puede normalizar esta receta.", None, None
+    if not ingredientes_normalizados:
+        return False, "No hay ingredientes para normalizar.", None, None
+
+    ci_pct = numero_seguro(datos_receta.get("costes_indirectos_pct", 0.0), 0.0)
+    margen_pct = numero_seguro(datos_receta.get("margen_beneficio_pct", 0.0), 0.0)
+    iva_pct_receta = numero_seguro(datos_receta.get("iva_pct", 0.0), 0.0)
+    subtotal = sum(
+        numero_seguro(ing.get("cantidad_bruta", 0.0), 0.0) * numero_seguro(ing.get("precio_unidad", 0.0), 0.0)
+        for ing in ingredientes_normalizados
+    )
+    coste_total = subtotal + (subtotal * ci_pct / 100)
+    factor_margen = 1 - (margen_pct / 100)
+    pvp_neto = coste_total / factor_margen if factor_margen > 0 else 0.0
+    pvp_final = pvp_neto + (pvp_neto * iva_pct_receta / 100)
+
+    nombre_original = str(datos_receta.get("nombre", "") or "Receta").strip() or "Receta"
+    datos_copia = dict(datos_receta)
+    datos_copia.update({
+        "user_id": obtener_user_id_actual(),
+        "codigo_receta": generar_codigo_receta(),
+        "nombre": f"{nombre_original} - 1 ración",
+        "raciones_base": 1.0,
+        "unidad_servicio": "ración",
+        "coste_total": float(coste_total),
+        "precio_venta_sin_iva": float(pvp_neto),
+        "precio_venta_con_iva": float(pvp_final),
+        "activa": True
+    })
+
+    ok, mensaje, receta_guardada = guardar_receta_nueva_supabase(datos_copia, ingredientes_normalizados)
+    return ok, mensaje, receta_guardada, ingredientes_normalizados
+
+
 def eliminar_receta_supabase(receta_id):
     """
     Elimina una sola receta por id. Los ingredientes asociados dependen del cascade del inventario.
@@ -3107,7 +3185,7 @@ with main_tab_recetas:
         st.metric("Raciones de trabajo", "1")
     with col_r3:
         st.markdown("**Costes y cantidades:** se interpretan como 1 ración.")
-        st.caption("La normalización automática de recetas antiguas queda pendiente para una fase posterior.")
+        st.caption("Las recetas antiguas pueden normalizarse manualmente creando una copia a 1 ración.")
 
     st.session_state['raciones_base'] = 1.0
     st.session_state['raciones_deseadas'] = 1.0
@@ -4142,7 +4220,8 @@ with main_tab_recetas:
                         elif not ingredientes_cargados:
                             st.warning("La receta seleccionada no tiene ingredientes guardados.")
                         else:
-                            raciones_cargadas = numero_seguro(cabecera.get("raciones_base", 1.0), 1.0)
+                            raciones_base_raw = pd.to_numeric(cabecera.get("raciones_base"), errors="coerce")
+                            raciones_cargadas = 0.0 if pd.isna(raciones_base_raw) else float(raciones_base_raw)
                             st.session_state["receta_raciones_base_cargada"] = float(raciones_cargadas)
                             if float(raciones_cargadas) != 1.0:
                                 st.session_state["aviso_receta_antigua"] = (
@@ -4199,6 +4278,77 @@ with main_tab_recetas:
         st.info("Inicia sesión para guardar recetas en tu cuenta")
     if st.session_state.get("receta_id_cargada"):
         st.caption(f"Receta cargada para actualizar: {st.session_state.get('codigo_receta_cargada', 'sin código')}")
+
+    receta_id_cargada_normalizar = st.session_state.get("receta_id_cargada")
+    raciones_cargadas_normalizar = pd.to_numeric(
+        st.session_state.get("receta_raciones_base_cargada"),
+        errors="coerce"
+    )
+    if receta_id_cargada_normalizar and not pd.isna(raciones_cargadas_normalizar) and float(raciones_cargadas_normalizar) != 1.0:
+        st.markdown("#### Normalizar receta a 1 ración")
+        if float(raciones_cargadas_normalizar) > 0:
+            st.warning(
+                f"Esta receta está configurada para {float(raciones_cargadas_normalizar):g} raciones. "
+                "Puedes crear una copia normalizada a 1 ración."
+            )
+        else:
+            st.warning("La base de raciones no es válida. No se puede normalizar esta receta.")
+        if receta_esta_usada_en_menus(receta_id_cargada_normalizar):
+            st.info(
+                "Esta receta puede estar usada en menús. "
+                "La copia normalizada no sustituye automáticamente la receta antigua."
+            )
+        if st.button("Crear copia normalizada a 1 ración", use_container_width=True):
+            if pd.isna(raciones_cargadas_normalizar) or float(raciones_cargadas_normalizar) <= 0:
+                st.warning("La base de raciones no es válida. No se puede normalizar esta receta.")
+            elif not st.session_state.get("ingredientes"):
+                st.warning("No hay ingredientes para normalizar.")
+            else:
+                nombre_actual_normalizar = str(st.session_state.get("receta_nombre", nombre_plato) or "Receta").strip()
+                datos_normalizar = {
+                    "user_id": obtener_user_id_actual(),
+                    "codigo_receta": generar_codigo_receta(),
+                    "nombre": nombre_actual_normalizar,
+                    "categoria": str(st.session_state.get("receta_categoria", "") or "").strip(),
+                    "tipo_plato": str(st.session_state.get("receta_tipo_plato", "") or "").strip(),
+                    "raciones_base": 1.0,
+                    "unidad_servicio": "ración",
+                    "descripcion": str(st.session_state.get("receta_observaciones", "") or "").strip(),
+                    "observaciones": str(st.session_state.get("receta_observaciones", "") or "").strip(),
+                    "costes_indirectos_pct": float(ci_val),
+                    "margen_beneficio_pct": float(mb_val),
+                    "iva_pct": float(iva_val),
+                    "activa": True
+                }
+                ok, mensaje, receta_guardada, ingredientes_normalizados = crear_copia_receta_normalizada_supabase(
+                    datos_normalizar,
+                    st.session_state["ingredientes"],
+                    float(raciones_cargadas_normalizar)
+                )
+                if ok:
+                    nuevo_codigo = receta_guardada.get("codigo_receta", "")
+                    nuevo_nombre = receta_guardada.get("nombre", f"{nombre_actual_normalizar} - 1 ración")
+                    st.session_state["ingredientes"] = ingredientes_normalizados
+                    st.session_state["ingredientes_base_raciones"] = [dict(ing) for ing in ingredientes_normalizados]
+                    st.session_state["factor_raciones"] = 1.0
+                    st.session_state["raciones_base"] = 1.0
+                    st.session_state["raciones_deseadas"] = 1.0
+                    st.session_state["receta_raciones_base"] = 1.0
+                    st.session_state["receta_raciones_deseadas"] = 1.0
+                    st.session_state["raciones_base_aplicadas"] = 1.0
+                    st.session_state["raciones_deseadas_aplicadas"] = 1.0
+                    st.session_state["receta_raciones_base_cargada"] = 1.0
+                    st.session_state["receta_id_cargada"] = receta_guardada.get("id")
+                    st.session_state["codigo_receta_cargada"] = nuevo_codigo
+                    st.session_state["receta_nombre"] = nuevo_nombre
+                    st.session_state["sincronizar_inputs_raciones"] = True
+                    st.session_state["sincronizar_campos_receta"] = True
+                    limpiar_cache_recetas_guardadas()
+                    st.session_state["selector_receta_guardada_pendiente"] = receta_guardada.get("id")
+                    st.session_state["mensaje_receta_cargada"] = "Copia normalizada creada correctamente."
+                    st.rerun()
+                else:
+                    st.error(mensaje)
 
     with st.form("form_guardar_receta_nueva"):
         nombre_receta_guardar = st.text_input("Nombre de receta", value=st.session_state.get("receta_nombre", nombre_plato))
