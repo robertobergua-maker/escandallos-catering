@@ -10,6 +10,12 @@ Agrupa el inventario, la búsqueda de ingredientes, la edición de datos del ing
 
 Agrupa la creación de receta, carga de recetas guardadas, guardado, actualización, duplicado, eliminación, tabla de ingredientes de la receta y herramientas de CIA para recetas.
 
+Las recetas nuevas se guardan siempre dimensionadas a 1 ración. El coste total de la receta se interpreta como coste de esa ración.
+
+Las recetas antiguas pueden tener una base de raciones distinta de 1. Al cargarlas, la app avisa de que pueden necesitar normalización antes de usarlas en menús.
+
+La normalización automática a 1 ración queda pendiente para una fase posterior; por ahora no se dividen cantidades antiguas automáticamente.
+
 ## Menús
 
 Agrupa la creación y carga de menús, guardado, actualización, duplicado, recetas incluidas dentro del menú y gestión de raciones o comensales del menú.
