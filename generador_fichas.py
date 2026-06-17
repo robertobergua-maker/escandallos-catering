@@ -3105,6 +3105,18 @@ st.markdown(
     div[data-testid="stMetricValue"] {
         font-size: 1.25rem;
     }
+    div[data-testid="stDataFrame"] {
+        font-size: 1.02rem;
+    }
+    div[data-testid="stDataFrame"] [role="gridcell"],
+    div[data-testid="stDataFrame"] [role="columnheader"] {
+        font-size: 1.02rem;
+    }
+    div[data-testid="stTextInput"] input,
+    div[data-testid="stNumberInput"] input,
+    div[data-baseweb="select"] {
+        min-height: 2.35rem;
+    }
     div[data-testid="stTabs"] [data-baseweb="tab-list"] {
         gap: 0.35rem;
     }
@@ -3124,8 +3136,6 @@ else:
 st.title("👨‍🍳 Gestor de Escandallos Inteligente Samirarte")
 
 usuario_actual = obtener_usuario_actual()
-if usuario_actual is None:
-    st.info("Inicia sesión para guardar tus recetas y menús en tu cuenta")
 
 # Panel lateral indicador de conexiones activas
 with st.sidebar:
@@ -3199,7 +3209,6 @@ with st.sidebar:
                     else:
                         st.error(mensaje_password)
     else:
-        st.info("Inicia sesión para guardar tus recetas y menús en tu cuenta")
         with st.form("form_acceso_supabase"):
             acceso_email = st.text_input("Email")
             acceso_password = st.text_input("Contraseña", type="password")
@@ -3696,94 +3705,80 @@ with main_tab_recetas:
     pvp_final_cabecera = pvp_neto_cabecera + (pvp_neto_cabecera * (iva_cabecera / 100))
     food_cost_cabecera = (coste_cabecera / pvp_final_cabecera * 100) if pvp_final_cabecera > 0 else 0.0
 
-    met_col1, met_col2, met_col3, met_col4, met_col5 = st.columns(5)
+    met_col1, met_col2, met_col3, met_col4 = st.columns(4)
     met_col1.metric("Raciones", "1")
-    met_col2.metric("Coste total", f"{coste_cabecera:.2f} €")
-    met_col3.metric("Coste/ración", f"{coste_cabecera:.2f} €")
-    met_col4.metric("Precio venta", f"{pvp_final_cabecera:.2f} €" if pvp_final_cabecera else "-")
-    met_col5.metric("Food cost", f"{food_cost_cabecera:.1f} %" if food_cost_cabecera else "-")
-
-    with st.expander("Información técnica de la receta", expanded=False):
-        st.caption("Base de guardado: 1 ración.")
-        st.caption("Raciones de trabajo: 1.")
-        st.caption("Costes y cantidades: se interpretan como 1 ración.")
-        st.caption("Las recetas antiguas pueden normalizarse manualmente creando una copia a 1 ración.")
+    met_col2.metric("Coste 1 ración", f"{coste_cabecera:.2f} €")
+    met_col3.metric("PVP 1 ración", f"{pvp_final_cabecera:.2f} €" if pvp_final_cabecera else "-")
+    met_col4.metric("Food Cost", f"{food_cost_cabecera:.1f} %" if food_cost_cabecera else "-")
 
     st.markdown("##### Añadir ingredientes")
-    entrada_manual_tab, texto_tab, imagen_tab = st.tabs(["Entrada manual", "Texto con IA", "Imagen con IA"])
+    opciones_codigo = [""] + list(inventario_dict.keys())
 
-    with entrada_manual_tab:
-        st.markdown("💡 **Tip:** Selecciona un código existente de tu base de datos y se auto-rellenarán la descripción, el precio y su merma.")
+    with st.form("form_ingrediente", clear_on_submit=True):
+        ing_col1, ing_col2, ing_col3, ing_col4, ing_col5, ing_col6 = st.columns([2.5, 1, 0.85, 0.85, 1, 1])
+        with ing_col1:
+            cod_select = st.selectbox(
+                "Buscar ingrediente",
+                opciones_codigo,
+                format_func=lambda x: f"{x} - {inventario_dict[x]['descripcion']}" if x else "Ingrediente nuevo...",
+                label_visibility="collapsed"
+            )
+            desc_man = st.text_input("Ingrediente nuevo", placeholder="Ingrediente nuevo", label_visibility="collapsed")
+        with ing_col2:
+            cant_man = st.number_input("Cantidad", min_value=0.0, step=0.001, format="%.3f", value=None, placeholder="0.000")
+        with ing_col3:
+            unidad_man = st.selectbox("Unidad", ["kg", "l", "ud", "sobre", "botella", "lata", "paquete", "caja", "bandeja", "hoja"])
+        with ing_col4:
+            merma_man = st.number_input("Merma %", min_value=0.0, max_value=100.0, step=0.01, value=None, placeholder="0.00")
+        with ing_col5:
+            precio_man = st.number_input("Precio unidad", min_value=0.0, step=0.01, format="%.2f", value=None, placeholder="0.00")
+        with ing_col6:
+            anadir_ingrediente = st.form_submit_button("Añadir", type="primary", use_container_width=True)
 
-        opciones_codigo = [""] + list(inventario_dict.keys())
+        if anadir_ingrediente:
+            if cod_select:
+                info_bd = inventario_dict[cod_select]
+                st.session_state['ingredientes'].append({
+                    'codigo': cod_select,
+                    'descripcion': info_bd['descripcion'],
+                    'unidad_medida': info_bd.get('unidad_medida', 'kg'),
+                    'cantidad_bruta': cant_man if cant_man is not None else 0.0,
+                    'merma': info_bd['merma'],
+                    'precio_unidad': info_bd['precio_unidad']
+                })
+                st.success(f"Ingrediente de inventario añadido: {info_bd['descripcion']}")
+            else:
+                st.session_state['ingredientes'].append({
+                    'codigo': "S/C",
+                    'descripcion': desc_man if desc_man else "Ingrediente nuevo",
+                    'unidad_medida': unidad_man,
+                    'cantidad_bruta': cant_man if cant_man is not None else 0.0,
+                    'merma': merma_man if merma_man is not None else 0.0,
+                    'precio_unidad': precio_man if precio_man is not None else 0.0
+                })
+            marcar_receta_modificada_manualmente()
+            st.rerun()
 
-        with st.form("form_ingrediente", clear_on_submit=True):
-            manual_col1, manual_col2 = st.columns(2)
+    with st.expander("IA", expanded=False):
+        texto_tab, imagen_tab = st.tabs(["Texto", "Imagen"])
+        with texto_tab:
+            texto_pegado = st.text_area("Texto para analizar", height=120, placeholder="3 kg de pollo asado ING-0027...")
+            if st.button("Analizar texto con IA", type="primary"):
+                if texto_pegado:
+                    with st.spinner("La IA está leyendo y cruzando los datos con tu inventario..."):
+                        nuevos = procesar_con_openai(texto_plano=texto_pegado)
+                        if incorporar_ingredientes_ia(nuevos):
+                            st.rerun()
 
-            with manual_col1:
-                cod_select = st.selectbox(
-                    "Buscar por Código",
-                    opciones_codigo,
-                    format_func=lambda x: f"{x} - {inventario_dict[x]['descripcion']}" if x else "Seleccione un código..."
-                )
-                desc_man = st.text_input("Ingrediente (Nuevo)", placeholder="Ej: Cebolla tierna")
-                unidad_man = st.selectbox("Unidad", ["kg", "l", "ud", "sobre", "botella", "lata", "paquete", "caja", "bandeja", "hoja"])
-
-            with manual_col2:
-                cant_man = st.number_input("Cant. Bruta (kg/l)", min_value=0.0, step=0.001, format="%.3f", value=None, placeholder="0.000")
-                merma_man = st.number_input("% Merma", min_value=0.0, max_value=100.0, step=0.01, value=None, placeholder="0.00%")
-                precio_man = st.number_input("Precio Unidad (€)", min_value=0.0, step=0.01, format="%.2f", value=None, placeholder="0.00 €")
-
-            if st.form_submit_button("Añadir al Escandallo"):
-                # Si el usuario seleccionó un código del desplegable
-                if cod_select:
-                    info_bd = inventario_dict[cod_select]
-                    st.session_state['ingredientes'].append({
-                        'codigo': cod_select,
-                        'descripcion': info_bd['descripcion'],
-                        'unidad_medida': info_bd.get('unidad_medida', 'kg'),
-                        'cantidad_bruta': cant_man if cant_man is not None else 0.0,
-                        'merma': info_bd['merma'],
-                        'precio_unidad': info_bd['precio_unidad']
-                    })
-                    st.success(f"Ingrediente de inventario añadido: {info_bd['descripcion']}")
-                else:
-                    # Si es un ingrediente sin código en el inventario
-                    st.session_state['ingredientes'].append({
-                        'codigo': "S/C",
-                        'descripcion': desc_man if desc_man else "Ingrediente nuevo",
-                        'unidad_medida': unidad_man,
-                        'cantidad_bruta': cant_man if cant_man is not None else 0.0,
-                        'merma': merma_man if merma_man is not None else 0.0,
-                        'precio_unidad': precio_man if precio_man is not None else 0.0
-                    })
-                marcar_receta_modificada_manualmente()
-                st.rerun()
-
-
-    with texto_tab:
-        st.markdown("📋 **Pega cualquier bloque de texto:** Textos de correo de proveedores, chats de WhatsApp o filas de PDF.")
-        texto_pegado = st.text_area("Pega tu texto aquí para analizar con IA:", height=150, placeholder="3 kg de pollo asado ING-0027...")
-
-        if st.button("Analizar texto con IA", type="primary"):
-            if texto_pegado:
-                with st.spinner("La IA está leyendo y cruzando los datos con tu inventario..."):
-                    nuevos = procesar_con_openai(texto_plano=texto_pegado)
-                    if incorporar_ingredientes_ia(nuevos):
-                        st.rerun()
-
-
-    with imagen_tab:
-        st.markdown("📸 **Arrastra o pega tu imagen:** Haz una captura de pantalla de tu factura u hoja física de albarán, y pulsa **Ctrl+V** directamente sobre este panel para subirla.")
-        archivo_imagen = st.file_uploader("Sube, arrastra o pega (Ctrl+V) una foto de tu receta o factura (JPG/PNG)", type=['jpg', 'jpeg', 'png'])
-
-        if archivo_imagen:
-            if st.button("Escanear imagen con IA Vision", type="primary"):
-                bytes_img = archivo_imagen.read()
-                with st.spinner("Leyendo factura y asociando códigos de inventario..."):
-                    nuevos = procesar_con_openai(bytes_imagen=bytes_img, mime_type=archivo_imagen.type)
-                    if incorporar_ingredientes_ia(nuevos):
-                        st.rerun()
+        with imagen_tab:
+            archivo_imagen = st.file_uploader("Foto de receta, factura o albarán (JPG/PNG)", type=['jpg', 'jpeg', 'png'])
+            if archivo_imagen:
+                if st.button("Escanear imagen con IA Vision", type="primary"):
+                    bytes_img = archivo_imagen.read()
+                    with st.spinner("Leyendo factura y asociando códigos de inventario..."):
+                        nuevos = procesar_con_openai(bytes_imagen=bytes_img, mime_type=archivo_imagen.type)
+                        if incorporar_ingredientes_ia(nuevos):
+                            st.rerun()
 
 
     st.markdown("##### Ingredientes")
@@ -3809,16 +3804,16 @@ with main_tab_recetas:
             df_display,
             num_rows="dynamic",
             use_container_width=True,
-            height=420,
+            height=560,
             column_config={
                 "codigo": st.column_config.TextColumn("Código", help="Código único del inventario", width="small"),
                 "descripcion": st.column_config.TextColumn("Ingrediente", help="Descripción del producto", width="large"),
-                "cantidad_bruta": st.column_config.NumberColumn("Cantidad", format="%.3f", min_value=0.0),
+                "cantidad_bruta": st.column_config.NumberColumn("Cantidad", format="%.3f", min_value=0.0, width="small"),
                 "unidad_medida": st.column_config.SelectboxColumn("Unidad", options=["kg", "l", "ud", "sobre", "botella", "lata", "paquete", "caja", "bandeja", "hoja"], width="small"),
-                "merma": st.column_config.NumberColumn("% Merma", format="%.2f %%", min_value=0.0, max_value=100.0),
+                "merma": st.column_config.NumberColumn("Merma %", format="%.2f %%", min_value=0.0, max_value=100.0, width="small"),
                 "cantidad_neta": None,
-                "precio_unidad": st.column_config.NumberColumn("Precio Unidad (€)", format="%.2f €", min_value=0.0),
-                "coste_total": st.column_config.NumberColumn("Coste (€)", format="%.2f €", min_value=0.0)
+                "precio_unidad": st.column_config.NumberColumn("Precio unidad", format="%.2f €", min_value=0.0, width="medium"),
+                "coste_total": st.column_config.NumberColumn("Coste", format="%.2f €", min_value=0.0, width="small")
             },
             column_order=["descripcion", "cantidad_bruta", "unidad_medida", "merma", "precio_unidad", "coste_total", "codigo"],
             disabled=["cantidad_neta", "coste_total"],
@@ -4600,7 +4595,7 @@ with main_tab_facturas:
 
 
 with main_tab_recetas:
-    with st.expander("Parámetros de coste y exportación", expanded=False):
+    with st.expander("Parámetros avanzados", expanded=False):
         c1, c2, c3 = st.columns(3)
         with c1:
             costes_indirectos_pct = st.number_input("Costes Indirectos (%)", min_value=0.0, key="costes_indirectos_pct")
@@ -4627,13 +4622,6 @@ with main_tab_recetas:
         raciones_deseadas_metricas = 0.0 if pd.isna(raciones_deseadas_metricas) else float(raciones_deseadas_metricas)
         pvp_por_racion = pvp_final / raciones_deseadas_metricas if raciones_deseadas_metricas > 0 else 0.0
 
-        r1, r2, r3, r4, r5 = st.columns(5)
-        r1.metric("Materia Prima", f"{subtotal_ing:.2f} €")
-        r2.metric("Costes Ind.", f"{costes_ind:.2f} €")
-        r3.metric("Coste 1 ración", f"{coste_total:.2f} €")
-        r4.metric("PVP 1 ración", f"{pvp_final:.2f} €")
-        r5.metric("PVP/ración", f"{pvp_por_racion:.2f} €")
-
         excel_virtual = generar_excel(
             nombre_plato,
             st.session_state['ingredientes'],
@@ -4657,9 +4645,7 @@ with main_tab_recetas:
 
 with main_tab_recetas:
     st.markdown("##### Recetas guardadas")
-    mensaje_receta_cargada = st.session_state.pop("mensaje_receta_cargada", None)
-    if mensaje_receta_cargada:
-        st.success(mensaje_receta_cargada)
+    st.session_state.pop("mensaje_receta_cargada", None)
 
     opciones_recetas = []
     recetas_por_id = {}
@@ -4781,10 +4767,7 @@ with main_tab_recetas:
     if not supabase_disponible:
         st.warning("El inventario no está disponible. No se puede guardar la receta ahora.")
     elif not obtener_user_id_actual():
-        st.info("Inicia sesión para guardar recetas en tu cuenta")
-    if st.session_state.get("receta_id_cargada"):
-        st.caption(f"Receta cargada para actualizar: {st.session_state.get('codigo_receta_cargada', 'sin código')}")
-
+        pass
     receta_id_cargada_normalizar = st.session_state.get("receta_id_cargada")
     raciones_cargadas_normalizar = pd.to_numeric(
         st.session_state.get("receta_raciones_base_cargada"),
@@ -4871,11 +4854,11 @@ with main_tab_recetas:
 
         guardar_col, actualizar_col, duplicar_col = st.columns(3)
         with guardar_col:
-            guardar_nueva = st.form_submit_button("Guardar como nueva receta", type="primary", use_container_width=True)
+            guardar_nueva = st.form_submit_button("Guardar receta", type="primary", use_container_width=True)
         with actualizar_col:
-            actualizar_existente = st.form_submit_button("Actualizar receta seleccionada", use_container_width=True)
+            actualizar_existente = st.form_submit_button("Actualizar receta", use_container_width=True)
         with duplicar_col:
-            duplicar_existente = st.form_submit_button("Duplicar receta seleccionada", use_container_width=True)
+            duplicar_existente = st.form_submit_button("Duplicar receta", use_container_width=True)
 
         if guardar_nueva or actualizar_existente or duplicar_existente:
             st.session_state["receta_nombre"] = str(nombre_receta_guardar or "").strip() or st.session_state.get("receta_nombre", "Mi Receta")
@@ -4977,59 +4960,59 @@ with main_tab_recetas:
                     else:
                         st.error(mensaje)
 
-    st.divider()
-    st.subheader("Eliminar receta")
-    receta_id_para_eliminar = (
-        str(receta_id_seleccionada)
-        if receta_id_seleccionada
-        else str(st.session_state.get("receta_id_cargada") or "")
-    )
-    receta_para_eliminar = recetas_por_id.get(receta_id_para_eliminar, {})
+    with st.expander("Mantenimiento", expanded=False):
+        # TODO: mover eliminación de recetas al entorno Administración/Mantenimiento.
+        receta_id_para_eliminar = (
+            str(receta_id_seleccionada)
+            if receta_id_seleccionada
+            else str(st.session_state.get("receta_id_cargada") or "")
+        )
+        receta_para_eliminar = recetas_por_id.get(receta_id_para_eliminar, {})
 
-    if not supabase_disponible:
-        st.warning("El inventario no está disponible. No se puede eliminar la receta ahora.")
-    elif not receta_id_para_eliminar:
-        st.info("Selecciona o carga una receta antes de intentar eliminarla.")
-    elif receta_para_eliminar and not receta_es_modificable(receta_para_eliminar):
-        st.warning("No puedes modificar una receta de otro usuario")
-        if valor_user_id_receta(receta_para_eliminar) is None:
-            st.info("Esta receta antigua no tiene propietario. Cierra sesión para eliminarla o duplícala en tu cuenta.")
-    else:
-        codigo_eliminar = str(
-            receta_para_eliminar.get("codigo_receta")
-            or st.session_state.get("codigo_receta_cargada")
-            or "sin código"
-        )
-        nombre_eliminar = str(
-            receta_para_eliminar.get("nombre")
-            or st.session_state.get("receta_nombre")
-            or "receta seleccionada"
-        )
-        st.warning(
-            "Esta acción no se puede deshacer. Se borrará la cabecera de la receta y "
-            "sus ingredientes asociados. No se borrarán ingredientes del inventario."
-        )
-        st.write(f"**Receta seleccionada:** {codigo_eliminar} · {nombre_eliminar}")
-        confirmacion_eliminar = st.text_input(
-            "Escribe ELIMINAR para confirmar",
-            key=f"confirmar_eliminar_receta_{receta_id_para_eliminar}"
-        )
-        if st.button("Eliminar receta seleccionada", type="secondary", use_container_width=True):
-            if confirmacion_eliminar != "ELIMINAR":
-                st.error("Para eliminar la receta debes escribir exactamente ELIMINAR.")
-            else:
-                ok, mensaje = eliminar_receta_supabase(receta_id_para_eliminar)
-                if ok:
-                    if str(st.session_state.get("receta_id_cargada") or "") == receta_id_para_eliminar:
-                        st.session_state["receta_id_cargada"] = None
-                        st.session_state["codigo_receta_cargada"] = ""
-                        st.session_state["receta_raciones_base_cargada"] = None
-                    limpiar_cache_recetas_guardadas()
-                    st.session_state["limpiar_selector_receta_guardada"] = True
-                    st.session_state["mensaje_receta_cargada"] = "Receta eliminada correctamente. Listado de recetas actualizado."
-                    st.rerun()
+        if not supabase_disponible:
+            st.warning("El inventario no está disponible. No se puede eliminar la receta ahora.")
+        elif not receta_id_para_eliminar:
+            st.info("Selecciona o carga una receta antes de intentar eliminarla.")
+        elif receta_para_eliminar and not receta_es_modificable(receta_para_eliminar):
+            st.warning("No puedes modificar una receta de otro usuario")
+            if valor_user_id_receta(receta_para_eliminar) is None:
+                st.info("Esta receta antigua no tiene propietario. Cierra sesión para eliminarla o duplícala en tu cuenta.")
+        else:
+            codigo_eliminar = str(
+                receta_para_eliminar.get("codigo_receta")
+                or st.session_state.get("codigo_receta_cargada")
+                or "sin código"
+            )
+            nombre_eliminar = str(
+                receta_para_eliminar.get("nombre")
+                or st.session_state.get("receta_nombre")
+                or "receta seleccionada"
+            )
+            st.warning(
+                "Esta acción no se puede deshacer. Se borrará la cabecera de la receta y "
+                "sus ingredientes asociados. No se borrarán ingredientes del inventario."
+            )
+            st.write(f"**Receta seleccionada:** {codigo_eliminar} · {nombre_eliminar}")
+            confirmacion_eliminar = st.text_input(
+                "Escribe ELIMINAR para confirmar",
+                key=f"confirmar_eliminar_receta_{receta_id_para_eliminar}"
+            )
+            if st.button("Borrar receta seleccionada", type="secondary", use_container_width=True):
+                if confirmacion_eliminar != "ELIMINAR":
+                    st.error("Para borrar la receta debes escribir exactamente ELIMINAR.")
                 else:
-                    st.error(mensaje)
+                    ok, mensaje = eliminar_receta_supabase(receta_id_para_eliminar)
+                    if ok:
+                        if str(st.session_state.get("receta_id_cargada") or "") == receta_id_para_eliminar:
+                            st.session_state["receta_id_cargada"] = None
+                            st.session_state["codigo_receta_cargada"] = ""
+                            st.session_state["receta_raciones_base_cargada"] = None
+                        limpiar_cache_recetas_guardadas()
+                        st.session_state["limpiar_selector_receta_guardada"] = True
+                        st.session_state["mensaje_receta_cargada"] = "Receta eliminada correctamente. Listado de recetas actualizado."
+                        st.rerun()
+                    else:
+                        st.error(mensaje)
 
 with main_tab_menus:
     st.subheader("Menús")
