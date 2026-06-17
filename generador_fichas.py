@@ -3090,7 +3090,7 @@ st.markdown(
         color: var(--samirarte-navy);
     }
     .block-container {
-        padding-top: 0.25rem;
+        padding-top: 0;
         padding-bottom: 1.15rem;
         padding-left: 1.6rem;
         padding-right: 1.6rem;
@@ -3113,8 +3113,8 @@ st.markdown(
         display: flex;
         align-items: center;
         justify-content: space-between;
-        min-height: 58px;
-        padding: 0.15rem 0 0.5rem;
+        min-height: 42px;
+        padding: 0 0 0.22rem;
         border-bottom: 1px solid var(--samirarte-border);
         background: rgba(247, 249, 252, 0.92);
     }
@@ -3122,10 +3122,10 @@ st.markdown(
         display: flex;
         align-items: center;
         gap: 0.8rem;
-        min-width: 220px;
+        min-width: 160px;
     }
     .samirarte-brand img {
-        height: 48px;
+        height: 34px;
         object-fit: contain;
     }
     .samirarte-brand-fallback {
@@ -3136,27 +3136,27 @@ st.markdown(
     .samirarte-user {
         color: var(--samirarte-navy);
         font-weight: 700;
-        font-size: 0.94rem;
+        font-size: 0.88rem;
     }
     .samirarte-hero {
         display: flex;
         align-items: center;
-        gap: 0.9rem;
-        margin: 1.1rem 0 0.95rem;
+        gap: 0.65rem;
+        margin: 0.55rem 0 0.45rem;
     }
     .samirarte-hero-icon {
-        font-size: 2.15rem;
+        font-size: 1.72rem;
         line-height: 1;
     }
     .samirarte-hero h1 {
-        font-size: clamp(1.65rem, 2.2vw, 2.25rem);
-        line-height: 1.08;
+        font-size: clamp(1.55rem, 1.85vw, 2.05rem);
+        line-height: 1.02;
         margin: 0;
     }
     .samirarte-hero p {
         color: var(--samirarte-muted);
-        margin: 0.22rem 0 0;
-        font-size: 1rem;
+        margin: 0.08rem 0 0;
+        font-size: 0.92rem;
     }
     .samirarte-form-card {
         border: 1px solid var(--samirarte-border);
@@ -3214,18 +3214,19 @@ st.markdown(
     }
     div[data-testid="stTabs"] [data-baseweb="tab-list"] {
         justify-content: center;
-        gap: 1.7rem;
+        gap: 1.45rem;
         border-bottom: 1px solid var(--samirarte-border);
         background: rgba(247, 249, 252, 0.95);
         position: sticky;
         top: 0;
         z-index: 99;
-        padding-top: 0.25rem;
+        padding-top: 0.05rem;
+        min-height: 2.35rem;
     }
     div[data-testid="stTabs"] button[role="tab"] {
         color: var(--samirarte-navy);
         font-weight: 700;
-        padding: 0.65rem 0.25rem;
+        padding: 0.42rem 0.18rem;
     }
     div[data-testid="stTabs"] button[aria-selected="true"] {
         color: var(--samirarte-red);
@@ -3242,6 +3243,47 @@ st.markdown(
         border-radius: 7px;
         font-weight: 800;
         min-height: 2.45rem;
+    }
+    @media (max-width: 720px) {
+        .block-container {
+            padding-left: 0.85rem;
+            padding-right: 0.85rem;
+        }
+        .samirarte-topbar {
+            min-height: 38px;
+        }
+        .samirarte-brand {
+            min-width: 0;
+        }
+        .samirarte-brand img {
+            height: 30px;
+        }
+        .samirarte-user {
+            font-size: 0.8rem;
+        }
+        .samirarte-hero {
+            align-items: flex-start;
+            gap: 0.5rem;
+            margin: 0.42rem 0 0.35rem;
+        }
+        .samirarte-hero-icon {
+            font-size: 1.45rem;
+        }
+        .samirarte-hero h1 {
+            font-size: 1.42rem;
+            line-height: 1.08;
+        }
+        .samirarte-hero p {
+            font-size: 0.88rem;
+        }
+        div[data-testid="stTabs"] [data-baseweb="tab-list"] {
+            gap: 0.75rem;
+            overflow-x: auto;
+            justify-content: flex-start;
+        }
+        div[data-testid="stTabs"] button[role="tab"] {
+            padding: 0.38rem 0.1rem;
+        }
     }
     </style>
     """,
@@ -3773,9 +3815,6 @@ def render_pagina_administracion():
         st.markdown("#### Migraciones necesarias")
         st.code("sql/017_usuarios_app_entorno.sql\nsql/018_admin_rls_todas_bbdd.sql", language="text")
         st.caption("Después de ejecutar 017, promociona al primer administrador desde Supabase SQL. Ejecuta 018 para que los admins puedan ver y editar todas las BBDD con RLS.")
-
-
-st.divider()
 
 pagina_actual = "App"
 if usuario_actual_es_admin():
