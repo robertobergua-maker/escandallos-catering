@@ -3078,64 +3078,199 @@ def generar_excel(
 st.markdown(
     """
     <style>
+    :root {
+        --samirarte-navy: #14264a;
+        --samirarte-muted: #60708d;
+        --samirarte-border: #e4e9f2;
+        --samirarte-bg: #f7f9fc;
+        --samirarte-red: #ff3b3b;
+    }
+    html, body, [data-testid="stAppViewContainer"] {
+        background: var(--samirarte-bg);
+        color: var(--samirarte-navy);
+    }
     .block-container {
-        padding-top: 0.75rem;
-        padding-bottom: 1.1rem;
+        padding-top: 0.25rem;
+        padding-bottom: 1.15rem;
+        padding-left: 1.6rem;
+        padding-right: 1.6rem;
         max-width: 100%;
     }
     h1 {
-        margin-bottom: 0.35rem;
+        margin-bottom: 0.2rem;
+        color: var(--samirarte-navy);
+        font-weight: 800;
     }
     h2, h3, h4 {
         margin-top: 0.45rem;
         margin-bottom: 0.35rem;
+        color: var(--samirarte-navy);
     }
     div[data-testid="stVerticalBlock"] {
         gap: 0.45rem;
     }
+    .samirarte-topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        min-height: 58px;
+        padding: 0.15rem 0 0.5rem;
+        border-bottom: 1px solid var(--samirarte-border);
+        background: rgba(247, 249, 252, 0.92);
+    }
+    .samirarte-brand {
+        display: flex;
+        align-items: center;
+        gap: 0.8rem;
+        min-width: 220px;
+    }
+    .samirarte-brand img {
+        height: 48px;
+        object-fit: contain;
+    }
+    .samirarte-brand-fallback {
+        font-weight: 800;
+        letter-spacing: 0.02em;
+        color: var(--samirarte-navy);
+    }
+    .samirarte-user {
+        color: var(--samirarte-navy);
+        font-weight: 700;
+        font-size: 0.94rem;
+    }
+    .samirarte-hero {
+        display: flex;
+        align-items: center;
+        gap: 0.9rem;
+        margin: 1.1rem 0 0.95rem;
+    }
+    .samirarte-hero-icon {
+        font-size: 2.15rem;
+        line-height: 1;
+    }
+    .samirarte-hero h1 {
+        font-size: clamp(1.65rem, 2.2vw, 2.25rem);
+        line-height: 1.08;
+        margin: 0;
+    }
+    .samirarte-hero p {
+        color: var(--samirarte-muted);
+        margin: 0.22rem 0 0;
+        font-size: 1rem;
+    }
+    .samirarte-form-card {
+        border: 1px solid var(--samirarte-border);
+        border-radius: 10px;
+        background: #ffffff;
+        padding: 0.72rem 1rem 0.82rem;
+        box-shadow: 0 10px 24px rgba(20, 38, 74, 0.04);
+    }
+    .samirarte-section-title {
+        color: var(--samirarte-navy);
+        font-size: 1.15rem;
+        font-weight: 800;
+        margin: 0.25rem 0 0.25rem;
+    }
     div[data-testid="stMetric"] {
-        background: #f8fafc;
-        border: 1px solid #e5e7eb;
-        border-radius: 8px;
-        padding: 0.45rem 0.65rem;
+        background: #ffffff;
+        border: 1px solid var(--samirarte-border);
+        border-radius: 10px;
+        padding: 0.72rem 0.95rem;
+        min-height: 82px;
+        box-shadow: 0 10px 24px rgba(20, 38, 74, 0.04);
     }
     div[data-testid="stMetric"] label {
         white-space: normal;
+        color: var(--samirarte-muted);
+        font-weight: 700;
     }
     div[data-testid="stMetricValue"] {
-        font-size: 1.25rem;
+        color: var(--samirarte-navy);
+        font-size: 1.32rem;
+        font-weight: 800;
     }
     div[data-testid="stDataFrame"] {
-        font-size: 1.02rem;
+        border: 1px solid var(--samirarte-border);
+        border-radius: 10px;
+        overflow: hidden;
+        box-shadow: 0 10px 24px rgba(20, 38, 74, 0.04);
+        font-size: 1.03rem;
     }
     div[data-testid="stDataFrame"] [role="gridcell"],
     div[data-testid="stDataFrame"] [role="columnheader"] {
-        font-size: 1.02rem;
+        font-size: 1.03rem;
     }
     div[data-testid="stTextInput"] input,
     div[data-testid="stNumberInput"] input,
     div[data-baseweb="select"] {
         min-height: 2.35rem;
     }
+    div[data-testid="stTextInput"] input,
+    div[data-testid="stNumberInput"] input,
+    textarea,
+    div[data-baseweb="select"] > div {
+        border-color: var(--samirarte-border);
+        border-radius: 7px;
+    }
     div[data-testid="stTabs"] [data-baseweb="tab-list"] {
-        gap: 0.35rem;
+        justify-content: center;
+        gap: 1.7rem;
+        border-bottom: 1px solid var(--samirarte-border);
+        background: rgba(247, 249, 252, 0.95);
+        position: sticky;
+        top: 0;
+        z-index: 99;
+        padding-top: 0.25rem;
+    }
+    div[data-testid="stTabs"] button[role="tab"] {
+        color: var(--samirarte-navy);
+        font-weight: 700;
+        padding: 0.65rem 0.25rem;
+    }
+    div[data-testid="stTabs"] button[aria-selected="true"] {
+        color: var(--samirarte-red);
+        border-bottom-color: var(--samirarte-red);
     }
     div[data-testid="stExpander"] details {
         border-radius: 8px;
+        border-color: var(--samirarte-border);
+        background: #ffffff;
+    }
+    div[data-testid="stButton"] button,
+    div[data-testid="stDownloadButton"] button,
+    div[data-testid="stFormSubmitButton"] button {
+        border-radius: 7px;
+        font-weight: 800;
+        min-height: 2.45rem;
     }
     </style>
     """,
     unsafe_allow_html=True
 )
 
-if logo_samirarte_existe():
-    st.image(str(LOGO_SAMIRARTE_PATH), width=220)
-else:
-    st.caption("Logo de Samirarte no encontrado. La app seguirá funcionando sin logo.")
-
-st.title("👨‍🍳 Gestor de Escandallos Inteligente Samirarte")
-
 usuario_actual = obtener_usuario_actual()
+logo_html = (
+    f'<img src="data:image/png;base64,{logo_samirarte_base64()}" alt="Samirarte">'
+    if logo_samirarte_existe()
+    else '<span class="samirarte-brand-fallback">SAMIRARTE</span>'
+)
+usuario_topbar = (usuario_actual or {}).get("email") or "Usuario"
+st.markdown(
+    f"""
+    <div class="samirarte-topbar">
+        <div class="samirarte-brand">{logo_html}</div>
+        <div class="samirarte-user">Usuario · {html.escape(str(usuario_topbar))}</div>
+    </div>
+    <div class="samirarte-hero">
+        <div class="samirarte-hero-icon">👨‍🍳</div>
+        <div>
+            <h1>Gestor de Escandallos Inteligente Samirarte</h1>
+            <p>Gestiona tus recetas y controla costes de forma eficiente</p>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
 
 # Panel lateral indicador de conexiones activas
 with st.sidebar:
@@ -3673,13 +3808,15 @@ with main_tab_recetas:
     if aviso_receta_antigua:
         st.warning(aviso_receta_antigua)
 
+    st.markdown('<div class="samirarte-form-card">', unsafe_allow_html=True)
     cab_col1, cab_col2, cab_col3 = st.columns([2.3, 1.15, 1.15])
     with cab_col1:
-        nombre_plato = st.text_input("Nombre receta", key="input_nombre_plato", label_visibility="collapsed")
+        nombre_plato = st.text_input("Nombre de la receta", key="input_nombre_plato")
     with cab_col2:
         categoria_actual = st.text_input("Categoría", key="input_receta_categoria", placeholder="Categoría")
     with cab_col3:
         tipo_plato_actual = st.text_input("Tipo de plato", key="input_receta_tipo_plato", placeholder="Tipo")
+    st.markdown('</div>', unsafe_allow_html=True)
     st.session_state['receta_nombre'] = nombre_plato
     st.session_state['nombre_plato'] = nombre_plato
     st.session_state["receta_categoria"] = categoria_actual
@@ -3711,7 +3848,8 @@ with main_tab_recetas:
     met_col3.metric("PVP 1 ración", f"{pvp_final_cabecera:.2f} €" if pvp_final_cabecera else "-")
     met_col4.metric("Food Cost", f"{food_cost_cabecera:.1f} %" if food_cost_cabecera else "-")
 
-    st.markdown("##### Añadir ingredientes")
+    st.markdown('<div class="samirarte-section-title">Ingredientes</div>', unsafe_allow_html=True)
+    st.markdown('<div class="samirarte-form-card">', unsafe_allow_html=True)
     opciones_codigo = [""] + list(inventario_dict.keys())
 
     with st.form("form_ingrediente", clear_on_submit=True):
@@ -3758,30 +3896,8 @@ with main_tab_recetas:
                 })
             marcar_receta_modificada_manualmente()
             st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    with st.expander("IA", expanded=False):
-        texto_tab, imagen_tab = st.tabs(["Texto", "Imagen"])
-        with texto_tab:
-            texto_pegado = st.text_area("Texto para analizar", height=120, placeholder="3 kg de pollo asado ING-0027...")
-            if st.button("Analizar texto con IA", type="primary"):
-                if texto_pegado:
-                    with st.spinner("La IA está leyendo y cruzando los datos con tu inventario..."):
-                        nuevos = procesar_con_openai(texto_plano=texto_pegado)
-                        if incorporar_ingredientes_ia(nuevos):
-                            st.rerun()
-
-        with imagen_tab:
-            archivo_imagen = st.file_uploader("Foto de receta, factura o albarán (JPG/PNG)", type=['jpg', 'jpeg', 'png'])
-            if archivo_imagen:
-                if st.button("Escanear imagen con IA Vision", type="primary"):
-                    bytes_img = archivo_imagen.read()
-                    with st.spinner("Leyendo factura y asociando códigos de inventario..."):
-                        nuevos = procesar_con_openai(bytes_imagen=bytes_img, mime_type=archivo_imagen.type)
-                        if incorporar_ingredientes_ia(nuevos):
-                            st.rerun()
-
-
-    st.markdown("##### Ingredientes")
     if st.session_state['ingredientes']:
         # Preparamos DataFrame de representación visual
         df_display = pd.DataFrame(st.session_state['ingredientes'])
@@ -4012,6 +4128,27 @@ with main_tab_recetas:
 
     else:
         st.info("Empieza agregando ingredientes usando entrada manual, texto o imagen.")
+
+    with st.expander("IA: Generar receta con IA", expanded=False):
+        texto_tab, imagen_tab = st.tabs(["Texto", "Imagen"])
+        with texto_tab:
+            texto_pegado = st.text_area("Texto para analizar", height=120, placeholder="3 kg de pollo asado ING-0027...")
+            if st.button("Analizar texto con IA", type="primary"):
+                if texto_pegado:
+                    with st.spinner("La IA está leyendo y cruzando los datos con tu inventario..."):
+                        nuevos = procesar_con_openai(texto_plano=texto_pegado)
+                        if incorporar_ingredientes_ia(nuevos):
+                            st.rerun()
+
+        with imagen_tab:
+            archivo_imagen = st.file_uploader("Foto de receta, factura o albarán (JPG/PNG)", type=['jpg', 'jpeg', 'png'])
+            if archivo_imagen:
+                if st.button("Escanear imagen con IA Vision", type="primary"):
+                    bytes_img = archivo_imagen.read()
+                    with st.spinner("Leyendo factura y asociando códigos de inventario..."):
+                        nuevos = procesar_con_openai(bytes_imagen=bytes_img, mime_type=archivo_imagen.type)
+                        if incorporar_ingredientes_ia(nuevos):
+                            st.rerun()
 
 
 with main_tab_clientes:
