@@ -15,7 +15,12 @@ from openai import OpenAI
 from supabase import create_client, Client
 
 # Configuración de página obligatoria al inicio de Streamlit
-st.set_page_config(page_title="Gestor de Fichas Técnicas Cloud", page_icon="👨‍🍳", layout="wide")
+st.set_page_config(
+    page_title="Gestor de Fichas Técnicas Cloud",
+    page_icon="👨‍🍳",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
 
 # =============================================================================
 # 🔑 INICIALIZACIÓN DE CONEXIONES CLOUD (INVENTARIO Y CIA)
@@ -3074,20 +3079,37 @@ st.markdown(
     """
     <style>
     .block-container {
-        padding-top: 1.25rem;
-        padding-bottom: 1.5rem;
+        padding-top: 0.75rem;
+        padding-bottom: 1.1rem;
+        max-width: 100%;
+    }
+    h1 {
+        margin-bottom: 0.35rem;
+    }
+    h2, h3, h4 {
+        margin-top: 0.45rem;
+        margin-bottom: 0.35rem;
+    }
+    div[data-testid="stVerticalBlock"] {
+        gap: 0.45rem;
     }
     div[data-testid="stMetric"] {
         background: #f8fafc;
         border: 1px solid #e5e7eb;
         border-radius: 8px;
-        padding: 0.55rem 0.7rem;
+        padding: 0.45rem 0.65rem;
     }
     div[data-testid="stMetric"] label {
         white-space: normal;
     }
+    div[data-testid="stMetricValue"] {
+        font-size: 1.25rem;
+    }
     div[data-testid="stTabs"] [data-baseweb="tab-list"] {
         gap: 0.35rem;
+    }
+    div[data-testid="stExpander"] details {
+        border-radius: 8px;
     }
     </style>
     """,
@@ -3292,6 +3314,222 @@ with st.sidebar:
 
 
 
+ADMIN_TABLAS_BBDD = {
+    "inventario": {
+        "label": "Inventario",
+        "pk": "codigo",
+        "order": "descripcion",
+        "columns": [
+            "codigo", "familia", "descripcion", "unidad_medida", "merma", "precio_unidad",
+            "proveedor_precio", "formato_compra", "cantidad_formato_compra",
+            "unidad_formato_compra", "precio_formato_compra", "fecha_precio",
+            "url_precio", "observaciones_precio"
+        ],
+        "generated_pk": False,
+    },
+    "recetas": {
+        "label": "Recetas",
+        "pk": "id",
+        "order": "nombre",
+        "columns": [
+            "id", "user_id", "codigo_receta", "nombre", "categoria", "tipo_plato",
+            "raciones_base", "unidad_servicio", "descripcion", "elaboracion",
+            "observaciones", "costes_indirectos_pct", "margen_beneficio_pct",
+            "iva_pct", "coste_total", "precio_venta_sin_iva", "precio_venta_con_iva",
+            "activa", "created_at", "updated_at"
+        ],
+        "generated_pk": True,
+    },
+    "receta_ingredientes": {
+        "label": "Ingredientes de recetas",
+        "pk": "id",
+        "order": "orden",
+        "columns": [
+            "id", "receta_id", "codigo_ingrediente", "descripcion_ingrediente",
+            "cantidad_bruta", "unidad_medida", "merma", "cantidad_neta",
+            "precio_unidad", "coste_total", "orden", "es_temporal",
+            "created_at", "updated_at"
+        ],
+        "generated_pk": True,
+    },
+    "menus": {
+        "label": "Menús",
+        "pk": "id",
+        "order": "nombre",
+        "columns": [
+            "id", "user_id", "nombre", "tipo_menu", "descripcion",
+            "numero_comensales", "coste_total", "precio_total", "created_at", "updated_at"
+        ],
+        "generated_pk": True,
+    },
+    "menu_recetas": {
+        "label": "Recetas en menús",
+        "pk": "id",
+        "order": "orden",
+        "columns": [
+            "id", "menu_id", "receta_id", "raciones", "orden", "seccion", "created_at"
+        ],
+        "generated_pk": True,
+    },
+    "clientes": {
+        "label": "Clientes",
+        "pk": "id",
+        "order": "nombre",
+        "columns": [
+            "id", "user_id", "nombre", "tipo_cliente", "nif_cif", "email",
+            "telefono", "direccion", "codigo_postal", "ciudad", "provincia",
+            "pais", "observaciones", "created_at", "updated_at"
+        ],
+        "generated_pk": True,
+    },
+    "facturas": {
+        "label": "Facturas y presupuestos",
+        "pk": "id",
+        "order": "fecha_emision",
+        "columns": [
+            "id", "user_id", "cliente_id", "numero_factura", "tipo_documento",
+            "estado", "fecha_emision", "fecha_vencimiento", "concepto",
+            "base_imponible", "iva_pct", "iva_importe", "retencion_pct",
+            "retencion_importe", "total", "metodo_pago", "estado_cobro",
+            "notas", "created_at", "updated_at"
+        ],
+        "generated_pk": True,
+    },
+    "factura_lineas": {
+        "label": "Líneas de facturas",
+        "pk": "id",
+        "order": "orden",
+        "columns": [
+            "id", "factura_id", "origen_tipo", "origen_id", "descripcion",
+            "cantidad", "unidad", "precio_unitario", "descuento_pct",
+            "base_linea", "iva_pct", "iva_linea", "total_linea", "orden", "created_at"
+        ],
+        "generated_pk": True,
+    },
+    "usuarios_app": {
+        "label": "Usuarios de la app",
+        "pk": "user_id",
+        "order": "email",
+        "columns": ["user_id", "email", "nombre", "rol", "activo", "created_at", "updated_at"],
+        "generated_pk": False,
+        "fixed_rows": True,
+    },
+}
+
+ADMIN_NUMERIC_COLUMNS = {
+    "merma", "precio_unidad", "cantidad_formato_compra", "precio_formato_compra",
+    "raciones_base", "costes_indirectos_pct", "margen_beneficio_pct", "iva_pct",
+    "coste_total", "precio_venta_sin_iva", "precio_venta_con_iva", "cantidad_bruta",
+    "cantidad_neta", "raciones", "numero_comensales", "precio_total",
+    "base_imponible", "iva_importe", "retencion_pct", "retencion_importe", "total",
+    "cantidad", "precio_unitario", "descuento_pct", "base_linea", "iva_linea",
+    "total_linea", "orden"
+}
+
+ADMIN_BOOLEAN_COLUMNS = {"activa", "es_temporal", "activo"}
+ADMIN_READONLY_COLUMNS = {"id", "created_at", "updated_at"}
+
+
+def normalizar_valor_admin(valor, columna):
+    if valor is None:
+        return None
+    try:
+        if pd.isna(valor):
+            return None
+    except TypeError:
+        pass
+    if columna in ADMIN_BOOLEAN_COLUMNS:
+        return bool(valor)
+    if columna in ADMIN_NUMERIC_COLUMNS:
+        numero = pd.to_numeric(valor, errors="coerce")
+        if pd.isna(numero):
+            return None
+        if columna in {"orden", "numero_comensales"}:
+            return int(numero)
+        return float(numero)
+    texto = str(valor).strip()
+    return texto or None
+
+
+def fila_admin_para_guardar(fila, config, incluir_pk=True):
+    datos = {}
+    pk = config["pk"]
+    for columna in config["columns"]:
+        if columna in {"created_at", "updated_at"}:
+            continue
+        if columna == pk and config.get("generated_pk") and not incluir_pk:
+            continue
+        valor = fila.get(columna) if isinstance(fila, dict) else getattr(fila, columna, None)
+        valor_normalizado = normalizar_valor_admin(valor, columna)
+        if columna == pk and config.get("generated_pk") and not valor_normalizado:
+            continue
+        datos[columna] = valor_normalizado
+    return datos
+
+
+def cargar_tabla_admin(nombre_tabla, limite=500):
+    if not supabase_disponible or supabase is None:
+        return False, "El inventario no está conectado correctamente.", pd.DataFrame()
+    if not usuario_actual_es_admin():
+        return False, "Solo los administradores pueden consultar BBDD.", pd.DataFrame()
+
+    config = ADMIN_TABLAS_BBDD[nombre_tabla]
+    columnas = config["columns"]
+    try:
+        consulta = supabase.table(nombre_tabla).select(",".join(columnas)).limit(int(limite))
+        if config.get("order"):
+            consulta = consulta.order(config["order"])
+        respuesta = consulta.execute()
+        df = pd.DataFrame(respuesta.data or [])
+        if df.empty:
+            return True, "No hay registros.", pd.DataFrame(columns=columnas)
+        for col in columnas:
+            if col not in df.columns:
+                df[col] = None
+        return True, "Tabla cargada.", df[columnas].copy()
+    except Exception as e:
+        return False, f"No se pudo cargar {nombre_tabla}: {e}", pd.DataFrame(columns=columnas)
+
+
+def guardar_cambios_tabla_admin(nombre_tabla, df_original, editor_state):
+    config = ADMIN_TABLAS_BBDD[nombre_tabla]
+    pk = config["pk"]
+    editados = editor_state.get("edited_rows", {}) if editor_state else {}
+    anadidos = editor_state.get("added_rows", []) if editor_state else []
+    borrados = editor_state.get("deleted_rows", []) if editor_state else []
+    cambios = 0
+
+    for row_idx_str, edits in editados.items():
+        row_idx = int(row_idx_str)
+        fila_original = df_original.iloc[row_idx].to_dict()
+        pk_valor = normalizar_valor_admin(fila_original.get(pk), pk)
+        if not pk_valor:
+            continue
+        fila_actualizada = dict(fila_original)
+        fila_actualizada.update(edits)
+        datos_actualizados = fila_admin_para_guardar(fila_actualizada, config, incluir_pk=False)
+        datos_actualizados.pop(pk, None)
+        if datos_actualizados:
+            supabase.table(nombre_tabla).update(datos_actualizados).eq(pk, pk_valor).execute()
+            cambios += 1
+
+    for nueva_fila in anadidos:
+        datos_nuevos = fila_admin_para_guardar(nueva_fila, config, incluir_pk=not config.get("generated_pk"))
+        datos_nuevos = {k: v for k, v in datos_nuevos.items() if v is not None}
+        if datos_nuevos:
+            supabase.table(nombre_tabla).insert(datos_nuevos).execute()
+            cambios += 1
+
+    for row_idx in borrados:
+        fila_original = df_original.iloc[int(row_idx)].to_dict()
+        pk_valor = normalizar_valor_admin(fila_original.get(pk), pk)
+        if pk_valor:
+            supabase.table(nombre_tabla).delete().eq(pk, pk_valor).execute()
+            cambios += 1
+
+    return cambios
+
+
 def render_pagina_administracion():
     st.subheader("Administración del entorno")
     st.caption("Gestión restringida de inventario, usuarios internos y estado de configuración.")
@@ -3303,134 +3541,74 @@ def render_pagina_administracion():
             st.caption(error_perfil)
         return
 
-    admin_tab_inventario, admin_tab_usuarios, admin_tab_estado = st.tabs([
-        "BBDD inventario",
-        "Usuarios",
-        "Configuración"
-    ])
+    admin_tab_bbdd, admin_tab_estado = st.tabs(["BBDD", "Configuración"])
 
-    with admin_tab_inventario:
-        st.subheader("Inventario de ingredientes")
-        st.markdown("Busca, añade, modifica o elimina productos del inventario común en la nube.")
+    with admin_tab_bbdd:
+        tabla_opciones = list(ADMIN_TABLAS_BBDD.keys())
+        tabla_seleccionada = st.selectbox(
+            "Tabla",
+            tabla_opciones,
+            format_func=lambda tabla: ADMIN_TABLAS_BBDD[tabla]["label"],
+            key="admin_tabla_bbdd"
+        )
+        limite_registros = st.number_input(
+            "Registros a cargar",
+            min_value=50,
+            max_value=2000,
+            value=500,
+            step=50,
+            key="admin_limite_bbdd"
+        )
+        config_tabla = ADMIN_TABLAS_BBDD[tabla_seleccionada]
+        ok_tabla, mensaje_tabla, tabla_df = cargar_tabla_admin(tabla_seleccionada, limite_registros)
 
-        if not inventario_df.empty:
-            busqueda = st.text_input("Buscar ingrediente por Código, Descripción o Familia:")
-            df_filtrado = inventario_df.copy()
+        if not ok_tabla:
+            st.warning(mensaje_tabla)
+        else:
+            st.caption(f"{len(tabla_df)} registros cargados de public.{tabla_seleccionada}")
+            column_config = {}
+            for columna in config_tabla["columns"]:
+                if columna in ADMIN_BOOLEAN_COLUMNS:
+                    column_config[columna] = st.column_config.CheckboxColumn(columna)
+                elif columna == "rol":
+                    column_config[columna] = st.column_config.SelectboxColumn(columna, options=["usuario", "admin"])
+                elif columna in ADMIN_NUMERIC_COLUMNS:
+                    column_config[columna] = st.column_config.NumberColumn(columna)
+                else:
+                    column_config[columna] = st.column_config.TextColumn(columna)
 
-            if busqueda:
-                df_filtrado = df_filtrado[
-                    df_filtrado["codigo"].str.contains(busqueda, case=False, na=False) |
-                    df_filtrado["descripcion"].str.contains(busqueda, case=False, na=False) |
-                    df_filtrado["familia"].str.contains(busqueda, case=False, na=False)
-                ]
-
+            columnas_bloqueadas = [
+                col for col in config_tabla["columns"]
+                if col in ADMIN_READONLY_COLUMNS
+                or (col == config_tabla["pk"] and config_tabla.get("fixed_rows"))
+            ]
+            editor_key = f"admin_editor_{tabla_seleccionada}"
             st.data_editor(
-                df_filtrado,
-                num_rows="dynamic",
+                tabla_df,
+                num_rows="fixed" if config_tabla.get("fixed_rows") else "dynamic",
                 use_container_width=True,
-                column_config={
-                    "codigo": st.column_config.TextColumn("Código", help="ID único del inventario", required=True),
-                    "familia": st.column_config.TextColumn("Familia / Categoría", help="Ej: CARNES, PESCADOS..."),
-                    "descripcion": st.column_config.TextColumn("Descripción / Ingrediente", required=True),
-                    "unidad_medida": st.column_config.TextColumn("Unidad Base", help="kg, l, ud, sobre..."),
-                    "merma": st.column_config.NumberColumn("% Merma Estándar", format="%.2f %%", min_value=0.0, max_value=100.0),
-                    "precio_unidad": st.column_config.NumberColumn("Precio Proveedor (€)", format="%.2f €", min_value=0.0)
-                },
-                key="admin_db_editor_component"
+                height=520,
+                column_config=column_config,
+                disabled=columnas_bloqueadas,
+                key=editor_key
             )
 
-            if st.button("Guardar cambios en inventario", type="primary"):
-                editor_state = st.session_state.get("admin_db_editor_component")
-                if editor_state and supabase_disponible:
-                    with st.spinner("Sincronizando catálogo con inventario..."):
-                        try:
-                            for row_idx_str, edits in editor_state.get("edited_rows", {}).items():
-                                row_idx = int(row_idx_str)
-                                fila_original = df_filtrado.iloc[row_idx]
-                                original_code = fila_original["codigo"]
-
-                                datos_actualizados = {
-                                    "codigo": original_code,
-                                    "familia": edits.get("familia", fila_original.get("familia", "VARIOS")),
-                                    "descripcion": edits.get("descripcion", fila_original.get("descripcion", "")),
-                                    "unidad_medida": edits.get("unidad_medida", fila_original.get("unidad_medida", "kg")),
-                                    "merma": float(edits.get("merma", fila_original.get("merma", 0.0))),
-                                    "precio_unidad": float(edits.get("precio_unidad", fila_original.get("precio_unidad", 0.0)))
-                                }
-                                supabase.table("inventario").upsert(datos_actualizados).execute()
-
-                            for nueva_fila in editor_state.get("added_rows", []):
-                                if "codigo" in nueva_fila and nueva_fila["codigo"]:
-                                    datos_nuevos = {
-                                        "codigo": str(nueva_fila["codigo"]).strip().upper(),
-                                        "familia": nueva_fila.get("familia", "VARIOS"),
-                                        "descripcion": nueva_fila.get("descripcion", "Ingrediente Nuevo"),
-                                        "unidad_medida": nueva_fila.get("unidad_medida", "kg"),
-                                        "merma": float(nueva_fila.get("merma", 0.0)),
-                                        "precio_unidad": float(nueva_fila.get("precio_unidad", 0.0))
-                                    }
-                                    supabase.table("inventario").upsert(datos_nuevos).execute()
-
-                            for row_idx in editor_state.get("deleted_rows", []):
-                                fila_original = df_filtrado.iloc[row_idx]
-                                original_code = fila_original["codigo"]
-                                supabase.table("inventario").delete().eq("codigo", original_code).execute()
-
-                            st.success("Inventario actualizado con éxito.")
-                            st.session_state['db_trigger'] += 1
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Error al sincronizar datos con el inventario: {e}")
-                elif not supabase_disponible:
-                    st.error("El inventario no está conectado correctamente.")
-        else:
-            st.info("Tu tabla de inventario está vacía o cargando datos.")
-
-    with admin_tab_usuarios:
-        st.subheader("Usuarios de la app")
-        ok_usuarios, mensaje_usuarios, usuarios_df = cargar_usuarios_app_supabase()
-        if not ok_usuarios:
-            st.warning(mensaje_usuarios)
-        elif usuarios_df.empty:
-            st.info("No hay usuarios internos configurados todavía.")
-        else:
-            st.data_editor(
-                usuarios_df,
-                num_rows="fixed",
-                use_container_width=True,
-                column_config={
-                    "user_id": st.column_config.TextColumn("User ID"),
-                    "email": st.column_config.TextColumn("Email"),
-                    "nombre": st.column_config.TextColumn("Nombre"),
-                    "rol": st.column_config.SelectboxColumn("Rol", options=["usuario", "admin"], required=True),
-                    "activo": st.column_config.CheckboxColumn("Activo"),
-                    "created_at": st.column_config.TextColumn("Creado"),
-                    "updated_at": st.column_config.TextColumn("Actualizado"),
-                },
-                disabled=["user_id", "email", "created_at", "updated_at"],
-                key="admin_usuarios_editor"
-            )
-            if st.button("Guardar cambios de usuarios", type="primary"):
-                editor_state = st.session_state.get("admin_usuarios_editor")
-                if editor_state:
+            acciones_col1, acciones_col2 = st.columns([1, 3])
+            with acciones_col1:
+                if st.button("Guardar cambios", type="primary", use_container_width=True, key=f"guardar_{tabla_seleccionada}"):
+                    editor_state = st.session_state.get(editor_key)
                     try:
-                        for row_idx_str, edits in editor_state.get("edited_rows", {}).items():
-                            row_idx = int(row_idx_str)
-                            fila_original = usuarios_df.iloc[row_idx]
-                            user_id_objetivo = str(fila_original.get("user_id", "")).strip()
-                            if not user_id_objetivo:
-                                continue
-                            datos_actualizados = {
-                                "nombre": edits.get("nombre", fila_original.get("nombre", "")),
-                                "rol": normalizar_rol_usuario(edits.get("rol", fila_original.get("rol", "usuario"))),
-                                "activo": bool(edits.get("activo", fila_original.get("activo", True))),
-                            }
-                            supabase.table("usuarios_app").update(datos_actualizados).eq("user_id", user_id_objetivo).execute()
-                        st.success("Usuarios actualizados correctamente.")
-                        asegurar_usuario_app_supabase()
+                        cambios = guardar_cambios_tabla_admin(tabla_seleccionada, tabla_df, editor_state)
+                        if tabla_seleccionada == "usuarios_app":
+                            asegurar_usuario_app_supabase()
+                        if tabla_seleccionada == "inventario":
+                            st.session_state["db_trigger"] += 1
+                        st.success(f"Cambios guardados: {cambios}")
                         st.rerun()
                     except Exception as e:
-                        st.error(f"No se pudieron guardar los usuarios: {e}")
+                        st.error(f"No se pudieron guardar los cambios en {tabla_seleccionada}: {e}")
+            with acciones_col2:
+                st.caption("Las altas en tablas relacionadas necesitan claves foráneas válidas. Los borrados se aplican directamente al guardar.")
 
     with admin_tab_estado:
         st.subheader("Configuración y estado")
@@ -3449,8 +3627,8 @@ def render_pagina_administracion():
             st.write(f"**Activo:** {'sí' if perfil.get('activo', True) else 'no'}")
 
         st.markdown("#### Migraciones necesarias")
-        st.code("sql/017_usuarios_app_entorno.sql", language="text")
-        st.caption("Después de ejecutar la migración, promociona al primer administrador desde Supabase SQL.")
+        st.code("sql/017_usuarios_app_entorno.sql\nsql/018_admin_rls_todas_bbdd.sql", language="text")
+        st.caption("Después de ejecutar 017, promociona al primer administrador desde Supabase SQL. Ejecuta 018 para que los admins puedan ver y editar todas las BBDD con RLS.")
 
 
 st.divider()
@@ -3478,9 +3656,7 @@ main_tab_recetas, main_tab_menus, main_tab_clientes, main_tab_facturas = st.tabs
 ])
 
 with main_tab_recetas:
-    st.subheader("Crear receta")
     sincronizar_inputs_raciones()
-    st.info("Cada receta se guarda siempre para 1 ración.")
     aviso_raciones_ia = st.session_state.pop("aviso_raciones_ia", None)
     if aviso_raciones_ia:
         st.warning(aviso_raciones_ia)
@@ -3488,20 +3664,17 @@ with main_tab_recetas:
     if aviso_receta_antigua:
         st.warning(aviso_receta_antigua)
 
-    # Inputs generales del plato
-    nombre_plato = st.text_input("Nombre del Plato", key="input_nombre_plato")
+    cab_col1, cab_col2, cab_col3 = st.columns([2.3, 1.15, 1.15])
+    with cab_col1:
+        nombre_plato = st.text_input("Nombre receta", key="input_nombre_plato", label_visibility="collapsed")
+    with cab_col2:
+        categoria_actual = st.text_input("Categoría", key="input_receta_categoria", placeholder="Categoría")
+    with cab_col3:
+        tipo_plato_actual = st.text_input("Tipo de plato", key="input_receta_tipo_plato", placeholder="Tipo")
     st.session_state['receta_nombre'] = nombre_plato
     st.session_state['nombre_plato'] = nombre_plato
-    st.caption("Alimenta la receta desde entrada manual, texto o imagen. La base de guardado es siempre 1 ración.")
-
-    col_r1, col_r2, col_r3 = st.columns([1, 1, 2])
-    with col_r1:
-        st.metric("Base de guardado", "1 ración")
-    with col_r2:
-        st.metric("Raciones de trabajo", "1")
-    with col_r3:
-        st.markdown("**Costes y cantidades:** se interpretan como 1 ración.")
-        st.caption("Las recetas antiguas pueden normalizarse manualmente creando una copia a 1 ración.")
+    st.session_state["receta_categoria"] = categoria_actual
+    st.session_state["receta_tipo_plato"] = tipo_plato_actual
 
     st.session_state['raciones_base'] = 1.0
     st.session_state['raciones_deseadas'] = 1.0
@@ -3510,9 +3683,33 @@ with main_tab_recetas:
     st.session_state['raciones_base_aplicadas'] = 1.0
     st.session_state['raciones_deseadas_aplicadas'] = 1.0
 
+    subtotal_cabecera = sum(
+        float(ing.get('cantidad_bruta', 0.0)) * float(ing.get('precio_unidad', 0.0))
+        for ing in st.session_state.get('ingredientes', [])
+    )
+    ci_cabecera = float(st.session_state.get('costes_indirectos_pct', 0.0) or 0.0)
+    mb_cabecera = float(st.session_state.get('margen_beneficio_pct', 0.0) or 0.0)
+    iva_cabecera = float(st.session_state.get('iva_pct', 0.0) or 0.0)
+    coste_cabecera = subtotal_cabecera + (subtotal_cabecera * (ci_cabecera / 100))
+    factor_margen_cabecera = 1 - (mb_cabecera / 100)
+    pvp_neto_cabecera = coste_cabecera / factor_margen_cabecera if factor_margen_cabecera > 0 else 0.0
+    pvp_final_cabecera = pvp_neto_cabecera + (pvp_neto_cabecera * (iva_cabecera / 100))
+    food_cost_cabecera = (coste_cabecera / pvp_final_cabecera * 100) if pvp_final_cabecera > 0 else 0.0
 
-    st.divider()
-    st.subheader("Anadir ingredientes")
+    met_col1, met_col2, met_col3, met_col4, met_col5 = st.columns(5)
+    met_col1.metric("Raciones", "1")
+    met_col2.metric("Coste total", f"{coste_cabecera:.2f} €")
+    met_col3.metric("Coste/ración", f"{coste_cabecera:.2f} €")
+    met_col4.metric("Precio venta", f"{pvp_final_cabecera:.2f} €" if pvp_final_cabecera else "-")
+    met_col5.metric("Food cost", f"{food_cost_cabecera:.1f} %" if food_cost_cabecera else "-")
+
+    with st.expander("Información técnica de la receta", expanded=False):
+        st.caption("Base de guardado: 1 ración.")
+        st.caption("Raciones de trabajo: 1.")
+        st.caption("Costes y cantidades: se interpretan como 1 ración.")
+        st.caption("Las recetas antiguas pueden normalizarse manualmente creando una copia a 1 ración.")
+
+    st.markdown("##### Añadir ingredientes")
     entrada_manual_tab, texto_tab, imagen_tab = st.tabs(["Entrada manual", "Texto con IA", "Imagen con IA"])
 
     with entrada_manual_tab:
@@ -3589,11 +3786,8 @@ with main_tab_recetas:
                         st.rerun()
 
 
-    st.divider()
-    st.subheader("Ingredientes de la receta activa")
+    st.markdown("##### Ingredientes")
     if st.session_state['ingredientes']:
-        st.subheader("🛒 Lista de Ingredientes de la Receta Activa")
-
         # Preparamos DataFrame de representación visual
         df_display = pd.DataFrame(st.session_state['ingredientes'])
 
@@ -3615,17 +3809,18 @@ with main_tab_recetas:
             df_display,
             num_rows="dynamic",
             use_container_width=True,
-            height=360,
+            height=420,
             column_config={
                 "codigo": st.column_config.TextColumn("Código", help="Código único del inventario", width="small"),
                 "descripcion": st.column_config.TextColumn("Ingrediente", help="Descripción del producto", width="large"),
-                "cantidad_bruta": st.column_config.NumberColumn("Cantidad Bruta", format="%.3f", min_value=0.0),
+                "cantidad_bruta": st.column_config.NumberColumn("Cantidad", format="%.3f", min_value=0.0),
                 "unidad_medida": st.column_config.SelectboxColumn("Unidad", options=["kg", "l", "ud", "sobre", "botella", "lata", "paquete", "caja", "bandeja", "hoja"], width="small"),
                 "merma": st.column_config.NumberColumn("% Merma", format="%.2f %%", min_value=0.0, max_value=100.0),
-                "cantidad_neta": st.column_config.NumberColumn("Cantidad Neta", format="%.3f", min_value=0.0),
+                "cantidad_neta": None,
                 "precio_unidad": st.column_config.NumberColumn("Precio Unidad (€)", format="%.2f €", min_value=0.0),
-                "coste_total": st.column_config.NumberColumn("Coste Total (€)", format="%.2f €", min_value=0.0)
+                "coste_total": st.column_config.NumberColumn("Coste (€)", format="%.2f €", min_value=0.0)
             },
+            column_order=["descripcion", "cantidad_bruta", "unidad_medida", "merma", "precio_unidad", "coste_total", "codigo"],
             disabled=["cantidad_neta", "coste_total"],
             key="editor_receta_activa"
         )
@@ -3656,66 +3851,67 @@ with main_tab_recetas:
                 sugerencias = sugerir_ingredientes_similares(ing.get("descripcion", ""), inventario_df)
                 ingredientes_no_encontrados.append((idx, ing, sugerencias))
 
-        acciones_db_col1, acciones_db_col2, acciones_db_col3 = st.columns([1, 1, 1])
-        with acciones_db_col1:
-            if st.button("Actualizar BBDD con códigos existentes", use_container_width=True):
-                if not supabase_disponible:
-                    st.error("El inventario no está conectado correctamente.")
-                else:
-                    filas_validas = [
-                        preparar_fila_inventario_desde_ingrediente(ing)
-                        for ing in st.session_state['ingredientes']
-                        if codigo_ingrediente_valido(ing.get("codigo")) and str(ing.get("codigo", "")).strip().upper() in inventario_dict
-                    ]
-                    if filas_validas:
-                        try:
-                            for fila in filas_validas:
-                                supabase.table("inventario").upsert(fila).execute()
-                            st.session_state['db_trigger'] += 1
-                            st.success(f"{len(filas_validas)} ingredientes actualizados en el inventario.")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Error al actualizar el inventario: {e}")
+        with st.expander("Acciones secundarias de ingredientes", expanded=False):
+            acciones_db_col1, acciones_db_col2, acciones_db_col3 = st.columns([1, 1, 1])
+            with acciones_db_col1:
+                if st.button("Actualizar BBDD con códigos existentes", use_container_width=True):
+                    if not supabase_disponible:
+                        st.error("El inventario no está conectado correctamente.")
                     else:
-                        st.info("No hay ingredientes con código existente para actualizar.")
+                        filas_validas = [
+                            preparar_fila_inventario_desde_ingrediente(ing)
+                            for ing in st.session_state['ingredientes']
+                            if codigo_ingrediente_valido(ing.get("codigo")) and str(ing.get("codigo", "")).strip().upper() in inventario_dict
+                        ]
+                        if filas_validas:
+                            try:
+                                for fila in filas_validas:
+                                    supabase.table("inventario").upsert(fila).execute()
+                                st.session_state['db_trigger'] += 1
+                                st.success(f"{len(filas_validas)} ingredientes actualizados en el inventario.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error al actualizar el inventario: {e}")
+                        else:
+                            st.info("No hay ingredientes con código existente para actualizar.")
 
-        with acciones_db_col2:
-            if st.button("Crear nuevos en BBDD", use_container_width=True):
-                if not supabase_disponible:
-                    st.error("El inventario no está conectado correctamente.")
-                else:
-                    existentes = set(inventario_dict.keys())
-                    ingredientes_actualizados = [dict(ing) for ing in st.session_state['ingredientes']]
-                    filas_nuevas = []
-                    for idx, ing in enumerate(ingredientes_actualizados):
-                        codigo_actual = str(ing.get("codigo", "")).strip().upper()
-                        if not codigo_ingrediente_valido(codigo_actual) or codigo_actual not in inventario_dict:
-                            nuevo_codigo = codigo_actual if codigo_ingrediente_valido(codigo_actual) else generar_codigo_ingrediente_nuevo(ing.get("descripcion", ""), existentes)
-                            existentes.add(nuevo_codigo)
-                            ing["codigo"] = nuevo_codigo
-                            filas_nuevas.append(preparar_fila_inventario_desde_ingrediente(ing, codigo=nuevo_codigo))
-                    if filas_nuevas:
-                        try:
-                            for fila in filas_nuevas:
-                                supabase.table("inventario").upsert(fila).execute()
-                            st.session_state['ingredientes'] = ingredientes_actualizados
-                            st.session_state['db_trigger'] += 1
-                            marcar_receta_modificada_manualmente()
-                            st.success(f"{len(filas_nuevas)} ingredientes nuevos creados en el inventario.")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Error al crear ingredientes en el inventario: {e}")
+            with acciones_db_col2:
+                if st.button("Crear nuevos en BBDD", use_container_width=True):
+                    if not supabase_disponible:
+                        st.error("El inventario no está conectado correctamente.")
                     else:
-                        st.info("No hay ingredientes nuevos pendientes de crear.")
+                        existentes = set(inventario_dict.keys())
+                        ingredientes_actualizados = [dict(ing) for ing in st.session_state['ingredientes']]
+                        filas_nuevas = []
+                        for idx, ing in enumerate(ingredientes_actualizados):
+                            codigo_actual = str(ing.get("codigo", "")).strip().upper()
+                            if not codigo_ingrediente_valido(codigo_actual) or codigo_actual not in inventario_dict:
+                                nuevo_codigo = codigo_actual if codigo_ingrediente_valido(codigo_actual) else generar_codigo_ingrediente_nuevo(ing.get("descripcion", ""), existentes)
+                                existentes.add(nuevo_codigo)
+                                ing["codigo"] = nuevo_codigo
+                                filas_nuevas.append(preparar_fila_inventario_desde_ingrediente(ing, codigo=nuevo_codigo))
+                        if filas_nuevas:
+                            try:
+                                for fila in filas_nuevas:
+                                    supabase.table("inventario").upsert(fila).execute()
+                                st.session_state['ingredientes'] = ingredientes_actualizados
+                                st.session_state['db_trigger'] += 1
+                                marcar_receta_modificada_manualmente()
+                                st.success(f"{len(filas_nuevas)} ingredientes nuevos creados en el inventario.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error al crear ingredientes en el inventario: {e}")
+                        else:
+                            st.info("No hay ingredientes nuevos pendientes de crear.")
 
-        with acciones_db_col3:
-            if st.button("Limpiar toda la receta", use_container_width=True):
-                st.session_state['ingredientes'] = []
-                st.session_state['ingredientes_base_raciones'] = None
-                st.session_state['factor_raciones'] = 1.0
-                st.session_state['receta_id_cargada'] = None
-                st.session_state['codigo_receta_cargada'] = ""
-                st.rerun()
+            with acciones_db_col3:
+                if st.button("Limpiar toda la receta", use_container_width=True):
+                    st.session_state['ingredientes'] = []
+                    st.session_state['ingredientes_base_raciones'] = None
+                    st.session_state['factor_raciones'] = 1.0
+                    st.session_state['receta_id_cargada'] = None
+                    st.session_state['codigo_receta_cargada'] = ""
+                    st.rerun()
 
         if ingredientes_no_encontrados:
             with st.expander("🔎 Ingredientes no encontrados en BBDD y sugerencias", expanded=True):
@@ -4404,18 +4600,16 @@ with main_tab_facturas:
 
 
 with main_tab_recetas:
-    st.subheader("Costes y exportacion")
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        costes_indirectos_pct = st.number_input("Costes Indirectos (%)", min_value=0.0, key="costes_indirectos_pct")
-    with c2:
-        margen_beneficio_pct = st.number_input("Margen Beneficio (%)", min_value=0.0, max_value=99.9, key="margen_beneficio_pct")
-    with c3:
-        iva_pct = st.number_input("IVA Evento (%)", min_value=0.0, max_value=100.0, step=1.0, key="iva_pct")
+    with st.expander("Parámetros de coste y exportación", expanded=False):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            costes_indirectos_pct = st.number_input("Costes Indirectos (%)", min_value=0.0, key="costes_indirectos_pct")
+        with c2:
+            margen_beneficio_pct = st.number_input("Margen Beneficio (%)", min_value=0.0, max_value=99.9, key="margen_beneficio_pct")
+        with c3:
+            iva_pct = st.number_input("IVA Evento (%)", min_value=0.0, max_value=100.0, step=1.0, key="iva_pct")
 
     if st.session_state['ingredientes']:
-        st.subheader(f"📊 Costes: {nombre_plato}")
-        st.caption("Costes interpretados para 1 ración.")
         subtotal_ing = sum(float(ing.get('cantidad_bruta', 0.0)) * float(ing.get('precio_unidad', 0.0)) for ing in st.session_state['ingredientes'])
 
         ci_val = costes_indirectos_pct if costes_indirectos_pct is not None else 0.0
@@ -4433,13 +4627,12 @@ with main_tab_recetas:
         raciones_deseadas_metricas = 0.0 if pd.isna(raciones_deseadas_metricas) else float(raciones_deseadas_metricas)
         pvp_por_racion = pvp_final / raciones_deseadas_metricas if raciones_deseadas_metricas > 0 else 0.0
 
-        r1, r2 = st.columns(2)
+        r1, r2, r3, r4, r5 = st.columns(5)
         r1.metric("Materia Prima", f"{subtotal_ing:.2f} €")
         r2.metric("Costes Ind.", f"{costes_ind:.2f} €")
-        r3, r4 = st.columns(2)
         r3.metric("Coste 1 ración", f"{coste_total:.2f} €")
         r4.metric("PVP 1 ración", f"{pvp_final:.2f} €")
-        st.metric("PVP por ración", f"{pvp_por_racion:.2f} €")
+        r5.metric("PVP/ración", f"{pvp_por_racion:.2f} €")
 
         excel_virtual = generar_excel(
             nombre_plato,
@@ -4452,7 +4645,7 @@ with main_tab_recetas:
             st.session_state['factor_raciones']
         )
         st.download_button(
-            label=f"📥 DESCARGAR FICHA EXCEL",
+            label=f"Descargar ficha Excel",
             data=excel_virtual,
             file_name=f"Ficha_{nombre_plato.replace(' ', '_')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -4463,7 +4656,7 @@ with main_tab_recetas:
         st.info("Anade ingredientes para ver costes y exportar la ficha.")
 
 with main_tab_recetas:
-    st.subheader("Cargar receta guardada")
+    st.markdown("##### Recetas guardadas")
     mensaje_receta_cargada = st.session_state.pop("mensaje_receta_cargada", None)
     if mensaje_receta_cargada:
         st.success(mensaje_receta_cargada)
@@ -4511,7 +4704,7 @@ with main_tab_recetas:
                 if receta_pendiente_selector and str(receta_pendiente_selector) in opciones_recetas:
                     st.session_state["selector_receta_guardada"] = str(receta_pendiente_selector)
 
-                cargar_col1, cargar_col2 = st.columns([3, 1])
+                cargar_col1, cargar_col2 = st.columns([4, 1])
                 with cargar_col1:
                     receta_id_seleccionada = st.selectbox(
                         "Recetas guardadas",
@@ -4520,8 +4713,6 @@ with main_tab_recetas:
                         key="selector_receta_guardada"
                     )
                 with cargar_col2:
-                    st.write("")
-                    st.write("")
                     cargar_receta_btn = st.button("Cargar receta", use_container_width=True)
 
                 if cargar_receta_btn:
@@ -4586,8 +4777,7 @@ with main_tab_recetas:
         coste_total = 0.0
         pvp_neto = 0.0
         pvp_final = 0.0
-    st.divider()
-    st.subheader("Guardar receta")
+    st.markdown("##### Guardar")
     if not supabase_disponible:
         st.warning("El inventario no está disponible. No se puede guardar la receta ahora.")
     elif not obtener_user_id_actual():
@@ -4668,16 +4858,16 @@ with main_tab_recetas:
 
     with st.form("form_guardar_receta_nueva"):
         nombre_receta_guardar = st.text_input("Nombre de receta", value=st.session_state.get("receta_nombre", nombre_plato))
-        categoria_receta = st.text_input("Categoría", key="input_receta_categoria")
-        tipo_plato_receta = st.text_input("Tipo de plato", key="input_receta_tipo_plato")
+        categoria_receta = str(st.session_state.get("receta_categoria", "") or "")
+        tipo_plato_receta = str(st.session_state.get("receta_tipo_plato", "") or "")
         raciones_base_receta = float(st.session_state.get('receta_raciones_base', st.session_state.get('raciones_base', 1.0)))
-        st.text_input("Raciones base de nuevas recetas", value="1 ración", disabled=True)
         if raciones_base_receta != 1.0 and st.session_state.get("receta_id_cargada"):
             st.warning(
                 "La receta cargada conserva una base antigua distinta de 1. "
                 "No se normalizará automáticamente al actualizar."
             )
-        observaciones_receta = st.text_area("Descripción / observaciones", key="input_receta_observaciones", height=90)
+        with st.expander("Elaboración y observaciones", expanded=False):
+            observaciones_receta = st.text_area("Elaboración / observaciones", key="input_receta_observaciones", height=80)
 
         guardar_col, actualizar_col, duplicar_col = st.columns(3)
         with guardar_col:
@@ -4894,8 +5084,6 @@ with main_tab_menus:
                         key="selector_menu_guardado"
                     )
                 with cargar_menu_col2:
-                    st.write("")
-                    st.write("")
                     cargar_menu_btn = st.button("Cargar menú", use_container_width=True)
 
                 if cargar_menu_btn:
@@ -5021,8 +5209,6 @@ with main_tab_menus:
                 key="menu_seccion_receta"
             )
         with add_col4:
-            st.write("")
-            st.write("")
             anadir_receta_menu = st.button("Añadir receta al menú", use_container_width=True)
 
         if anadir_receta_menu:

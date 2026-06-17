@@ -6,9 +6,11 @@ La navegación principal de la app queda organizada en cuatro entornos de trabaj
 
 Página separada de la navegación principal y visible solo para usuarios con rol `admin` en `public.usuarios_app`.
 
-Agrupa el inventario común, la edición de usuarios internos, roles de acceso y el estado de configuración del entorno.
+Agrupa la gestión de todas las BBDD operativas de la app: inventario, recetas, ingredientes de receta, menús, recetas de menú, clientes, facturas, líneas de factura y usuarios internos.
 
 La tabla `public.usuarios_app` se crea con la migración `sql/017_usuarios_app_entorno.sql`. Los usuarios nuevos se registran como `usuario`; un administrador debe promocionarlos a `admin` cuando corresponda.
+
+La migración `sql/018_admin_rls_todas_bbdd.sql` añade políticas RLS para que los usuarios `admin` puedan consultar y modificar registros de todas las tablas, aunque pertenezcan a otros usuarios.
 
 ## Recetas
 
