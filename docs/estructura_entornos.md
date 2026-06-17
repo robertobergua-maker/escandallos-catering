@@ -1,10 +1,14 @@
 # Estructura de entornos
 
-La navegación principal de la app queda organizada en cinco entornos claros:
+La navegación principal de la app queda organizada en cuatro entornos de trabajo y una página de administración restringida:
 
-## Ingredientes
+## Administración
 
-Agrupa el inventario, la búsqueda de ingredientes, la edición de datos del ingrediente y las altas o actualizaciones de ingredientes cuando ya existen en el inventario.
+Página separada de la navegación principal y visible solo para usuarios con rol `admin` en `public.usuarios_app`.
+
+Agrupa el inventario común, la edición de usuarios internos, roles de acceso y el estado de configuración del entorno.
+
+La tabla `public.usuarios_app` se crea con la migración `sql/017_usuarios_app_entorno.sql`. Los usuarios nuevos se registran como `usuario`; un administrador debe promocionarlos a `admin` cuando corresponda.
 
 ## Recetas
 

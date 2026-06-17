@@ -88,6 +88,7 @@ def login_supabase(email, password):
         st.session_state["user_id"] = str(user_id)
         st.session_state["user_email"] = str(user_email or email_limpio)
         st.session_state["access_token"] = access_token
+        asegurar_usuario_app_supabase()
         return True, "Sesión iniciada correctamente."
     except Exception as e:
         return False, f"No se pudo iniciar sesión: {e}"
@@ -127,6 +128,7 @@ def registrar_usuario_supabase(email, password):
             st.session_state["user_id"] = str(user_id)
             st.session_state["user_email"] = str(user_email or email_limpio)
             st.session_state["access_token"] = access_token
+            asegurar_usuario_app_supabase()
             return True, "Cuenta creada e iniciada correctamente"
 
         return True, "Cuenta creada. Revisa tu correo para confirmar el registro antes de iniciar sesión."
@@ -191,6 +193,9 @@ def logout_supabase():
     st.session_state["user_id"] = None
     st.session_state["user_email"] = None
     st.session_state["access_token"] = None
+    st.session_state["usuario_app"] = None
+    st.session_state["usuario_app_error"] = None
+    st.session_state["usuario_app_user_id"] = None
     return True, "Sesión cerrada correctamente."
 
 
@@ -212,6 +217,128 @@ def obtener_usuario_actual():
 def obtener_user_id_actual():
     user_id = st.session_state.get("user_id")
     return str(user_id).strip() if user_id else None
+
+
+def normalizar_rol_usuario(rol):
+    rol_limpio = str(rol or "").strip().lower()
+    return rol_limpio if rol_limpio in {"usuario", "admin"} else "usuario"
+
+
+def cargar_usuario_app_supabase(user_id=None):
+    """
+    Lee el perfil interno de la app para resolver permisos de administracion.
+    """
+    user_id_limpio = str(user_id or obtener_user_id_actual() or "").strip()
+    if not user_id_limpio:
+        return False, "No hay usuario autenticado.", None
+    if not supabase_disponible or supabase is None:
+        return False, "El inventario no está conectado correctamente.", None
+
+    try:
+        respuesta = (
+            supabase
+            .table("usuarios_app")
+            .select("user_id,email,nombre,rol,activo,created_at,updated_at")
+            .eq("user_id", user_id_limpio)
+            .limit(1)
+            .execute()
+        )
+        filas = respuesta.data or []
+        if not filas:
+            return False, "El usuario no tiene perfil interno en usuarios_app.", None
+        perfil = dict(filas[0])
+        perfil["rol"] = normalizar_rol_usuario(perfil.get("rol"))
+        perfil["activo"] = bool(perfil.get("activo", True))
+        return True, "Perfil cargado.", perfil
+    except Exception as e:
+        return False, f"No se pudo leer usuarios_app: {e}", None
+
+
+def asegurar_usuario_app_supabase():
+    """
+    Crea el perfil interno del usuario conectado si todavia no existe.
+    """
+    usuario = obtener_usuario_actual()
+    if not usuario:
+        return False, "No hay usuario autenticado.", None
+    if not supabase_disponible or supabase is None:
+        return False, "El inventario no está conectado correctamente.", None
+
+    ok, mensaje, perfil = cargar_usuario_app_supabase(usuario.get("id"))
+    if ok and perfil:
+        st.session_state["usuario_app"] = perfil
+        st.session_state["usuario_app_error"] = None
+        st.session_state["usuario_app_user_id"] = usuario.get("id")
+        return True, mensaje, perfil
+
+    mensaje_lower = str(mensaje).lower()
+    tabla_no_existe = "does not exist" in mensaje_lower or "schema cache" in mensaje_lower
+    if not tabla_no_existe:
+        try:
+            datos_usuario = {
+                "user_id": usuario.get("id"),
+                "email": usuario.get("email") or "",
+                "rol": "usuario",
+                "activo": True,
+            }
+            supabase.table("usuarios_app").insert(datos_usuario).execute()
+            ok_creado, mensaje_creado, perfil_creado = cargar_usuario_app_supabase(usuario.get("id"))
+            if ok_creado and perfil_creado:
+                st.session_state["usuario_app"] = perfil_creado
+                st.session_state["usuario_app_error"] = None
+                st.session_state["usuario_app_user_id"] = usuario.get("id")
+                return True, "Perfil interno creado.", perfil_creado
+        except Exception as e:
+            mensaje = f"No se pudo crear el perfil interno: {e}"
+
+    st.session_state["usuario_app"] = None
+    st.session_state["usuario_app_error"] = mensaje
+    st.session_state["usuario_app_user_id"] = usuario.get("id")
+    return False, mensaje, None
+
+
+def obtener_perfil_usuario_app():
+    usuario = obtener_usuario_actual()
+    if not usuario:
+        return None
+    if st.session_state.get("usuario_app_user_id") != usuario.get("id"):
+        asegurar_usuario_app_supabase()
+    return st.session_state.get("usuario_app")
+
+
+def usuario_actual_es_admin():
+    perfil = obtener_perfil_usuario_app()
+    if not perfil:
+        return False
+    return bool(perfil.get("activo", True)) and normalizar_rol_usuario(perfil.get("rol")) == "admin"
+
+
+def cargar_usuarios_app_supabase():
+    if not supabase_disponible or supabase is None:
+        return False, "El inventario no está conectado correctamente.", pd.DataFrame()
+    if not usuario_actual_es_admin():
+        return False, "Solo los administradores pueden consultar usuarios.", pd.DataFrame()
+
+    columnas = ["user_id", "email", "nombre", "rol", "activo", "created_at", "updated_at"]
+    try:
+        respuesta = (
+            supabase
+            .table("usuarios_app")
+            .select(",".join(columnas))
+            .order("email")
+            .execute()
+        )
+        df = pd.DataFrame(respuesta.data or [])
+        if df.empty:
+            return True, "No hay usuarios configurados.", pd.DataFrame(columns=columnas)
+        for col in columnas:
+            if col not in df.columns:
+                df[col] = ""
+        df["rol"] = df["rol"].apply(normalizar_rol_usuario)
+        df["activo"] = df["activo"].fillna(True).astype(bool)
+        return True, "Usuarios cargados.", df[columnas].copy()
+    except Exception as e:
+        return False, f"No se pudo cargar usuarios_app: {e}", pd.DataFrame(columns=columnas)
 
 
 def valor_user_id_receta(receta):
@@ -342,6 +469,12 @@ if 'user_email' not in st.session_state:
     st.session_state['user_email'] = None
 if 'access_token' not in st.session_state:
     st.session_state['access_token'] = None
+if 'usuario_app' not in st.session_state:
+    st.session_state['usuario_app'] = None
+if 'usuario_app_error' not in st.session_state:
+    st.session_state['usuario_app_error'] = None
+if 'usuario_app_user_id' not in st.session_state:
+    st.session_state['usuario_app_user_id'] = None
 
 if 'nombre_plato' not in st.session_state:
     st.session_state['nombre_plato'] = st.session_state['receta_nombre']
@@ -3005,6 +3138,14 @@ with st.sidebar:
 
     if usuario_actual:
         st.success(f"Sesión iniciada: {usuario_actual.get('email') or 'usuario'}")
+        perfil_actual = obtener_perfil_usuario_app()
+        if perfil_actual:
+            st.caption(f"Rol: {perfil_actual.get('rol', 'usuario')}")
+        elif st.session_state.get("usuario_app_error"):
+            st.caption(st.session_state.get("usuario_app_error"))
+        if st.button("Recargar permisos", use_container_width=True):
+            asegurar_usuario_app_supabase()
+            st.rerun()
         if st.button("Cerrar sesión", use_container_width=True):
             ok_logout, mensaje_logout = logout_supabase()
             if ok_logout:
@@ -3064,7 +3205,7 @@ with st.sidebar:
                     st.error(mensaje_registro)
 
     st.divider()
-    st.info("💡 Consejo: Al realizar modificaciones en la pestaña del catálogo, haz clic en el botón 'Guardar cambios en inventario' para persistirlos en la nube de forma permanente.")
+    st.info("💡 Consejo: el inventario común se gestiona desde Administración, disponible solo para usuarios admin.")
 
     ingredientes_vinculados = [
         (idx, ing, str(ing.get("codigo", "")).strip().upper())
@@ -3151,10 +3292,185 @@ with st.sidebar:
 
 
 
+def render_pagina_administracion():
+    st.subheader("Administración del entorno")
+    st.caption("Gestión restringida de inventario, usuarios internos y estado de configuración.")
+
+    if not usuario_actual_es_admin():
+        st.warning("Esta página solo está disponible para usuarios administradores.")
+        error_perfil = st.session_state.get("usuario_app_error")
+        if error_perfil:
+            st.caption(error_perfil)
+        return
+
+    admin_tab_inventario, admin_tab_usuarios, admin_tab_estado = st.tabs([
+        "BBDD inventario",
+        "Usuarios",
+        "Configuración"
+    ])
+
+    with admin_tab_inventario:
+        st.subheader("Inventario de ingredientes")
+        st.markdown("Busca, añade, modifica o elimina productos del inventario común en la nube.")
+
+        if not inventario_df.empty:
+            busqueda = st.text_input("Buscar ingrediente por Código, Descripción o Familia:")
+            df_filtrado = inventario_df.copy()
+
+            if busqueda:
+                df_filtrado = df_filtrado[
+                    df_filtrado["codigo"].str.contains(busqueda, case=False, na=False) |
+                    df_filtrado["descripcion"].str.contains(busqueda, case=False, na=False) |
+                    df_filtrado["familia"].str.contains(busqueda, case=False, na=False)
+                ]
+
+            st.data_editor(
+                df_filtrado,
+                num_rows="dynamic",
+                use_container_width=True,
+                column_config={
+                    "codigo": st.column_config.TextColumn("Código", help="ID único del inventario", required=True),
+                    "familia": st.column_config.TextColumn("Familia / Categoría", help="Ej: CARNES, PESCADOS..."),
+                    "descripcion": st.column_config.TextColumn("Descripción / Ingrediente", required=True),
+                    "unidad_medida": st.column_config.TextColumn("Unidad Base", help="kg, l, ud, sobre..."),
+                    "merma": st.column_config.NumberColumn("% Merma Estándar", format="%.2f %%", min_value=0.0, max_value=100.0),
+                    "precio_unidad": st.column_config.NumberColumn("Precio Proveedor (€)", format="%.2f €", min_value=0.0)
+                },
+                key="admin_db_editor_component"
+            )
+
+            if st.button("Guardar cambios en inventario", type="primary"):
+                editor_state = st.session_state.get("admin_db_editor_component")
+                if editor_state and supabase_disponible:
+                    with st.spinner("Sincronizando catálogo con inventario..."):
+                        try:
+                            for row_idx_str, edits in editor_state.get("edited_rows", {}).items():
+                                row_idx = int(row_idx_str)
+                                fila_original = df_filtrado.iloc[row_idx]
+                                original_code = fila_original["codigo"]
+
+                                datos_actualizados = {
+                                    "codigo": original_code,
+                                    "familia": edits.get("familia", fila_original.get("familia", "VARIOS")),
+                                    "descripcion": edits.get("descripcion", fila_original.get("descripcion", "")),
+                                    "unidad_medida": edits.get("unidad_medida", fila_original.get("unidad_medida", "kg")),
+                                    "merma": float(edits.get("merma", fila_original.get("merma", 0.0))),
+                                    "precio_unidad": float(edits.get("precio_unidad", fila_original.get("precio_unidad", 0.0)))
+                                }
+                                supabase.table("inventario").upsert(datos_actualizados).execute()
+
+                            for nueva_fila in editor_state.get("added_rows", []):
+                                if "codigo" in nueva_fila and nueva_fila["codigo"]:
+                                    datos_nuevos = {
+                                        "codigo": str(nueva_fila["codigo"]).strip().upper(),
+                                        "familia": nueva_fila.get("familia", "VARIOS"),
+                                        "descripcion": nueva_fila.get("descripcion", "Ingrediente Nuevo"),
+                                        "unidad_medida": nueva_fila.get("unidad_medida", "kg"),
+                                        "merma": float(nueva_fila.get("merma", 0.0)),
+                                        "precio_unidad": float(nueva_fila.get("precio_unidad", 0.0))
+                                    }
+                                    supabase.table("inventario").upsert(datos_nuevos).execute()
+
+                            for row_idx in editor_state.get("deleted_rows", []):
+                                fila_original = df_filtrado.iloc[row_idx]
+                                original_code = fila_original["codigo"]
+                                supabase.table("inventario").delete().eq("codigo", original_code).execute()
+
+                            st.success("Inventario actualizado con éxito.")
+                            st.session_state['db_trigger'] += 1
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error al sincronizar datos con el inventario: {e}")
+                elif not supabase_disponible:
+                    st.error("El inventario no está conectado correctamente.")
+        else:
+            st.info("Tu tabla de inventario está vacía o cargando datos.")
+
+    with admin_tab_usuarios:
+        st.subheader("Usuarios de la app")
+        ok_usuarios, mensaje_usuarios, usuarios_df = cargar_usuarios_app_supabase()
+        if not ok_usuarios:
+            st.warning(mensaje_usuarios)
+        elif usuarios_df.empty:
+            st.info("No hay usuarios internos configurados todavía.")
+        else:
+            st.data_editor(
+                usuarios_df,
+                num_rows="fixed",
+                use_container_width=True,
+                column_config={
+                    "user_id": st.column_config.TextColumn("User ID"),
+                    "email": st.column_config.TextColumn("Email"),
+                    "nombre": st.column_config.TextColumn("Nombre"),
+                    "rol": st.column_config.SelectboxColumn("Rol", options=["usuario", "admin"], required=True),
+                    "activo": st.column_config.CheckboxColumn("Activo"),
+                    "created_at": st.column_config.TextColumn("Creado"),
+                    "updated_at": st.column_config.TextColumn("Actualizado"),
+                },
+                disabled=["user_id", "email", "created_at", "updated_at"],
+                key="admin_usuarios_editor"
+            )
+            if st.button("Guardar cambios de usuarios", type="primary"):
+                editor_state = st.session_state.get("admin_usuarios_editor")
+                if editor_state:
+                    try:
+                        for row_idx_str, edits in editor_state.get("edited_rows", {}).items():
+                            row_idx = int(row_idx_str)
+                            fila_original = usuarios_df.iloc[row_idx]
+                            user_id_objetivo = str(fila_original.get("user_id", "")).strip()
+                            if not user_id_objetivo:
+                                continue
+                            datos_actualizados = {
+                                "nombre": edits.get("nombre", fila_original.get("nombre", "")),
+                                "rol": normalizar_rol_usuario(edits.get("rol", fila_original.get("rol", "usuario"))),
+                                "activo": bool(edits.get("activo", fila_original.get("activo", True))),
+                            }
+                            supabase.table("usuarios_app").update(datos_actualizados).eq("user_id", user_id_objetivo).execute()
+                        st.success("Usuarios actualizados correctamente.")
+                        asegurar_usuario_app_supabase()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"No se pudieron guardar los usuarios: {e}")
+
+    with admin_tab_estado:
+        st.subheader("Configuración y estado")
+        estado_col1, estado_col2, estado_col3 = st.columns(3)
+        with estado_col1:
+            st.metric("Inventario", "Conectado" if supabase_disponible else "Desconectado")
+        with estado_col2:
+            st.metric("CIA", "Activa" if api_key else "Desconectada")
+        with estado_col3:
+            st.metric("Ingredientes en BBDD", len(inventario_df) if not inventario_df.empty else 0)
+
+        perfil = obtener_perfil_usuario_app()
+        if perfil:
+            st.write(f"**Usuario actual:** {perfil.get('email', '')}")
+            st.write(f"**Rol:** {perfil.get('rol', 'usuario')}")
+            st.write(f"**Activo:** {'sí' if perfil.get('activo', True) else 'no'}")
+
+        st.markdown("#### Migraciones necesarias")
+        st.code("sql/017_usuarios_app_entorno.sql", language="text")
+        st.caption("Después de ejecutar la migración, promociona al primer administrador desde Supabase SQL.")
+
+
 st.divider()
 
-main_tab_ingredientes, main_tab_recetas, main_tab_menus, main_tab_clientes, main_tab_facturas = st.tabs([
-    "Ingredientes",
+pagina_actual = "App"
+if usuario_actual_es_admin():
+    with st.sidebar:
+        st.divider()
+        pagina_actual = st.radio(
+            "Navegación",
+            ["App", "Administración"],
+            horizontal=False,
+            key="pagina_principal"
+        )
+
+if pagina_actual == "Administración":
+    render_pagina_administracion()
+    st.stop()
+
+main_tab_recetas, main_tab_menus, main_tab_clientes, main_tab_facturas = st.tabs([
     "Recetas",
     "Menús",
     "Clientes",
@@ -4971,86 +5287,3 @@ with main_tab_menus:
             st.success("Menú actual limpiado.")
             st.rerun()
 
-
-with main_tab_ingredientes:
-    st.subheader("Inventario de ingredientes")
-    st.markdown("Busca, añade, modifica o elimina productos de tu inventario en la nube. **Los cambios realizados aquí se sincronizarán directamente.**")
-
-    if not inventario_df.empty:
-        # Buscador ágil en la base de datos para no colapsar el rendimiento de la web
-        busqueda = st.text_input("🔍 Buscar ingrediente por Código, Descripción o Familia:")
-        df_filtrado = inventario_df.copy()
-
-        if busqueda:
-            df_filtrado = df_filtrado[
-                df_filtrado["codigo"].str.contains(busqueda, case=False, na=False) |
-                df_filtrado["descripcion"].str.contains(busqueda, case=False, na=False) |
-                df_filtrado["familia"].str.contains(busqueda, case=False, na=False)
-            ]
-
-        # Grid editable conectado al catálogo
-        catalogo_editado = st.data_editor(
-            df_filtrado,
-            num_rows="dynamic",
-            use_container_width=True,
-            column_config={
-                "codigo": st.column_config.TextColumn("Código", help="ID único del inventario", required=True),
-                "familia": st.column_config.TextColumn("Familia / Categoría", help="Ej: CARNES, PESCADOS..."),
-                "descripcion": st.column_config.TextColumn("Descripción / Ingrediente", required=True),
-                "unidad_medida": st.column_config.TextColumn("Unidad Base", help="kg, l, ud, sobre..."),
-                "merma": st.column_config.NumberColumn("% Merma Estándar", format="%.2f %%", min_value=0.0, max_value=100.0),
-                "precio_unidad": st.column_config.NumberColumn("Precio Proveedor (€)", format="%.2f €", min_value=0.0)
-            },
-            key="db_editor_component"
-        )
-
-        # Guardar cambios aplicados en el editor interactivo directo al inventario
-        if st.button("💾 Guardar cambios en inventario", type="primary"):
-            editor_state = st.session_state.get("db_editor_component")
-            if editor_state and supabase_disponible:
-                with st.spinner("Sincronizando catálogo con inventario..."):
-                    try:
-                        # 1. Procesar modificaciones de filas existentes
-                        for row_idx_str, edits in editor_state.get("edited_rows", {}).items():
-                            row_idx = int(row_idx_str)
-                            fila_original = df_filtrado.iloc[row_idx]
-                            original_code = fila_original["codigo"]
-
-                            datos_actualizados = {
-                                "codigo": original_code,
-                                "familia": edits.get("familia", fila_original.get("familia", "VARIOS")),
-                                "descripcion": edits.get("descripcion", fila_original.get("descripcion", "")),
-                                "unidad_medida": edits.get("unidad_medida", fila_original.get("unidad_medida", "kg")),
-                                "merma": float(edits.get("merma", fila_original.get("merma", 0.0))),
-                                "precio_unidad": float(edits.get("precio_unidad", fila_original.get("precio_unidad", 0.0)))
-                            }
-                            supabase.table("inventario").upsert(datos_actualizados).execute()
-
-                        # 2. Procesar inserciones de ingredientes nuevos
-                        for nueva_fila in editor_state.get("added_rows", []):
-                            if "codigo" in nueva_fila and nueva_fila["codigo"]:
-                                datos_nuevos = {
-                                    "codigo": str(nueva_fila["codigo"]).strip().upper(),
-                                    "familia": nueva_fila.get("familia", "VARIOS"),
-                                    "descripcion": nueva_fila.get("descripcion", "Ingrediente Nuevo"),
-                                    "unidad_medida": nueva_fila.get("unidad_medida", "kg"),
-                                    "merma": float(nueva_fila.get("merma", 0.0)),
-                                    "precio_unidad": float(nueva_fila.get("precio_unidad", 0.0))
-                                }
-                                supabase.table("inventario").upsert(datos_nuevos).execute()
-
-                        # 3. Procesar eliminaciones de ingredientes
-                        for row_idx in editor_state.get("deleted_rows", []):
-                            fila_original = df_filtrado.iloc[row_idx]
-                            original_code = fila_original["codigo"]
-                            supabase.table("inventario").delete().eq("codigo", original_code).execute()
-
-                        st.success("¡Inventario actualizado con éxito! 🚀")
-                        st.session_state['db_trigger'] += 1  # Forzar actualización de caché
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error al sincronizar datos con el inventario: {e}")
-            elif not supabase_disponible:
-                st.error("❌ El inventario no está conectado correctamente.")
-    else:
-        st.info("💡 Tu tabla de inventario está vacía o cargando datos...")
