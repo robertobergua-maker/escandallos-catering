@@ -49,6 +49,7 @@ if supabase_disponible:
 
 BASE_DIR = Path(__file__).resolve().parent
 LOGO_SAMIRARTE_PATH = BASE_DIR / "assets" / "logo_samirarte.png"
+SESSION_FILE_PATH = BASE_DIR / ".supabase_session.json"
 
 
 def logo_samirarte_existe():
@@ -198,13 +199,8 @@ def logout_supabase():
         except Exception:
             pass
 
-    st.session_state["user_id"] = None
-    st.session_state["user_email"] = None
-    st.session_state["access_token"] = None
-    st.session_state["refresh_token"] = None
-    st.session_state["usuario_app"] = None
-    st.session_state["usuario_app_error"] = None
-    st.session_state["usuario_app_user_id"] = None
+    _limpiar_sesion_autenticacion()
+    _borrar_sesion_local()
     return True, "Sesión cerrada correctamente."
 
 
@@ -223,6 +219,58 @@ def obtener_usuario_actual():
     }
 
 
+def _leer_sesion_local():
+    if not SESSION_FILE_PATH.exists():
+        return None
+    try:
+        contenido = SESSION_FILE_PATH.read_text(encoding="utf-8")
+        datos = json.loads(contenido)
+        if not isinstance(datos, dict):
+            return None
+        return datos
+    except Exception:
+        return None
+
+
+def _guardar_sesion_local(datos):
+    try:
+        SESSION_FILE_PATH.write_text(json.dumps(datos), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _borrar_sesion_local():
+    try:
+        if SESSION_FILE_PATH.exists():
+            SESSION_FILE_PATH.unlink()
+    except Exception:
+        pass
+
+
+def _limpiar_sesion_autenticacion():
+    st.session_state["user_id"] = None
+    st.session_state["user_email"] = None
+    st.session_state["access_token"] = None
+    st.session_state["refresh_token"] = None
+    st.session_state["usuario_app"] = None
+    st.session_state["usuario_app_error"] = None
+    st.session_state["usuario_app_user_id"] = None
+
+
+def _cargar_sesion_local_en_session_state():
+    datos = _leer_sesion_local()
+    if not datos or not isinstance(datos, dict):
+        return False
+    user_id = datos.get("user_id")
+    if not user_id:
+        return False
+    st.session_state["user_id"] = str(user_id)
+    st.session_state["user_email"] = str(datos.get("user_email", ""))
+    st.session_state["access_token"] = datos.get("access_token")
+    st.session_state["refresh_token"] = datos.get("refresh_token")
+    return True
+
+
 def _guardar_sesion_supabase(usuario, sesion):
     if usuario is None or sesion is None:
         return
@@ -235,6 +283,12 @@ def _guardar_sesion_supabase(usuario, sesion):
         st.session_state["user_email"] = str(user_email or "")
         st.session_state["access_token"] = access_token
         st.session_state["refresh_token"] = refresh_token
+        _guardar_sesion_local({
+            "user_id": str(user_id),
+            "user_email": str(user_email or ""),
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+        })
 
 
 def restaurar_sesion_supabase():
@@ -244,6 +298,9 @@ def restaurar_sesion_supabase():
     if obtener_usuario_actual():
         return True
     if not supabase_disponible or supabase is None:
+        return False
+
+    if not _cargar_sesion_local_en_session_state():
         return False
 
     refresh_token = st.session_state.get("refresh_token")
@@ -526,6 +583,9 @@ if 'usuario_app_error' not in st.session_state:
     st.session_state['usuario_app_error'] = None
 if 'usuario_app_user_id' not in st.session_state:
     st.session_state['usuario_app_user_id'] = None
+
+# Restaurar sesión guardada antes de renderizar la UI.
+restaurar_sesion_supabase()
 
 if 'nombre_plato' not in st.session_state:
     st.session_state['nombre_plato'] = st.session_state['receta_nombre']
