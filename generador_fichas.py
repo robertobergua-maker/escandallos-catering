@@ -13,6 +13,13 @@ from pathlib import Path
 from difflib import SequenceMatcher
 from openai import OpenAI
 from supabase import create_client, Client
+from calculos_jerarquia import (
+    calcular_coste_factura,
+    calcular_coste_menu,
+    calcular_coste_por_racion,
+    calcular_coste_presupuesto,
+    calcular_coste_receta,
+)
 
 # Configuración de página obligatoria al inicio de Streamlit
 st.set_page_config(
@@ -523,12 +530,12 @@ if 'menu_id' not in st.session_state:
     st.session_state['menu_id'] = None
 if 'sincronizar_campos_menu' not in st.session_state:
     st.session_state['sincronizar_campos_menu'] = False
-if 'menu_comensales_raciones_sync' not in st.session_state:
-    st.session_state['menu_comensales_raciones_sync'] = None
 if 'factura_lineas_actual' not in st.session_state:
     st.session_state['factura_lineas_actual'] = []
 if 'factura_id_en_edicion' not in st.session_state:
     st.session_state['factura_id_en_edicion'] = None
+if 'factura_presupuesto_origen_id' not in st.session_state:
+    st.session_state['factura_presupuesto_origen_id'] = None
 
 # =============================================================================
 # 📥 FUNCIÓN CACHÉ PARA CARGAR INVENTARIO
@@ -870,6 +877,30 @@ FACTURA_LINEAS_COLUMNAS = [
     "iva_linea", "total_linea", "orden", "created_at"
 ]
 
+FACTURAS_COLUMNAS_JERARQUIA = FACTURAS_COLUMNAS + [
+    "presupuesto_id", "coste_total"
+]
+
+PRESUPUESTOS_COLUMNAS = [
+    "id", "user_id", "cliente_id", "numero_presupuesto", "estado",
+    "fecha_emision", "fecha_vencimiento", "concepto", "coste_total",
+    "precio_total", "notas", "created_at", "updated_at"
+]
+
+PRESUPUESTO_MENUS_COLUMNAS = [
+    "id", "presupuesto_id", "menu_id", "menu_nombre_snapshot",
+    "cantidad_menu", "coste_total_menu", "coste_linea_menu_presupuesto",
+    "precio_total_menu", "precio_linea_menu_presupuesto",
+    "observaciones", "orden", "created_at"
+]
+
+FACTURA_MENUS_COLUMNAS = [
+    "id", "factura_id", "menu_id", "menu_nombre_snapshot",
+    "cantidad_menu", "coste_total_menu", "coste_linea_menu_factura",
+    "precio_total_menu", "precio_linea_menu_factura",
+    "observaciones", "orden", "created_at"
+]
+
 MENSAJE_CLIENTES_NO_ACTIVADO = (
     "El módulo de clientes todavía no está activado en Inventario. "
     "Ejecuta primero el SQL de facturación."
@@ -1008,6 +1039,15 @@ def calcular_datos_ingrediente_receta(ing, orden=0):
     }
 
 
+def validar_receta_para_guardar(ingredientes, raciones_base_receta):
+    try:
+        coste_ingredientes = calcular_coste_receta(ingredientes)
+        calcular_coste_por_racion(coste_ingredientes, raciones_base_receta)
+    except ValueError as exc:
+        return False, str(exc)
+    return True, ""
+
+
 @st.cache_data(ttl=600)
 def cargar_recetas_supabase(user_id_actual=None):
     """
@@ -1100,6 +1140,12 @@ def guardar_receta_nueva_supabase(datos_receta, ingredientes):
     """
     if not supabase_disponible or supabase is None:
         return False, "El inventario no está conectado correctamente.", None
+    receta_valida, mensaje_validacion = validar_receta_para_guardar(
+        ingredientes,
+        datos_receta.get("raciones_base"),
+    )
+    if not receta_valida:
+        return False, mensaje_validacion, None
 
     try:
         user_id_actual = obtener_user_id_actual()
@@ -1147,6 +1193,12 @@ def actualizar_receta_supabase(receta_id, datos_receta, ingredientes):
         return False, "No hay una receta cargada para actualizar."
     if not supabase_disponible or supabase is None:
         return False, "El inventario no está conectado correctamente."
+    receta_valida, mensaje_validacion = validar_receta_para_guardar(
+        ingredientes,
+        datos_receta.get("raciones_base"),
+    )
+    if not receta_valida:
+        return False, mensaje_validacion
 
     try:
         cabecera_actual, _ = cargar_receta_detalle_supabase(receta_id)
@@ -1401,17 +1453,34 @@ def cargar_menu_detalle_supabase(menu_id):
         if cabecera and not menu_es_propio_o_antiguo(cabecera):
             return {}, lineas_vacias
 
-        respuesta_lineas = (
-            supabase
-            .table("menu_recetas")
-            .select(",".join(MENU_RECETAS_COLUMNAS))
-            .eq("menu_id", menu_id)
-            .order("orden")
-            .execute()
+        columnas_menu_recetas_nuevas = (
+            "id,menu_id,receta_id,raciones_receta_en_menu,orden,"
+            "seccion,observaciones,created_at"
         )
+        try:
+            respuesta_lineas = (
+                supabase
+                .table("menu_recetas")
+                .select(columnas_menu_recetas_nuevas)
+                .eq("menu_id", menu_id)
+                .order("orden")
+                .execute()
+            )
+        except Exception:
+            respuesta_lineas = (
+                supabase
+                .table("menu_recetas")
+                .select(",".join(MENU_RECETAS_COLUMNAS))
+                .eq("menu_id", menu_id)
+                .order("orden")
+                .execute()
+            )
         lineas_df = pd.DataFrame(respuesta_lineas.data or [])
         if lineas_df.empty:
             return cabecera, lineas_vacias
+
+        if "raciones_receta_en_menu" in lineas_df.columns:
+            lineas_df["raciones"] = lineas_df["raciones_receta_en_menu"]
 
         for col in MENU_RECETAS_COLUMNAS:
             if col not in lineas_df.columns:
@@ -1627,7 +1696,13 @@ def eliminar_cliente_supabase(cliente_id):
 def error_tabla_facturacion_no_activada(error):
     mensaje = str(error).lower()
     return (
-        ("facturas" in mensaje or "factura_lineas" in mensaje)
+        (
+            "facturas" in mensaje
+            or "factura_lineas" in mensaje
+            or "presupuestos" in mensaje
+            or "presupuesto_menus" in mensaje
+            or "factura_menus" in mensaje
+        )
         and (
             "does not exist" in mensaje
             or "schema cache" in mensaje
@@ -1676,7 +1751,18 @@ def calcular_linea_factura(linea):
         linea_calculada["origen_tipo"] = origen_tipo
     if linea.get("origen_id") is not None and str(linea.get("origen_id") or "").strip():
         linea_calculada["origen_id"] = linea.get("origen_id")
-    for campo_auxiliar in ["origen_receta_tipo", "origen_receta_id", "menu_origen_id"]:
+    for campo_auxiliar in [
+        "origen_receta_tipo",
+        "origen_receta_id",
+        "menu_origen_id",
+        "menu_nombre_snapshot",
+        "cantidad_menu",
+        "coste_total_menu",
+        "coste_linea_menu_documento",
+        "precio_total_menu",
+        "precio_linea_menu_documento",
+        "observaciones",
+    ]:
         if linea.get(campo_auxiliar) is not None and str(linea.get(campo_auxiliar) or "").strip():
             linea_calculada[campo_auxiliar] = linea.get(campo_auxiliar)
     return linea_calculada
@@ -1692,6 +1778,62 @@ def obtener_menu_id_desde_lineas_factura(lineas):
         if menu_origen_id:
             return menu_origen_id
     return None
+
+
+def extraer_lineas_menu_documento(lineas):
+    lineas_menu = []
+    for indice, linea in enumerate(lineas or [], start=1):
+        menu_id = str(
+            linea.get("menu_origen_id", linea.get("origen_id", "")) or ""
+        ).strip()
+        if str(linea.get("origen_tipo", "") or "").strip() != "menu" or not menu_id:
+            continue
+        cantidad_menu = numero_seguro(
+            linea.get("cantidad_menu", linea.get("cantidad", 0.0)),
+            0.0,
+        )
+        coste_total_menu = numero_seguro(linea.get("coste_total_menu", 0.0), 0.0)
+        if cantidad_menu <= 0:
+            raise ValueError(f"La cantidad del menú {indice} debe ser mayor que 0.")
+        if coste_total_menu < 0:
+            raise ValueError(f"El coste del menú {indice} no puede ser negativo.")
+        precio_total_menu = linea.get("precio_total_menu")
+        if precio_total_menu is None:
+            precio_total_menu = linea.get("precio_unitario")
+        precio_total_menu = numero_seguro(precio_total_menu, 0.0)
+        if precio_total_menu < 0:
+            raise ValueError(f"El precio del menú {indice} no puede ser negativo.")
+        lineas_menu.append({
+            "menu_id": menu_id,
+            "menu_nombre_snapshot": str(
+                linea.get("menu_nombre_snapshot", linea.get("descripcion", "")) or ""
+            ).strip(),
+            "cantidad_menu": cantidad_menu,
+            "coste_total_menu": coste_total_menu,
+            "coste_linea_menu_documento": coste_total_menu * cantidad_menu,
+            "precio_total_menu": precio_total_menu,
+            "precio_linea_menu_documento": precio_total_menu * cantidad_menu,
+            "observaciones": str(linea.get("observaciones", "") or "").strip() or None,
+            "orden": indice,
+        })
+    return lineas_menu
+
+
+def validar_documento_con_menus(factura, lineas):
+    if not str(factura.get("cliente_id", "") or "").strip():
+        return False, "Selecciona un cliente antes de guardar el documento."
+    try:
+        lineas_menu = extraer_lineas_menu_documento(lineas)
+        if not lineas_menu:
+            return False, "Añade al menos un menú antes de guardar el documento."
+        tipo = str(factura.get("tipo_documento", "factura") or "factura")
+        if tipo == "presupuesto":
+            calcular_coste_presupuesto(lineas_menu)
+        else:
+            calcular_coste_factura(lineas_menu)
+    except ValueError as exc:
+        return False, str(exc)
+    return True, ""
 
 
 def obtener_nombre_menu_por_id(menu_id):
@@ -1998,6 +2140,85 @@ def generar_numero_factura(tipo_documento):
         return f"{prefijo}-{anio}-0001"
 
 
+def preparar_relaciones_menu_documento(lineas, tipo_documento, documento_id):
+    relaciones = []
+    for linea in extraer_lineas_menu_documento(lineas):
+        relacion = {
+            "menu_id": linea["menu_id"],
+            "menu_nombre_snapshot": linea["menu_nombre_snapshot"],
+            "cantidad_menu": linea["cantidad_menu"],
+            "coste_total_menu": linea["coste_total_menu"],
+            "precio_total_menu": linea["precio_total_menu"],
+            "observaciones": linea["observaciones"],
+            "orden": linea["orden"],
+        }
+        if tipo_documento == "presupuesto":
+            relacion.update({
+                "presupuesto_id": documento_id,
+                "coste_linea_menu_presupuesto": linea["coste_linea_menu_documento"],
+                "precio_linea_menu_presupuesto": linea["precio_linea_menu_documento"],
+            })
+        else:
+            relacion.update({
+                "factura_id": documento_id,
+                "coste_linea_menu_factura": linea["coste_linea_menu_documento"],
+                "precio_linea_menu_factura": linea["precio_linea_menu_documento"],
+            })
+        relaciones.append(relacion)
+    return relaciones
+
+
+def guardar_presupuesto_supabase(presupuesto, lineas):
+    user_id_actual = obtener_user_id_actual()
+    documento_valido, mensaje_validacion = validar_documento_con_menus(
+        presupuesto,
+        lineas,
+    )
+    if not documento_valido:
+        return False, mensaje_validacion, None
+
+    lineas_menu = extraer_lineas_menu_documento(lineas)
+    coste_total = calcular_coste_presupuesto(lineas_menu)
+    precio_total = sum(
+        numero_seguro(linea.get("precio_linea_menu_documento"), 0.0)
+        for linea in lineas_menu
+    )
+    datos = {
+        "user_id": user_id_actual,
+        "cliente_id": presupuesto.get("cliente_id"),
+        "numero_presupuesto": presupuesto.get("numero_factura"),
+        "estado": presupuesto.get("estado", "borrador"),
+        "fecha_emision": presupuesto.get("fecha_emision"),
+        "fecha_vencimiento": presupuesto.get("fecha_vencimiento"),
+        "concepto": presupuesto.get("concepto"),
+        "coste_total": coste_total,
+        "precio_total": precio_total,
+        "notas": presupuesto.get("notas"),
+    }
+    respuesta = supabase.table("presupuestos").insert(datos).execute()
+    guardado = (respuesta.data or [{}])[0]
+    presupuesto_id = guardado.get("id")
+    if not presupuesto_id:
+        return False, "No se pudo obtener el identificador del presupuesto.", None
+    relaciones = preparar_relaciones_menu_documento(
+        lineas,
+        "presupuesto",
+        presupuesto_id,
+    )
+    supabase.table("presupuesto_menus").insert(relaciones).execute()
+    guardado["numero_factura"] = guardado.get("numero_presupuesto")
+    guardado["tipo_documento"] = "presupuesto"
+    guardado["total"] = guardado.get("precio_total", precio_total)
+    guardado["_origen_almacen"] = "presupuestos"
+    return True, "Presupuesto guardado correctamente.", guardado
+
+
+def guardar_relaciones_factura_supabase(factura_id, lineas):
+    relaciones = preparar_relaciones_menu_documento(lineas, "factura", factura_id)
+    if relaciones:
+        supabase.table("factura_menus").insert(relaciones).execute()
+
+
 def cargar_facturas_supabase():
     if not supabase_disponible or supabase is None:
         return False, "El inventario no está conectado correctamente.", pd.DataFrame(columns=FACTURAS_COLUMNAS)
@@ -2007,22 +2228,75 @@ def cargar_facturas_supabase():
         return False, "Inicia sesión para guardar clientes en tu cuenta", pd.DataFrame(columns=FACTURAS_COLUMNAS)
 
     try:
-        respuesta = (
-            supabase
-            .table("facturas")
-            .select(",".join(FACTURAS_COLUMNAS))
-            .eq("user_id", user_id_actual)
-            .order("created_at", desc=True)
-            .limit(25)
-            .execute()
-        )
+        try:
+            respuesta = (
+                supabase
+                .table("facturas")
+                .select(",".join(FACTURAS_COLUMNAS_JERARQUIA))
+                .eq("user_id", user_id_actual)
+                .order("created_at", desc=True)
+                .limit(25)
+                .execute()
+            )
+        except Exception:
+            respuesta = (
+                supabase
+                .table("facturas")
+                .select(",".join(FACTURAS_COLUMNAS))
+                .eq("user_id", user_id_actual)
+                .order("created_at", desc=True)
+                .limit(25)
+                .execute()
+            )
         df = pd.DataFrame(respuesta.data or [])
-        if df.empty:
-            return True, "", pd.DataFrame(columns=FACTURAS_COLUMNAS)
+        if not df.empty:
+            df["_origen_almacen"] = "facturas"
         for col in FACTURAS_COLUMNAS:
             if col not in df.columns:
                 df[col] = None
-        return True, "", df[FACTURAS_COLUMNAS].copy()
+        columnas_salida = FACTURAS_COLUMNAS_JERARQUIA + ["_origen_almacen"]
+        if "_origen_almacen" not in df.columns:
+            df["_origen_almacen"] = None
+
+        try:
+            respuesta_presupuestos = (
+                supabase
+                .table("presupuestos")
+                .select(",".join(PRESUPUESTOS_COLUMNAS))
+                .eq("user_id", user_id_actual)
+                .order("created_at", desc=True)
+                .limit(25)
+                .execute()
+            )
+            presupuestos_df = pd.DataFrame(respuesta_presupuestos.data or [])
+            if not presupuestos_df.empty:
+                presupuestos_df = presupuestos_df.rename(columns={
+                    "numero_presupuesto": "numero_factura",
+                    "precio_total": "total",
+                })
+                presupuestos_df["tipo_documento"] = "presupuesto"
+                presupuestos_df["base_imponible"] = presupuestos_df["total"]
+                presupuestos_df["iva_pct"] = 0.0
+                presupuestos_df["iva_importe"] = 0.0
+                presupuestos_df["retencion_pct"] = 0.0
+                presupuestos_df["retencion_importe"] = 0.0
+                presupuestos_df["metodo_pago"] = None
+                presupuestos_df["estado_cobro"] = None
+                presupuestos_df["_origen_almacen"] = "presupuestos"
+                for col in columnas_salida:
+                    if col not in presupuestos_df.columns:
+                        presupuestos_df[col] = None
+                df = pd.concat(
+                    [df[columnas_salida], presupuestos_df[columnas_salida]],
+                    ignore_index=True,
+                )
+        except Exception:
+            pass
+
+        if df.empty:
+            return True, "", pd.DataFrame(columns=columnas_salida)
+        df = df.sort_values("created_at", ascending=False, na_position="last")
+        return True, "", df[columnas_salida].copy()
     except Exception as e:
         if error_tabla_facturacion_no_activada(e):
             return False, MENSAJE_FACTURACION_NO_ACTIVADA, pd.DataFrame(columns=FACTURAS_COLUMNAS)
@@ -2042,17 +2316,95 @@ def cargar_factura_detalle_supabase(factura_id):
         return False, "Inicia sesión para cargar documentos.", None, pd.DataFrame(columns=FACTURA_LINEAS_COLUMNAS)
 
     try:
-        respuesta_factura = (
-            supabase
-            .table("facturas")
-            .select(",".join(FACTURAS_COLUMNAS))
-            .eq("id", factura_id_limpio)
-            .limit(1)
-            .execute()
-        )
+        try:
+            respuesta_factura = (
+                supabase
+                .table("facturas")
+                .select(",".join(FACTURAS_COLUMNAS_JERARQUIA))
+                .eq("id", factura_id_limpio)
+                .limit(1)
+                .execute()
+            )
+        except Exception:
+            respuesta_factura = (
+                supabase
+                .table("facturas")
+                .select(",".join(FACTURAS_COLUMNAS))
+                .eq("id", factura_id_limpio)
+                .limit(1)
+                .execute()
+            )
         factura = (respuesta_factura.data or [None])[0]
         if not factura:
-            return False, "No se encontró el documento seleccionado.", None, pd.DataFrame(columns=FACTURA_LINEAS_COLUMNAS)
+            try:
+                respuesta_presupuesto = (
+                    supabase
+                    .table("presupuestos")
+                    .select(",".join(PRESUPUESTOS_COLUMNAS))
+                    .eq("id", factura_id_limpio)
+                    .limit(1)
+                    .execute()
+                )
+                presupuesto = (respuesta_presupuesto.data or [None])[0]
+            except Exception:
+                presupuesto = None
+            if not presupuesto:
+                return False, "No se encontró el documento seleccionado.", None, pd.DataFrame(columns=FACTURA_LINEAS_COLUMNAS)
+
+            presupuesto_user_id = str(presupuesto.get("user_id") or "").strip()
+            if presupuesto_user_id and presupuesto_user_id != user_id_actual:
+                return False, "No puedes editar documentos de otro usuario.", None, pd.DataFrame(columns=FACTURA_LINEAS_COLUMNAS)
+            respuesta_menus = (
+                supabase
+                .table("presupuesto_menus")
+                .select(",".join(PRESUPUESTO_MENUS_COLUMNAS))
+                .eq("presupuesto_id", factura_id_limpio)
+                .order("orden")
+                .execute()
+            )
+            lineas = []
+            for relacion in respuesta_menus.data or []:
+                lineas.append(calcular_linea_factura({
+                    "descripcion": f"Menú: {relacion.get('menu_nombre_snapshot') or relacion.get('menu_id')}",
+                    "cantidad": relacion.get("cantidad_menu", 1),
+                    "cantidad_menu": relacion.get("cantidad_menu", 1),
+                    "unidad": "menú",
+                    "precio_unitario": relacion.get("precio_total_menu", 0),
+                    "iva_pct": 0,
+                    "origen_tipo": "menu",
+                    "origen_id": relacion.get("menu_id"),
+                    "menu_origen_id": relacion.get("menu_id"),
+                    "menu_nombre_snapshot": relacion.get("menu_nombre_snapshot"),
+                    "coste_total_menu": relacion.get("coste_total_menu", 0),
+                    "coste_linea_menu_documento": relacion.get(
+                        "coste_linea_menu_presupuesto",
+                        0,
+                    ),
+                    "precio_total_menu": relacion.get("precio_total_menu", 0),
+                    "precio_linea_menu_documento": relacion.get(
+                        "precio_linea_menu_presupuesto",
+                        0,
+                    ),
+                    "observaciones": relacion.get("observaciones"),
+                }))
+            presupuesto = dict(presupuesto)
+            presupuesto.update({
+                "numero_factura": presupuesto.get("numero_presupuesto"),
+                "tipo_documento": "presupuesto",
+                "base_imponible": presupuesto.get("precio_total", 0),
+                "iva_pct": 0,
+                "iva_importe": 0,
+                "retencion_pct": 0,
+                "retencion_importe": 0,
+                "total": presupuesto.get("precio_total", 0),
+                "_origen_almacen": "presupuestos",
+            })
+            return (
+                True,
+                "Presupuesto cargado correctamente.",
+                presupuesto,
+                pd.DataFrame(lineas),
+            )
 
         factura_user_id = str(factura.get("user_id") or "").strip()
         if factura_user_id and factura_user_id != user_id_actual:
@@ -2067,6 +2419,68 @@ def cargar_factura_detalle_supabase(factura_id):
             .execute()
         )
         lineas_df = pd.DataFrame(respuesta_lineas.data or [])
+        try:
+            respuesta_menus_factura = (
+                supabase
+                .table("factura_menus")
+                .select(",".join(FACTURA_MENUS_COLUMNAS))
+                .eq("factura_id", factura_id_limpio)
+                .order("orden")
+                .execute()
+            )
+            relaciones_factura = respuesta_menus_factura.data or []
+        except Exception:
+            relaciones_factura = []
+        if relaciones_factura and not lineas_df.empty:
+            relaciones_por_menu = {
+                str(relacion.get("menu_id")): relacion
+                for relacion in relaciones_factura
+            }
+            for indice, linea in lineas_df.iterrows():
+                relacion = relaciones_por_menu.get(str(linea.get("origen_id")))
+                if not relacion:
+                    continue
+                lineas_df.at[indice, "cantidad_menu"] = relacion.get("cantidad_menu", 1)
+                lineas_df.at[indice, "menu_origen_id"] = relacion.get("menu_id")
+                lineas_df.at[indice, "menu_nombre_snapshot"] = relacion.get("menu_nombre_snapshot")
+                lineas_df.at[indice, "coste_total_menu"] = relacion.get("coste_total_menu", 0)
+                lineas_df.at[indice, "coste_linea_menu_documento"] = relacion.get(
+                    "coste_linea_menu_factura",
+                    0,
+                )
+                lineas_df.at[indice, "precio_total_menu"] = relacion.get("precio_total_menu", 0)
+                lineas_df.at[indice, "precio_linea_menu_documento"] = relacion.get(
+                    "precio_linea_menu_factura",
+                    0,
+                )
+                lineas_df.at[indice, "observaciones"] = relacion.get("observaciones")
+        elif relaciones_factura:
+            lineas_df = pd.DataFrame([
+                calcular_linea_factura({
+                    "descripcion": f"Menú: {relacion.get('menu_nombre_snapshot') or relacion.get('menu_id')}",
+                    "cantidad": relacion.get("cantidad_menu", 1),
+                    "cantidad_menu": relacion.get("cantidad_menu", 1),
+                    "unidad": "menú",
+                    "precio_unitario": relacion.get("precio_total_menu", 0),
+                    "iva_pct": 21,
+                    "origen_tipo": "menu",
+                    "origen_id": relacion.get("menu_id"),
+                    "menu_origen_id": relacion.get("menu_id"),
+                    "menu_nombre_snapshot": relacion.get("menu_nombre_snapshot"),
+                    "coste_total_menu": relacion.get("coste_total_menu", 0),
+                    "coste_linea_menu_documento": relacion.get(
+                        "coste_linea_menu_factura",
+                        0,
+                    ),
+                    "precio_total_menu": relacion.get("precio_total_menu", 0),
+                    "precio_linea_menu_documento": relacion.get(
+                        "precio_linea_menu_factura",
+                        0,
+                    ),
+                    "observaciones": relacion.get("observaciones"),
+                })
+                for relacion in relaciones_factura
+            ])
         if lineas_df.empty:
             lineas_df = pd.DataFrame(columns=FACTURA_LINEAS_COLUMNAS)
         for col in FACTURA_LINEAS_COLUMNAS:
@@ -2078,7 +2492,7 @@ def cargar_factura_detalle_supabase(factura_id):
                 "Documento antiguo sin usuario asignado. Puedes revisarlo, "
                 "pero duplica el documento para guardarlo en tu cuenta."
             )
-        return True, mensaje, factura, lineas_df[FACTURA_LINEAS_COLUMNAS].copy()
+        return True, mensaje, factura, lineas_df.copy()
     except Exception as e:
         if error_tabla_facturacion_no_activada(e):
             return False, MENSAJE_FACTURACION_NO_ACTIVADA, None, pd.DataFrame(columns=FACTURA_LINEAS_COLUMNAS)
@@ -2092,8 +2506,16 @@ def guardar_factura_supabase(factura, lineas):
     user_id_actual = obtener_user_id_actual()
     if not user_id_actual:
         return False, "Inicia sesión para guardar clientes en tu cuenta", None
-    if not factura.get("cliente_id"):
-        return False, "Selecciona un cliente antes de guardar el documento.", None
+    documento_valido, mensaje_validacion = validar_documento_con_menus(factura, lineas)
+    if not documento_valido:
+        return False, mensaje_validacion, None
+
+    if str(factura.get("tipo_documento") or "") == "presupuesto":
+        try:
+            return guardar_presupuesto_supabase(factura, lineas)
+        except Exception as error_presupuestos:
+            if not error_tabla_facturacion_no_activada(error_presupuestos):
+                return False, f"Error al guardar presupuesto: {error_presupuestos}", None
 
     lineas_validas = [
         calcular_linea_factura(linea)
@@ -2108,20 +2530,47 @@ def guardar_factura_supabase(factura, lineas):
         factura.get("iva_pct", 21),
         factura.get("retencion_pct", 0)
     )
-    datos_factura = dict(factura)
+    columnas_factura_escritura = [
+        columna
+        for columna in FACTURAS_COLUMNAS_JERARQUIA
+        if columna not in {"id", "created_at", "updated_at"}
+    ]
+    datos_factura = {
+        columna: factura.get(columna)
+        for columna in columnas_factura_escritura
+        if columna in factura
+    }
     datos_factura["user_id"] = user_id_actual
     datos_factura["base_imponible"] = totales["base_imponible"]
     datos_factura["iva_importe"] = totales["iva_importe"]
     datos_factura["retencion_importe"] = totales["retencion_importe"]
     datos_factura["total"] = totales["total"]
+    datos_factura["coste_total"] = calcular_coste_factura(
+        extraer_lineas_menu_documento(lineas_validas)
+    )
 
     try:
-        respuesta_factura = (
-            supabase
-            .table("facturas")
-            .insert(datos_factura)
-            .execute()
-        )
+        try:
+            respuesta_factura = (
+                supabase
+                .table("facturas")
+                .insert(datos_factura)
+                .execute()
+            )
+        except Exception as error_columnas_jerarquia:
+            if not any(
+                campo in str(error_columnas_jerarquia).lower()
+                for campo in ("presupuesto_id", "coste_total", "schema cache", "pgrst204")
+            ):
+                raise
+            datos_factura.pop("presupuesto_id", None)
+            datos_factura.pop("coste_total", None)
+            respuesta_factura = (
+                supabase
+                .table("facturas")
+                .insert(datos_factura)
+                .execute()
+            )
         factura_guardada = (respuesta_factura.data or [{}])[0]
         factura_id = factura_guardada.get("id")
         if not factura_id:
@@ -2151,11 +2600,62 @@ def guardar_factura_supabase(factura, lineas):
             .insert(lineas_guardar)
             .execute()
         )
+        try:
+            guardar_relaciones_factura_supabase(factura_id, lineas_validas)
+        except Exception:
+            pass
         return True, "Documento guardado correctamente.", factura_guardada
     except Exception as e:
         if error_tabla_facturacion_no_activada(e):
             return False, MENSAJE_FACTURACION_NO_ACTIVADA, None
         return False, f"Error al guardar documento: {e}", None
+
+
+def actualizar_presupuesto_supabase(presupuesto_id, presupuesto, lineas):
+    documento_valido, mensaje_validacion = validar_documento_con_menus(
+        presupuesto,
+        lineas,
+    )
+    if not documento_valido:
+        return False, mensaje_validacion, None
+    lineas_menu = extraer_lineas_menu_documento(lineas)
+    coste_total = calcular_coste_presupuesto(lineas_menu)
+    precio_total = sum(
+        numero_seguro(linea.get("precio_linea_menu_documento"), 0.0)
+        for linea in lineas_menu
+    )
+    datos = {
+        "cliente_id": presupuesto.get("cliente_id"),
+        "numero_presupuesto": presupuesto.get("numero_factura"),
+        "estado": presupuesto.get("estado", "borrador"),
+        "fecha_emision": presupuesto.get("fecha_emision"),
+        "fecha_vencimiento": presupuesto.get("fecha_vencimiento"),
+        "concepto": presupuesto.get("concepto"),
+        "coste_total": coste_total,
+        "precio_total": precio_total,
+        "notas": presupuesto.get("notas"),
+    }
+    respuesta = (
+        supabase
+        .table("presupuestos")
+        .update(datos)
+        .eq("id", presupuesto_id)
+        .eq("user_id", obtener_user_id_actual())
+        .execute()
+    )
+    supabase.table("presupuesto_menus").delete().eq(
+        "presupuesto_id",
+        presupuesto_id,
+    ).execute()
+    relaciones = preparar_relaciones_menu_documento(
+        lineas,
+        "presupuesto",
+        presupuesto_id,
+    )
+    supabase.table("presupuesto_menus").insert(relaciones).execute()
+    actualizado = (respuesta.data or [{}])[0]
+    actualizado["numero_factura"] = actualizado.get("numero_presupuesto")
+    return True, "Presupuesto actualizado correctamente.", actualizado
 
 
 def actualizar_factura_supabase(factura_id, factura, lineas):
@@ -2175,6 +2675,15 @@ def actualizar_factura_supabase(factura_id, factura, lineas):
         return False, "Este documento antiguo debe duplicarse antes de guardarse en tu cuenta.", None
     if factura_user_id != user_id_actual:
         return False, "No puedes editar documentos de otro usuario.", None
+    if (factura_existente or {}).get("_origen_almacen") == "presupuestos":
+        try:
+            return actualizar_presupuesto_supabase(factura_id, factura, lineas)
+        except Exception as exc:
+            return False, f"Error al actualizar presupuesto: {exc}", None
+
+    documento_valido, mensaje_validacion = validar_documento_con_menus(factura, lineas)
+    if not documento_valido:
+        return False, mensaje_validacion, None
 
     lineas_validas = [
         calcular_linea_factura(linea)
@@ -2189,22 +2698,51 @@ def actualizar_factura_supabase(factura_id, factura, lineas):
         factura.get("iva_pct", 21),
         factura.get("retencion_pct", 0)
     )
-    datos_factura = dict(factura)
+    columnas_factura_escritura = [
+        columna
+        for columna in FACTURAS_COLUMNAS_JERARQUIA
+        if columna not in {"id", "created_at", "updated_at"}
+    ]
+    datos_factura = {
+        columna: factura.get(columna)
+        for columna in columnas_factura_escritura
+        if columna in factura
+    }
     datos_factura["user_id"] = user_id_actual
     datos_factura["base_imponible"] = totales["base_imponible"]
     datos_factura["iva_importe"] = totales["iva_importe"]
     datos_factura["retencion_importe"] = totales["retencion_importe"]
     datos_factura["total"] = totales["total"]
+    datos_factura["coste_total"] = calcular_coste_factura(
+        extraer_lineas_menu_documento(lineas_validas)
+    )
 
     try:
-        respuesta_factura = (
-            supabase
-            .table("facturas")
-            .update(datos_factura)
-            .eq("id", factura_id)
-            .eq("user_id", user_id_actual)
-            .execute()
-        )
+        try:
+            respuesta_factura = (
+                supabase
+                .table("facturas")
+                .update(datos_factura)
+                .eq("id", factura_id)
+                .eq("user_id", user_id_actual)
+                .execute()
+            )
+        except Exception as error_columnas_jerarquia:
+            if not any(
+                campo in str(error_columnas_jerarquia).lower()
+                for campo in ("presupuesto_id", "coste_total", "schema cache", "pgrst204")
+            ):
+                raise
+            datos_factura.pop("presupuesto_id", None)
+            datos_factura.pop("coste_total", None)
+            respuesta_factura = (
+                supabase
+                .table("facturas")
+                .update(datos_factura)
+                .eq("id", factura_id)
+                .eq("user_id", user_id_actual)
+                .execute()
+            )
         factura_actualizada = (respuesta_factura.data or [{}])[0]
 
         (
@@ -2239,6 +2777,14 @@ def actualizar_factura_supabase(factura_id, factura, lineas):
             .insert(lineas_guardar)
             .execute()
         )
+        try:
+            supabase.table("factura_menus").delete().eq(
+                "factura_id",
+                factura_id,
+            ).execute()
+            guardar_relaciones_factura_supabase(factura_id, lineas_validas)
+        except Exception:
+            pass
         return True, "Documento actualizado correctamente.", factura_actualizada
     except Exception as e:
         if error_tabla_facturacion_no_activada(e):
@@ -2283,6 +2829,7 @@ def fecha_factura_para_widget(valor):
 def cargar_factura_en_sesion(factura, lineas_df):
     tipo = str(factura.get("tipo_documento") or "factura").strip() or "factura"
     st.session_state["factura_id_en_edicion"] = str(factura.get("id") or "").strip() or None
+    st.session_state["factura_presupuesto_origen_id"] = factura.get("presupuesto_id")
     st.session_state["factura_cliente_id"] = str(factura.get("cliente_id") or "").strip()
     st.session_state["factura_tipo_documento"] = tipo
     st.session_state[f"factura_numero_actual_{tipo}"] = str(factura.get("numero_factura") or "").strip()
@@ -2304,7 +2851,7 @@ def cargar_factura_en_sesion(factura, lineas_df):
 
 def calcular_totales_menu(lineas_menu):
     """
-    Calcula coste total y, si hay datos de precio, precio total del menu.
+    Calcula el menu usando las raciones independientes de cada receta.
     """
     if lineas_menu is None:
         return {"coste_total": 0.0, "precio_total": None}
@@ -2314,13 +2861,15 @@ def calcular_totales_menu(lineas_menu):
     else:
         lineas = list(lineas_menu)
 
-    coste_total = 0.0
+    if not lineas:
+        return {"coste_total": 0.0, "precio_total": None}
+
+    coste_total = calcular_coste_menu(lineas)
     precio_total = 0.0
     hay_precio = False
 
     for linea in lineas:
         factor = factor_linea_menu(linea)
-        coste_receta = linea.get("coste_receta", linea.get("coste_total", None))
         precio_receta = linea.get(
             "precio_receta_con_iva",
             linea.get(
@@ -2329,7 +2878,6 @@ def calcular_totales_menu(lineas_menu):
             )
         )
 
-        coste_total += numero_seguro(coste_receta, 0.0) * factor
         if precio_receta is not None and not pd.isna(precio_receta):
             precio_total += numero_seguro(precio_receta, 0.0) * factor
             hay_precio = True
@@ -2340,7 +2888,12 @@ def calcular_totales_menu(lineas_menu):
     }
 
 
-def crear_lineas_factura_desde_menu(cabecera_menu, lineas_menu_df, desglosar=False):
+def crear_lineas_factura_desde_menu(
+    cabecera_menu,
+    lineas_menu_df,
+    desglosar=False,
+    cantidad_menu=1.0,
+):
     """
     Convierte un menu guardado en lineas editables de documento de facturacion.
     No modifica el menu ni sus recetas.
@@ -2349,7 +2902,14 @@ def crear_lineas_factura_desde_menu(cabecera_menu, lineas_menu_df, desglosar=Fal
     lineas_menu = lineas_menu_df.to_dict(orient="records") if isinstance(lineas_menu_df, pd.DataFrame) else list(lineas_menu_df or [])
     menu_id = str(cabecera_menu.get("id", "") or "").strip()
     nombre_menu = str(cabecera_menu.get("nombre", "") or "Menú").strip()
-    numero_comensales = int(numero_seguro(cabecera_menu.get("numero_comensales", 1), 1))
+    cantidad_menu = numero_seguro(cantidad_menu, 0.0)
+    if cantidad_menu <= 0:
+        raise ValueError("La cantidad del menú debe ser mayor que 0.")
+    totales_menu = calcular_totales_menu(lineas_menu)
+    coste_total_menu = numero_seguro(
+        cabecera_menu.get("coste_total", totales_menu["coste_total"]),
+        totales_menu["coste_total"],
+    )
     aviso_precio = False
 
     if not desglosar:
@@ -2358,22 +2918,28 @@ def crear_lineas_factura_desde_menu(cabecera_menu, lineas_menu_df, desglosar=Fal
         if hay_precio_total:
             precio_unitario = numero_seguro(precio_total, 0.0)
         else:
-            totales_menu = calcular_totales_menu(lineas_menu)
             precio_unitario = numero_seguro(
-                cabecera_menu.get("coste_total", totales_menu.get("coste_total", 0.0)),
+                coste_total_menu,
                 0.0
             )
             aviso_precio = True
         return [
             calcular_linea_factura({
-                "descripcion": f"Menú: {nombre_menu} - {numero_comensales} raciones base",
-                "cantidad": 1.0,
-                "unidad": "servicio",
+                "descripcion": f"Menú: {nombre_menu}",
+                "cantidad": cantidad_menu,
+                "cantidad_menu": cantidad_menu,
+                "unidad": "menú",
                 "precio_unitario": precio_unitario,
                 "descuento_pct": 0.0,
                 "iva_pct": 21.0,
                 "origen_tipo": "menu",
-                "origen_id": menu_id
+                "origen_id": menu_id,
+                "menu_origen_id": menu_id,
+                "menu_nombre_snapshot": nombre_menu,
+                "coste_total_menu": coste_total_menu,
+                "coste_linea_menu_documento": coste_total_menu * cantidad_menu,
+                "precio_total_menu": precio_unitario,
+                "precio_linea_menu_documento": precio_unitario * cantidad_menu,
             })
         ], aviso_precio
 
@@ -2410,15 +2976,20 @@ SECCIONES_MENU = ["", "Aperitivo", "Entrante", "Principal", "Postre", "Bebida", 
 
 def factor_linea_menu(linea):
     """
-    Devuelve el multiplicador de coste/precio para una linea de menu.
-    Las recetas normalizadas representan 1 racion; las antiguas mantienen
-    compatibilidad usando su base original.
+    Devuelve el multiplicador entre la receta completa y las raciones
+    asignadas a esta linea del menu.
     """
-    raciones = numero_seguro(linea.get("raciones", 1.0), 1.0)
-    raciones_base = numero_seguro(linea.get("raciones_base", 1.0), 1.0)
-    if raciones_base > 0 and float(raciones_base) != 1.0:
-        return raciones / raciones_base
-    return raciones
+    raciones = numero_seguro(
+        linea.get("raciones_receta_en_menu", linea.get("raciones", 0.0)),
+        0.0,
+    )
+    raciones_base = numero_seguro(
+        linea.get("raciones_base_receta", linea.get("raciones_base", 0.0)),
+        0.0,
+    )
+    if raciones <= 0 or raciones_base <= 0:
+        raise ValueError("Las raciones de la receta y su base deben ser mayores que 0.")
+    return raciones / raciones_base
 
 
 def recalcular_linea_menu(linea):
@@ -2426,17 +2997,33 @@ def recalcular_linea_menu(linea):
     Recalcula factor, coste y precio de una linea de menu sin modificar recetas.
     """
     linea_recalculada = dict(linea)
-    raciones = numero_seguro(linea_recalculada.get("raciones", 1.0), 1.0)
-    raciones_base = numero_seguro(linea_recalculada.get("raciones_base", 1.0), 1.0)
+    raciones = numero_seguro(
+        linea_recalculada.get(
+            "raciones_receta_en_menu",
+            linea_recalculada.get("raciones", 0.0),
+        ),
+        0.0,
+    )
+    raciones_base = numero_seguro(
+        linea_recalculada.get(
+            "raciones_base_receta",
+            linea_recalculada.get("raciones_base", 0.0),
+        ),
+        0.0,
+    )
     factor = factor_linea_menu(linea_recalculada)
     coste_receta = numero_seguro(linea_recalculada.get("coste_receta", 0.0), 0.0)
     precio_receta = linea_recalculada.get("precio_receta", None)
     hay_precio = precio_receta is not None and not pd.isna(precio_receta)
 
+    coste_por_racion_receta = calcular_coste_por_racion(coste_receta, raciones_base)
+    linea_recalculada["raciones_receta_en_menu"] = float(raciones)
     linea_recalculada["raciones"] = float(raciones)
+    linea_recalculada["raciones_base_receta"] = float(raciones_base)
     linea_recalculada["raciones_base"] = float(raciones_base)
     linea_recalculada["coste_receta"] = float(coste_receta)
-    linea_recalculada["coste_total_linea"] = float(coste_receta * factor)
+    linea_recalculada["coste_por_racion_receta"] = float(coste_por_racion_receta)
+    linea_recalculada["coste_total_linea"] = float(coste_por_racion_receta * raciones)
     linea_recalculada["precio_total_linea"] = (
         float(numero_seguro(precio_receta, 0.0) * factor)
         if hay_precio else None
@@ -2467,16 +3054,18 @@ def crear_linea_menu_desde_receta(receta_id, receta, raciones, orden, seccion=""
     """
     raciones_base = numero_seguro(receta.get("raciones_base", 1.0), 1.0)
     coste_receta = numero_seguro(receta.get("coste_total", 0.0), 0.0)
-    precio_receta = receta.get("precio_venta_con_iva", None)
+    precio_receta = receta.get("precio_venta_sin_iva", None)
     if precio_receta is None or pd.isna(precio_receta):
-        precio_receta = receta.get("precio_venta_sin_iva", None)
+        precio_receta = receta.get("precio_venta_con_iva", None)
 
     hay_precio = precio_receta is not None and not pd.isna(precio_receta)
     linea = {
         "receta_id": str(receta_id),
         "codigo_receta": str(receta.get("codigo_receta", "") or ""),
         "nombre_receta": str(receta.get("nombre", "") or "Receta sin nombre"),
+        "raciones_receta_en_menu": float(raciones),
         "raciones": float(raciones),
+        "raciones_base_receta": float(raciones_base),
         "raciones_base": float(raciones_base),
         "coste_receta": float(coste_receta),
         "precio_receta": float(numero_seguro(precio_receta, 0.0)) if hay_precio else None,
@@ -2486,7 +3075,7 @@ def crear_linea_menu_desde_receta(receta_id, receta, raciones, orden, seccion=""
     return recalcular_linea_menu(linea)
 
 
-def preparar_lineas_menu_para_supabase(lineas_menu):
+def preparar_lineas_menu_para_supabase(lineas_menu, columnas_nuevas=True):
     """
     Convierte lineas de menu al formato de public.menu_recetas.
     """
@@ -2503,13 +3092,52 @@ def preparar_lineas_menu_para_supabase(lineas_menu):
         receta_id = linea.get("receta_id", linea.get("id_receta", linea.get("id", None)))
         if not receta_id:
             continue
-        lineas_preparadas.append({
+        raciones_receta = numero_seguro(
+            linea.get("raciones_receta_en_menu", linea.get("raciones", 0.0)),
+            0.0,
+        )
+        if raciones_receta <= 0:
+            raise ValueError("Cada receta del menú debe tener raciones mayores que 0.")
+        linea_preparada = {
             "receta_id": receta_id,
-            "raciones": numero_seguro(linea.get("raciones", 1.0), 1.0),
             "orden": int(numero_seguro(linea.get("orden", orden), orden)),
             "seccion": str(linea.get("seccion", "") or "").strip() or None
-        })
+        }
+        if columnas_nuevas:
+            linea_preparada["raciones_receta_en_menu"] = raciones_receta
+            linea_preparada["observaciones"] = (
+                str(linea.get("observaciones", "") or "").strip() or None
+            )
+        else:
+            linea_preparada["raciones"] = raciones_receta
+        lineas_preparadas.append(linea_preparada)
     return lineas_preparadas
+
+
+def insertar_lineas_menu_supabase(menu_id, lineas_menu):
+    lineas_nuevas = preparar_lineas_menu_para_supabase(lineas_menu, columnas_nuevas=True)
+    for linea in lineas_nuevas:
+        linea["menu_id"] = menu_id
+    try:
+        supabase.table("menu_recetas").insert(lineas_nuevas).execute()
+        return
+    except Exception as error_columnas_nuevas:
+        mensaje = str(error_columnas_nuevas).lower()
+        if not any(
+            texto in mensaje
+            for texto in (
+                "raciones_receta_en_menu",
+                "observaciones",
+                "schema cache",
+                "pgrst204",
+            )
+        ):
+            raise
+
+    lineas_legacy = preparar_lineas_menu_para_supabase(lineas_menu, columnas_nuevas=False)
+    for linea in lineas_legacy:
+        linea["menu_id"] = menu_id
+    supabase.table("menu_recetas").insert(lineas_legacy).execute()
 
 
 def guardar_menu_supabase(datos_menu, lineas_menu):
@@ -2519,8 +3147,15 @@ def guardar_menu_supabase(datos_menu, lineas_menu):
     if not supabase_disponible or supabase is None:
         return False, "El inventario no está conectado correctamente.", None
 
-    lineas_menu = normalizar_lineas_menu(lineas_menu)
-    lineas_preparadas = preparar_lineas_menu_para_supabase(lineas_menu)
+    try:
+        lineas_menu = normalizar_lineas_menu(lineas_menu)
+        lineas_preparadas = preparar_lineas_menu_para_supabase(
+            lineas_menu,
+            columnas_nuevas=True,
+        )
+        totales = calcular_totales_menu(lineas_menu)
+    except ValueError as exc:
+        return False, str(exc), None
     if not lineas_preparadas:
         return False, "Añade al menos una receta al menú antes de guardar.", None
 
@@ -2528,7 +3163,6 @@ def guardar_menu_supabase(datos_menu, lineas_menu):
         user_id_actual = obtener_user_id_actual()
         datos_guardar = dict(datos_menu)
         datos_guardar["user_id"] = user_id_actual
-        totales = calcular_totales_menu(lineas_menu)
         if datos_guardar.get("coste_total") is None:
             datos_guardar["coste_total"] = totales["coste_total"]
         datos_guardar["coste_total"] = numero_seguro(datos_guardar.get("coste_total", 0.0))
@@ -2548,15 +3182,7 @@ def guardar_menu_supabase(datos_menu, lineas_menu):
         if not menu_id:
             return False, "No se pudo obtener el identificador del menú guardado.", None
 
-        for linea in lineas_preparadas:
-            linea["menu_id"] = menu_id
-
-        (
-            supabase
-            .table("menu_recetas")
-            .insert(lineas_preparadas)
-            .execute()
-        )
+        insertar_lineas_menu_supabase(menu_id, lineas_menu)
 
         try:
             cargar_menus_supabase.clear()
@@ -2579,8 +3205,15 @@ def actualizar_menu_supabase(menu_id, datos_menu, lineas_menu):
     if not supabase_disponible or supabase is None:
         return False, "El inventario no está conectado correctamente."
 
-    lineas_menu = normalizar_lineas_menu(lineas_menu)
-    lineas_preparadas = preparar_lineas_menu_para_supabase(lineas_menu)
+    try:
+        lineas_menu = normalizar_lineas_menu(lineas_menu)
+        lineas_preparadas = preparar_lineas_menu_para_supabase(
+            lineas_menu,
+            columnas_nuevas=True,
+        )
+        totales = calcular_totales_menu(lineas_menu)
+    except ValueError as exc:
+        return False, str(exc)
     if not lineas_preparadas:
         return False, "Añade al menos una receta al menú antes de actualizar."
 
@@ -2593,7 +3226,6 @@ def actualizar_menu_supabase(menu_id, datos_menu, lineas_menu):
 
         datos_actualizar = dict(datos_menu)
         datos_actualizar["user_id"] = valor_user_id_menu(cabecera_actual)
-        totales = calcular_totales_menu(lineas_menu)
         if datos_actualizar.get("coste_total") is None:
             datos_actualizar["coste_total"] = totales["coste_total"]
         datos_actualizar["coste_total"] = numero_seguro(datos_actualizar.get("coste_total", 0.0))
@@ -2618,15 +3250,7 @@ def actualizar_menu_supabase(menu_id, datos_menu, lineas_menu):
             .execute()
         )
 
-        for linea in lineas_preparadas:
-            linea["menu_id"] = menu_id
-
-        (
-            supabase
-            .table("menu_recetas")
-            .insert(lineas_preparadas)
-            .execute()
-        )
+        insertar_lineas_menu_supabase(menu_id, lineas_menu)
 
         try:
             cargar_menus_supabase.clear()
@@ -3568,7 +4192,8 @@ ADMIN_TABLAS_BBDD = {
         "order": "nombre",
         "columns": [
             "id", "user_id", "nombre", "tipo_menu", "descripcion",
-            "numero_comensales", "coste_total", "precio_total", "created_at", "updated_at"
+            "numero_comensales", "pax_referencia_menu", "coste_total",
+            "precio_total", "created_at", "updated_at"
         ],
         "generated_pk": True,
     },
@@ -3577,7 +4202,9 @@ ADMIN_TABLAS_BBDD = {
         "pk": "id",
         "order": "orden",
         "columns": [
-            "id", "menu_id", "receta_id", "raciones", "orden", "seccion", "created_at"
+            "id", "menu_id", "receta_id", "raciones",
+            "raciones_receta_en_menu", "orden", "seccion",
+            "observaciones", "created_at"
         ],
         "generated_pk": True,
     },
@@ -3601,8 +4228,29 @@ ADMIN_TABLAS_BBDD = {
             "estado", "fecha_emision", "fecha_vencimiento", "concepto",
             "base_imponible", "iva_pct", "iva_importe", "retencion_pct",
             "retencion_importe", "total", "metodo_pago", "estado_cobro",
-            "notas", "created_at", "updated_at"
+            "presupuesto_id", "coste_total", "notas", "created_at", "updated_at"
         ],
+        "generated_pk": True,
+    },
+    "presupuestos": {
+        "label": "Presupuestos",
+        "pk": "id",
+        "order": "fecha_emision",
+        "columns": PRESUPUESTOS_COLUMNAS,
+        "generated_pk": True,
+    },
+    "presupuesto_menus": {
+        "label": "Menús de presupuestos",
+        "pk": "id",
+        "order": "orden",
+        "columns": PRESUPUESTO_MENUS_COLUMNAS,
+        "generated_pk": True,
+    },
+    "factura_menus": {
+        "label": "Menús de facturas",
+        "pk": "id",
+        "order": "orden",
+        "columns": FACTURA_MENUS_COLUMNAS,
         "generated_pk": True,
     },
     "factura_lineas": {
@@ -3630,10 +4278,13 @@ ADMIN_NUMERIC_COLUMNS = {
     "merma", "precio_unidad", "cantidad_formato_compra", "precio_formato_compra",
     "raciones_base", "costes_indirectos_pct", "margen_beneficio_pct", "iva_pct",
     "coste_total", "precio_venta_sin_iva", "precio_venta_con_iva", "cantidad_bruta",
-    "cantidad_neta", "raciones", "numero_comensales", "precio_total",
+    "cantidad_neta", "raciones", "raciones_receta_en_menu",
+    "numero_comensales", "pax_referencia_menu", "precio_total",
     "base_imponible", "iva_importe", "retencion_pct", "retencion_importe", "total",
     "cantidad", "precio_unitario", "descuento_pct", "base_linea", "iva_linea",
-    "total_linea", "orden"
+    "total_linea", "cantidad_menu", "coste_total_menu",
+    "coste_linea_menu_presupuesto", "precio_linea_menu_presupuesto",
+    "coste_linea_menu_factura", "precio_linea_menu_factura", "orden"
 }
 
 ADMIN_BOOLEAN_COLUMNS = {"activa", "es_temporal", "activo"}
@@ -3837,8 +4488,16 @@ def render_pagina_administracion():
             st.write(f"**Activo:** {'sí' if perfil.get('activo', True) else 'no'}")
 
         st.markdown("#### Migraciones necesarias")
-        st.code("sql/017_usuarios_app_entorno.sql\nsql/018_admin_rls_todas_bbdd.sql", language="text")
-        st.caption("Después de ejecutar 017, promociona al primer administrador desde Supabase SQL. Ejecuta 018 para que los admins puedan ver y editar todas las BBDD con RLS.")
+        st.code(
+            "sql/017_usuarios_app_entorno.sql\n"
+            "sql/018_admin_rls_todas_bbdd.sql\n"
+            "sql/019_jerarquia_recetas_menus_presupuestos_facturas.sql",
+            language="text",
+        )
+        st.caption(
+            "La migración 019 añade la jerarquía de presupuestos y facturas. "
+            "Revísala y ejecútala manualmente en Supabase."
+        )
 
 pagina_actual = "App"
 if usuario_actual_es_admin():
@@ -3885,12 +4544,21 @@ with main_tab_recetas:
     st.session_state["receta_categoria"] = categoria_actual
     st.session_state["receta_tipo_plato"] = tipo_plato_actual
 
-    st.session_state['raciones_base'] = 1.0
-    st.session_state['raciones_deseadas'] = 1.0
-    st.session_state['receta_raciones_deseadas'] = 1.0
+    raciones_base_actual = numero_seguro(
+        st.session_state.get(
+            "receta_raciones_base",
+            st.session_state.get("raciones_base", 1.0),
+        ),
+        1.0,
+    )
+    if raciones_base_actual <= 0:
+        raciones_base_actual = 1.0
+    st.session_state['raciones_base'] = raciones_base_actual
+    st.session_state['raciones_deseadas'] = raciones_base_actual
+    st.session_state['receta_raciones_deseadas'] = raciones_base_actual
     st.session_state['factor_raciones'] = 1.0
-    st.session_state['raciones_base_aplicadas'] = 1.0
-    st.session_state['raciones_deseadas_aplicadas'] = 1.0
+    st.session_state['raciones_base_aplicadas'] = raciones_base_actual
+    st.session_state['raciones_deseadas_aplicadas'] = raciones_base_actual
 
     subtotal_cabecera = sum(
         float(ing.get('cantidad_bruta', 0.0)) * float(ing.get('precio_unidad', 0.0))
@@ -3899,16 +4567,37 @@ with main_tab_recetas:
     ci_cabecera = float(st.session_state.get('costes_indirectos_pct', 0.0) or 0.0)
     mb_cabecera = float(st.session_state.get('margen_beneficio_pct', 0.0) or 0.0)
     iva_cabecera = float(st.session_state.get('iva_pct', 0.0) or 0.0)
-    coste_cabecera = subtotal_cabecera + (subtotal_cabecera * (ci_cabecera / 100))
+    coste_cabecera = subtotal_cabecera
+    coste_para_precio_cabecera = coste_cabecera + (
+        coste_cabecera * (ci_cabecera / 100)
+    )
     factor_margen_cabecera = 1 - (mb_cabecera / 100)
-    pvp_neto_cabecera = coste_cabecera / factor_margen_cabecera if factor_margen_cabecera > 0 else 0.0
+    pvp_neto_cabecera = (
+        coste_para_precio_cabecera / factor_margen_cabecera
+        if factor_margen_cabecera > 0 else 0.0
+    )
     pvp_final_cabecera = pvp_neto_cabecera + (pvp_neto_cabecera * (iva_cabecera / 100))
     food_cost_cabecera = (coste_cabecera / pvp_final_cabecera * 100) if pvp_final_cabecera > 0 else 0.0
 
+    coste_por_racion_cabecera = calcular_coste_por_racion(
+        coste_cabecera,
+        raciones_base_actual,
+    )
+    pvp_por_racion_cabecera = pvp_final_cabecera / raciones_base_actual
     met_col1, met_col2, met_col3, met_col4 = st.columns(4)
-    met_col1.metric("Raciones", "1")
-    met_col2.metric("Coste 1 ración", f"{coste_cabecera:.2f} €")
-    met_col3.metric("PVP 1 ración", f"{pvp_final_cabecera:.2f} €" if pvp_final_cabecera else "-")
+    with met_col1:
+        if "input_raciones_base_receta" not in st.session_state:
+            st.session_state["input_raciones_base_receta"] = float(raciones_base_actual)
+        raciones_base_actual = st.number_input(
+            "Raciones base receta",
+            min_value=0.001,
+            step=1.0,
+            key="input_raciones_base_receta",
+        )
+        st.session_state["receta_raciones_base"] = float(raciones_base_actual)
+        st.session_state["raciones_base"] = float(raciones_base_actual)
+    met_col2.metric("Coste por ración", f"{coste_por_racion_cabecera:.2f} €")
+    met_col3.metric("PVP por ración", f"{pvp_por_racion_cabecera:.2f} €" if pvp_final_cabecera else "-")
     met_col4.metric("Food Cost", f"{food_cost_cabecera:.1f} %" if food_cost_cabecera else "-")
 
     st.markdown('<div class="samirarte-section-title">Ingredientes</div>', unsafe_allow_html=True)
@@ -4425,7 +5114,7 @@ with main_tab_facturas:
                                 "Documento creado desde menú"
                             )
                             st.info(etiqueta_menu_documento)
-                    cargar_col, duplicar_col = st.columns(2)
+                    cargar_col, duplicar_col, facturar_col = st.columns(3)
                     with cargar_col:
                         if st.button("Cargar documento", use_container_width=True):
                             ok_detalle, mensaje_detalle, factura_detalle, lineas_detalle = cargar_factura_detalle_supabase(
@@ -4450,6 +5139,33 @@ with main_tab_facturas:
                                 st.rerun()
                             else:
                                 st.error(mensaje_duplicar)
+                    with facturar_col:
+                        es_presupuesto_seleccionado = (
+                            facturas_por_id
+                            .get(str(factura_guardada_id), {})
+                            .get("tipo_documento") == "presupuesto"
+                        )
+                        if st.button(
+                            "Crear factura desde presupuesto",
+                            disabled=not es_presupuesto_seleccionado,
+                            use_container_width=True,
+                        ):
+                            ok_detalle, mensaje_detalle, presupuesto_detalle, lineas_detalle = cargar_factura_detalle_supabase(
+                                factura_guardada_id
+                            )
+                            if ok_detalle and not lineas_detalle.empty:
+                                cargar_factura_en_sesion(presupuesto_detalle, lineas_detalle)
+                                st.session_state["factura_id_en_edicion"] = None
+                                st.session_state["factura_presupuesto_origen_id"] = factura_guardada_id
+                                st.session_state["factura_tipo_documento"] = "factura"
+                                st.session_state["factura_numero_actual_factura"] = generar_numero_factura("factura")
+                                st.session_state["factura_documento_feedback"] = (
+                                    "success",
+                                    "Factura creada desde el presupuesto con líneas e importes congelados.",
+                                )
+                                st.rerun()
+                            else:
+                                st.error(mensaje_detalle or "El presupuesto no contiene menús.")
 
                     columnas_documentos = [
                         "numero_factura", "tipo_documento", "cliente",
@@ -4552,7 +5268,7 @@ with main_tab_facturas:
                         menus_factura_df["etiqueta_selector"] = menus_factura_df.apply(
                             lambda row: (
                                 f"{row.get('nombre', '')} · {row.get('tipo_menu', '')} · "
-                                f"{int(numero_seguro(row.get('numero_comensales', 0), 0))} raciones base"
+                                f"{numero_seguro(row.get('coste_total', 0), 0):.2f} € coste"
                             ).strip(" ·"),
                             axis=1
                         )
@@ -4571,22 +5287,23 @@ with main_tab_facturas:
                                 key="selector_menu_facturacion"
                             )
                         with menu_doc_col2:
-                            tipo_documento_menu = st.selectbox(
-                                "Tipo desde menú",
-                                ["presupuesto", "factura"],
-                                key="factura_tipo_documento_menu"
+                            cantidad_menu_documento = st.number_input(
+                                "Cantidad del menú",
+                                min_value=0.001,
+                                value=1.0,
+                                step=1.0,
+                                key="factura_cantidad_menu",
                             )
                         with menu_doc_col3:
-                            desglosar_menu = st.checkbox("Desglosar recetas del menú", key="factura_desglosar_menu")
+                            anadir_menu_documento = st.button(
+                                "Añadir menú",
+                                type="primary",
+                                use_container_width=True,
+                            )
 
-                        st.info("Este documento se generará desde el menú seleccionado y quedará vinculado mediante sus líneas.")
+                        st.caption("Puedes añadir varios menús; cada uno conserva cantidad, coste y precio.")
 
-                        if tipo_documento not in ["presupuesto", "factura"]:
-                            st.warning("Para documentos desde menú, selecciona presupuesto o factura en el tipo principal antes de guardar.")
-                        elif tipo_documento != tipo_documento_menu:
-                            st.info("El tipo elegido aquí es orientativo; el guardado usará el tipo de documento principal.")
-
-                        if st.button("Crear líneas desde menú", use_container_width=True):
+                        if anadir_menu_documento:
                             if not factura_cliente_id:
                                 st.warning("Selecciona un cliente antes de crear líneas desde un menú.")
                                 st.stop()
@@ -4602,42 +5319,45 @@ with main_tab_facturas:
                                 lineas_desde_menu, aviso_precio_menu = crear_lineas_factura_desde_menu(
                                     cabecera_menu,
                                     lineas_menu_df,
-                                    desglosar=desglosar_menu
+                                    desglosar=False,
+                                    cantidad_menu=cantidad_menu_documento,
                                 )
                                 if not lineas_desde_menu:
                                     st.warning("No se pudieron crear líneas desde el menú seleccionado.")
                                 else:
-                                    st.session_state["factura_lineas_actual"] = lineas_desde_menu
+                                    lineas_existentes = [
+                                        linea
+                                        for linea in st.session_state["factura_lineas_actual"]
+                                        if str(linea.get("descripcion", "") or "").strip()
+                                    ]
+                                    st.session_state["factura_lineas_actual"] = (
+                                        lineas_existentes + lineas_desde_menu
+                                    )
                                     st.session_state["factura_menu_feedback"] = (
-                                        "Líneas creadas desde el menú. Revisa precios antes de guardar.",
+                                        "Menú añadido con sus importes congelados.",
                                         aviso_precio_menu
                                     )
                                     st.rerun()
 
-                lineas_accion_col1, lineas_accion_col2, lineas_accion_col3 = st.columns(3)
+                lineas_accion_col1, lineas_accion_col2 = st.columns(2)
                 with lineas_accion_col1:
-                    if st.button("Añadir línea", use_container_width=True):
-                        st.session_state["factura_lineas_actual"].append(linea_factura_vacia())
-                        st.rerun()
-                with lineas_accion_col2:
-                    if st.button("Quitar línea", use_container_width=True):
+                    if st.button("Quitar último menú", use_container_width=True):
                         if st.session_state["factura_lineas_actual"]:
                             st.session_state["factura_lineas_actual"].pop()
                             st.rerun()
                         else:
-                            st.info("No hay líneas para quitar.")
-                with lineas_accion_col3:
+                            st.info("No hay menús para quitar.")
+                with lineas_accion_col2:
                     if st.button("Limpiar documento", use_container_width=True):
                         st.session_state["factura_lineas_actual"] = []
                         st.session_state["factura_id_en_edicion"] = None
+                        st.session_state["factura_presupuesto_origen_id"] = None
                         st.rerun()
-
-                if not st.session_state["factura_lineas_actual"]:
-                    st.session_state["factura_lineas_actual"] = [linea_factura_vacia()]
 
                 columnas_editor_factura = [
                     "descripcion", "cantidad", "unidad", "precio_unitario",
-                    "descuento_pct", "iva_pct", "base_linea", "iva_linea", "total_linea"
+                    "coste_total_menu", "coste_linea_menu_documento",
+                    "base_linea", "iva_linea", "total_linea"
                 ]
                 lineas_df = pd.DataFrame([
                     calcular_linea_factura(linea)
@@ -4654,16 +5374,20 @@ with main_tab_facturas:
                     hide_index=True,
                     column_config={
                         "descripcion": st.column_config.TextColumn("Descripción", required=True, width="large"),
-                        "cantidad": st.column_config.NumberColumn("Cantidad", min_value=0.0, step=1.0, format="%.3f"),
+                        "cantidad": st.column_config.NumberColumn("Cantidad menú", min_value=0.001, step=1.0, format="%.3f"),
                         "unidad": st.column_config.TextColumn("Unidad", width="small"),
                         "precio_unitario": st.column_config.NumberColumn("Precio unitario", min_value=0.0, step=1.0, format="%.4f €"),
-                        "descuento_pct": st.column_config.NumberColumn("Descuento %", min_value=0.0, max_value=100.0, step=1.0, format="%.2f %%"),
-                        "iva_pct": st.column_config.NumberColumn("IVA %", min_value=0.0, max_value=100.0, step=1.0, format="%.2f %%"),
+                        "coste_total_menu": st.column_config.NumberColumn("Coste menú", format="%.2f €"),
+                        "coste_linea_menu_documento": st.column_config.NumberColumn("Coste línea", format="%.2f €"),
                         "base_linea": st.column_config.NumberColumn("Base línea", format="%.2f €"),
                         "iva_linea": st.column_config.NumberColumn("IVA línea", format="%.2f €"),
                         "total_linea": st.column_config.NumberColumn("Total línea", format="%.2f €")
                     },
-                    disabled=["base_linea", "iva_linea", "total_linea"],
+                    disabled=[
+                        "descripcion", "unidad", "coste_total_menu",
+                        "coste_linea_menu_documento", "base_linea",
+                        "iva_linea", "total_linea",
+                    ],
                     key="editor_factura_lineas"
                 )
 
@@ -4674,9 +5398,30 @@ with main_tab_facturas:
                         if idx < len(st.session_state["factura_lineas_actual"])
                         else {}
                     )
-                    for campo_origen in ["origen_tipo", "origen_id", "origen_receta_tipo", "origen_receta_id", "menu_origen_id"]:
+                    for campo_origen in [
+                        "origen_tipo", "origen_id", "menu_origen_id",
+                        "menu_nombre_snapshot", "cantidad_menu",
+                        "coste_total_menu", "coste_linea_menu_documento",
+                        "precio_total_menu", "precio_linea_menu_documento",
+                        "observaciones",
+                    ]:
                         if linea_origen.get(campo_origen) is not None:
                             linea_editada[campo_origen] = linea_origen.get(campo_origen)
+                    if linea_editada.get("origen_tipo") == "menu":
+                        cantidad_editada = numero_seguro(linea_editada.get("cantidad"), 0.0)
+                        precio_menu_editado = numero_seguro(
+                            linea_editada.get("precio_unitario"),
+                            0.0,
+                        )
+                        linea_editada["cantidad_menu"] = cantidad_editada
+                        linea_editada["coste_linea_menu_documento"] = (
+                            numero_seguro(linea_editada.get("coste_total_menu"), 0.0)
+                            * cantidad_editada
+                        )
+                        linea_editada["precio_total_menu"] = precio_menu_editado
+                        linea_editada["precio_linea_menu_documento"] = (
+                            precio_menu_editado * cantidad_editada
+                        )
                     lineas_actualizadas.append(calcular_linea_factura(linea_editada))
                 if lineas_actualizadas != st.session_state["factura_lineas_actual"]:
                     st.session_state["factura_lineas_actual"] = lineas_actualizadas
@@ -4686,14 +5431,33 @@ with main_tab_facturas:
                     st.session_state["factura_lineas_actual"],
                     retencion_pct=retencion_pct
                 )
-                total_col1, total_col2, total_col3, total_col4 = st.columns(4)
+                lineas_menu_documento = extraer_lineas_menu_documento(
+                    st.session_state["factura_lineas_actual"]
+                )
+                coste_documento = (
+                    calcular_coste_presupuesto(lineas_menu_documento)
+                    if tipo_documento == "presupuesto" and lineas_menu_documento
+                    else calcular_coste_factura(lineas_menu_documento)
+                    if lineas_menu_documento
+                    else 0.0
+                )
+                margen_documento = totales_factura["base_imponible"] - coste_documento
+                food_cost_documento = (
+                    coste_documento / totales_factura["base_imponible"] * 100
+                    if totales_factura["base_imponible"] > 0 else 0.0
+                )
+                total_col1, total_col2, total_col3, total_col4, total_col5, total_col6 = st.columns(6)
                 with total_col1:
-                    st.metric("Base imponible", f"{totales_factura['base_imponible']:.2f} €")
+                    st.metric("Coste", f"{coste_documento:.2f} €")
                 with total_col2:
-                    st.metric("IVA", f"{totales_factura['iva_importe']:.2f} €")
+                    st.metric("Venta neta", f"{totales_factura['base_imponible']:.2f} €")
                 with total_col3:
-                    st.metric("Retención", f"{totales_factura['retencion_importe']:.2f} €")
+                    st.metric("Margen", f"{margen_documento:.2f} €")
                 with total_col4:
+                    st.metric("Food Cost", f"{food_cost_documento:.1f} %")
+                with total_col5:
+                    st.metric("IVA", f"{totales_factura['iva_importe']:.2f} €")
+                with total_col6:
                     st.metric("Total", f"{totales_factura['total']:.2f} €")
 
                 factura_actual = {
@@ -4710,7 +5474,8 @@ with main_tab_facturas:
                     "estado_cobro": estado_cobro,
                     "notas": str(notas or "").strip() or None
                 }
-                # TODO: valorar migración futura facturas.menu_id para relación directa menú-documento.
+                if tipo_documento != "presupuesto" and st.session_state.get("factura_presupuesto_origen_id"):
+                    factura_actual["presupuesto_id"] = st.session_state["factura_presupuesto_origen_id"]
                 cliente_actual_factura = clientes_por_id_factura.get(str(factura_cliente_id), {})
                 lineas_validas_descarga = [
                     calcular_linea_factura(linea)
@@ -4759,6 +5524,7 @@ with main_tab_facturas:
                         st.success(f"{mensaje_guardar_doc} {factura_guardada.get('numero_factura', numero_factura)}")
                         st.session_state["factura_lineas_actual"] = []
                         st.session_state["factura_id_en_edicion"] = None
+                        st.session_state["factura_presupuesto_origen_id"] = None
                         st.rerun()
                     else:
                         st.error(mensaje_guardar_doc)
@@ -4812,10 +5578,11 @@ with main_tab_recetas:
         iva_val = iva_pct if iva_pct is not None else 0.0
 
         costes_ind = subtotal_ing * (ci_val / 100)
-        coste_total = subtotal_ing + costes_ind
+        coste_total = subtotal_ing
+        coste_para_precio = coste_total + costes_ind
 
         factor_margen = (1 - (mb_val / 100))
-        pvp_neto = coste_total / factor_margen if factor_margen > 0 else 0.0
+        pvp_neto = coste_para_precio / factor_margen if factor_margen > 0 else 0.0
         monto_iva = pvp_neto * (iva_val / 100)
         pvp_final = pvp_neto + monto_iva
         raciones_deseadas_metricas = pd.to_numeric(st.session_state.get('raciones_deseadas', 0.0), errors='coerce')
@@ -4915,18 +5682,20 @@ with main_tab_recetas:
                         else:
                             raciones_base_raw = pd.to_numeric(cabecera.get("raciones_base"), errors="coerce")
                             raciones_cargadas = 0.0 if pd.isna(raciones_base_raw) else float(raciones_base_raw)
-                            st.session_state["receta_raciones_base_cargada"] = float(raciones_cargadas)
-                            if float(raciones_cargadas) != 1.0:
+                            if raciones_cargadas <= 0:
+                                raciones_cargadas = 1.0
                                 st.session_state["aviso_receta_antigua"] = (
-                                    "Esta receta antigua no está normalizada a 1 ración. "
-                                    "Conviene normalizarla antes de usarla en menús."
+                                    "La receta tenía una base de raciones no válida; "
+                                    "se muestra con 1 ración para poder corregirla."
                                 )
+                            st.session_state["receta_raciones_base_cargada"] = float(raciones_cargadas)
                             st.session_state["ingredientes"] = ingredientes_cargados
                             st.session_state["ingredientes_base_raciones"] = [dict(ing) for ing in ingredientes_cargados]
                             st.session_state["factor_raciones"] = 1.0
                             st.session_state["raciones_base"] = raciones_cargadas
                             st.session_state["raciones_deseadas"] = raciones_cargadas
                             st.session_state["receta_raciones_base"] = raciones_cargadas
+                            st.session_state["input_raciones_base_receta"] = raciones_cargadas
                             st.session_state["receta_raciones_deseadas"] = raciones_cargadas
                             st.session_state["raciones_base_aplicadas"] = raciones_cargadas
                             st.session_state["raciones_deseadas_aplicadas"] = raciones_cargadas
@@ -4952,9 +5721,13 @@ with main_tab_recetas:
         mb_val = float(st.session_state.get('margen_beneficio_pct', 0.0))
         iva_val = float(st.session_state.get('iva_pct', 0.0))
         costes_ind_guardado = subtotal_ing_guardado * (ci_val / 100)
-        coste_total = subtotal_ing_guardado + costes_ind_guardado
+        coste_total = subtotal_ing_guardado
+        coste_para_precio_guardado = coste_total + costes_ind_guardado
         factor_margen_guardado = (1 - (mb_val / 100))
-        pvp_neto = coste_total / factor_margen_guardado if factor_margen_guardado > 0 else 0.0
+        pvp_neto = (
+            coste_para_precio_guardado / factor_margen_guardado
+            if factor_margen_guardado > 0 else 0.0
+        )
         pvp_final = pvp_neto + (pvp_neto * (iva_val / 100))
     else:
         ci_val = float(st.session_state.get('costes_indirectos_pct', 0.0))
@@ -4968,87 +5741,11 @@ with main_tab_recetas:
         st.warning("El inventario no está disponible. No se puede guardar la receta ahora.")
     elif not obtener_user_id_actual():
         pass
-    receta_id_cargada_normalizar = st.session_state.get("receta_id_cargada")
-    raciones_cargadas_normalizar = pd.to_numeric(
-        st.session_state.get("receta_raciones_base_cargada"),
-        errors="coerce"
-    )
-    if receta_id_cargada_normalizar and not pd.isna(raciones_cargadas_normalizar) and float(raciones_cargadas_normalizar) != 1.0:
-        st.markdown("#### Normalizar receta a 1 ración")
-        if float(raciones_cargadas_normalizar) > 0:
-            st.warning(
-                f"Esta receta está configurada para {float(raciones_cargadas_normalizar):g} raciones. "
-                "Puedes crear una copia normalizada a 1 ración."
-            )
-        else:
-            st.warning("La base de raciones no es válida. No se puede normalizar esta receta.")
-        if receta_esta_usada_en_menus(receta_id_cargada_normalizar):
-            st.info(
-                "Esta receta puede estar usada en menús. "
-                "La copia normalizada no sustituye automáticamente la receta antigua."
-            )
-        if st.button("Crear copia normalizada a 1 ración", use_container_width=True):
-            if pd.isna(raciones_cargadas_normalizar) or float(raciones_cargadas_normalizar) <= 0:
-                st.warning("La base de raciones no es válida. No se puede normalizar esta receta.")
-            elif not st.session_state.get("ingredientes"):
-                st.warning("No hay ingredientes para normalizar.")
-            else:
-                nombre_actual_normalizar = str(st.session_state.get("receta_nombre", nombre_plato) or "Receta").strip()
-                datos_normalizar = {
-                    "user_id": obtener_user_id_actual(),
-                    "codigo_receta": generar_codigo_receta(),
-                    "nombre": nombre_actual_normalizar,
-                    "categoria": str(st.session_state.get("receta_categoria", "") or "").strip(),
-                    "tipo_plato": str(st.session_state.get("receta_tipo_plato", "") or "").strip(),
-                    "raciones_base": 1.0,
-                    "unidad_servicio": "ración",
-                    "descripcion": str(st.session_state.get("receta_observaciones", "") or "").strip(),
-                    "observaciones": str(st.session_state.get("receta_observaciones", "") or "").strip(),
-                    "costes_indirectos_pct": float(ci_val),
-                    "margen_beneficio_pct": float(mb_val),
-                    "iva_pct": float(iva_val),
-                    "activa": True
-                }
-                ok, mensaje, receta_guardada, ingredientes_normalizados = crear_copia_receta_normalizada_supabase(
-                    datos_normalizar,
-                    st.session_state["ingredientes"],
-                    float(raciones_cargadas_normalizar)
-                )
-                if ok:
-                    nuevo_codigo = receta_guardada.get("codigo_receta", "")
-                    nuevo_nombre = receta_guardada.get("nombre", f"{nombre_actual_normalizar} - 1 ración")
-                    st.session_state["ingredientes"] = ingredientes_normalizados
-                    st.session_state["ingredientes_base_raciones"] = [dict(ing) for ing in ingredientes_normalizados]
-                    st.session_state["factor_raciones"] = 1.0
-                    st.session_state["raciones_base"] = 1.0
-                    st.session_state["raciones_deseadas"] = 1.0
-                    st.session_state["receta_raciones_base"] = 1.0
-                    st.session_state["receta_raciones_deseadas"] = 1.0
-                    st.session_state["raciones_base_aplicadas"] = 1.0
-                    st.session_state["raciones_deseadas_aplicadas"] = 1.0
-                    st.session_state["receta_raciones_base_cargada"] = 1.0
-                    st.session_state["receta_id_cargada"] = receta_guardada.get("id")
-                    st.session_state["codigo_receta_cargada"] = nuevo_codigo
-                    st.session_state["receta_nombre"] = nuevo_nombre
-                    st.session_state["sincronizar_inputs_raciones"] = True
-                    st.session_state["sincronizar_campos_receta"] = True
-                    limpiar_cache_recetas_guardadas()
-                    st.session_state["selector_receta_guardada_pendiente"] = receta_guardada.get("id")
-                    st.session_state["mensaje_receta_cargada"] = "Copia normalizada creada correctamente."
-                    st.rerun()
-                else:
-                    st.error(mensaje)
-
     with st.form("form_guardar_receta_nueva"):
         nombre_receta_guardar = st.text_input("Nombre de receta", value=st.session_state.get("receta_nombre", nombre_plato))
         categoria_receta = str(st.session_state.get("receta_categoria", "") or "")
         tipo_plato_receta = str(st.session_state.get("receta_tipo_plato", "") or "")
         raciones_base_receta = float(st.session_state.get('receta_raciones_base', st.session_state.get('raciones_base', 1.0)))
-        if raciones_base_receta != 1.0 and st.session_state.get("receta_id_cargada"):
-            st.warning(
-                "La receta cargada conserva una base antigua distinta de 1. "
-                "No se normalizará automáticamente al actualizar."
-            )
         with st.expander("Elaboración y observaciones", expanded=False):
             observaciones_receta = st.text_area("Elaboración / observaciones", key="input_receta_observaciones", height=80)
 
@@ -5086,7 +5783,7 @@ with main_tab_recetas:
                     "nombre": nombre_limpio,
                     "categoria": categoria_receta.strip(),
                     "tipo_plato": tipo_plato_receta.strip(),
-                    "raciones_base": 1.0 if guardar_nueva or duplicar_existente else float(raciones_base_receta),
+                    "raciones_base": float(raciones_base_receta),
                     "unidad_servicio": "ración",
                     "descripcion": observaciones_receta.strip(),
                     "observaciones": observaciones_receta.strip(),
@@ -5126,8 +5823,8 @@ with main_tab_recetas:
                         st.session_state["receta_id_cargada"] = receta_guardada.get("id")
                         st.session_state["codigo_receta_cargada"] = nuevo_codigo
                         st.session_state["receta_nombre"] = nuevo_nombre
-                        st.session_state["receta_raciones_base"] = 1.0
-                        st.session_state["receta_raciones_base_cargada"] = 1.0
+                        st.session_state["receta_raciones_base"] = float(raciones_base_receta)
+                        st.session_state["receta_raciones_base_cargada"] = float(raciones_base_receta)
                         st.session_state["sincronizar_campos_receta"] = True
                         limpiar_cache_recetas_guardadas()
                         st.session_state["selector_receta_guardada_pendiente"] = receta_guardada.get("id")
@@ -5148,8 +5845,8 @@ with main_tab_recetas:
                         codigo_mostrado = receta_guardada.get("codigo_receta", codigo_receta)
                         st.session_state["receta_id_cargada"] = receta_guardada.get("id")
                         st.session_state["codigo_receta_cargada"] = codigo_mostrado
-                        st.session_state["receta_raciones_base"] = 1.0
-                        st.session_state["receta_raciones_base_cargada"] = 1.0
+                        st.session_state["receta_raciones_base"] = float(raciones_base_receta)
+                        st.session_state["receta_raciones_base_cargada"] = float(raciones_base_receta)
                         limpiar_cache_recetas_guardadas()
                         st.session_state["selector_receta_guardada_pendiente"] = receta_guardada.get("id")
                         st.session_state["mensaje_receta_cargada"] = (
@@ -5282,17 +5979,23 @@ with main_tab_menus:
                         else:
                             lineas_reconstruidas = []
                             for orden, linea in enumerate(lineas_menu_df.to_dict(orient="records"), start=1):
-                                precio_receta = linea.get("precio_receta_con_iva", None)
+                                precio_receta = linea.get("precio_receta_sin_iva", None)
                                 if precio_receta is None or pd.isna(precio_receta):
-                                    precio_receta = linea.get("precio_receta_sin_iva", None)
+                                    precio_receta = linea.get("precio_receta_con_iva", None)
 
                                 hay_precio_receta = precio_receta is not None and not pd.isna(precio_receta)
                                 lineas_reconstruidas.append(recalcular_linea_menu({
                                     "receta_id": str(linea.get("receta_id", "") or ""),
                                     "codigo_receta": str(linea.get("codigo_receta", "") or ""),
                                     "nombre_receta": str(linea.get("nombre_receta", "") or "Receta sin nombre"),
-                                    "raciones": float(numero_seguro(linea.get("raciones", 1.0), 1.0)),
-                                    "raciones_base": float(numero_seguro(linea.get("raciones_base", 1.0), 1.0)),
+                                    "raciones_receta_en_menu": max(
+                                        float(numero_seguro(linea.get("raciones", 1.0), 1.0)),
+                                        0.001,
+                                    ),
+                                    "raciones_base_receta": max(
+                                        float(numero_seguro(linea.get("raciones_base", 1.0), 1.0)),
+                                        0.001,
+                                    ),
                                     "coste_receta": float(numero_seguro(linea.get("coste_receta", 0.0), 0.0)),
                                     "precio_receta": float(numero_seguro(precio_receta, 0.0)) if hay_precio_receta else None,
                                     "orden": int(numero_seguro(linea.get("orden", orden), orden)),
@@ -5322,11 +6025,11 @@ with main_tab_menus:
         )
     with menu_col3:
         numero_comensales = st.number_input(
-            "Raciones base",
+            "Pax de referencia (informativo)",
             min_value=1,
             step=1,
             value=int(st.session_state.get("menu_numero_comensales", 1) or 1),
-            help="Número base de raciones que se aplicará por defecto a las recetas añadidas.",
+            help="Dato informativo. No cambia las raciones asignadas a cada receta.",
             key="menu_numero_comensales"
         )
 
@@ -5334,12 +6037,6 @@ with main_tab_menus:
         st.caption(f"Menú cargado para actualizar: {st.session_state['menu_id']}")
     if supabase_disponible and not obtener_user_id_actual():
         st.caption("Inicia sesión para guardar menús en tu cuenta")
-
-    raciones_base_menu = int(numero_seguro(numero_comensales, 1))
-    raciones_nueva_linea_default = float(raciones_base_menu) if raciones_base_menu > 0 else 1.0
-    if st.session_state.get("menu_comensales_raciones_sync") != int(numero_comensales):
-        st.session_state["menu_raciones_receta"] = raciones_nueva_linea_default
-        st.session_state["menu_comensales_raciones_sync"] = int(numero_comensales)
 
     st.markdown("##### Añadir recetas")
 
@@ -5378,8 +6075,9 @@ with main_tab_menus:
         with add_col2:
             raciones_linea_menu = st.number_input(
                 "Raciones de esta receta",
-                min_value=0.0,
+                min_value=0.001,
                 step=1.0,
+                value=1.0,
                 key="menu_raciones_receta"
             )
         with add_col3:
@@ -5394,22 +6092,28 @@ with main_tab_menus:
 
         if anadir_receta_menu:
             receta_seleccionada = recetas_menu_por_id.get(str(receta_menu_id), {})
-            if any(str(linea.get("receta_id")) == str(receta_menu_id) for linea in st.session_state["menu_actual"]):
+            if raciones_linea_menu <= 0:
+                st.error("Las raciones de la receta deben ser mayores que 0.")
+            elif any(str(linea.get("receta_id")) == str(receta_menu_id) for linea in st.session_state["menu_actual"]):
                 st.session_state["mensaje_menu_aviso"] = (
                     "Esta receta ya está en el menú. Puedes mantenerla duplicada si representa otro pase "
                     "o quitar una de las líneas."
                 )
-            linea_menu = crear_linea_menu_desde_receta(
-                receta_menu_id,
-                receta_seleccionada,
-                raciones_linea_menu,
-                len(st.session_state["menu_actual"]) + 1,
-                seccion_linea_menu
-            )
-            st.session_state["menu_actual"].append(linea_menu)
-            st.session_state["menu_actual"] = normalizar_lineas_menu(st.session_state["menu_actual"])
-            st.success(f"Receta añadida al menú: {linea_menu['nombre_receta']}.")
-            st.rerun()
+            if raciones_linea_menu > 0:
+                try:
+                    linea_menu = crear_linea_menu_desde_receta(
+                        receta_menu_id,
+                        receta_seleccionada,
+                        raciones_linea_menu,
+                        len(st.session_state["menu_actual"]) + 1,
+                        seccion_linea_menu
+                    )
+                    st.session_state["menu_actual"].append(linea_menu)
+                    st.session_state["menu_actual"] = normalizar_lineas_menu(st.session_state["menu_actual"])
+                    st.success(f"Receta añadida al menú: {linea_menu['nombre_receta']}.")
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
 
     st.markdown("##### Menú actual")
 
@@ -5418,35 +6122,13 @@ with main_tab_menus:
         st.session_state["menu_actual"] = lineas_menu_actual
 
     if lineas_menu_actual:
-        recetas_no_normalizadas = [
-            linea for linea in lineas_menu_actual
-            if numero_seguro(linea.get("raciones_base", 1.0), 1.0) != 1.0
-        ]
-        for linea in recetas_no_normalizadas:
-            st.warning(
-                f"La receta {linea.get('nombre_receta', 'sin nombre')} no está normalizada a 1 ración. "
-                "El cálculo puede no ser correcto hasta normalizarla."
-            )
-
-        recetas_con_racion_ajustada = [
-            linea for linea in lineas_menu_actual
-            if numero_seguro(linea.get("raciones", 1.0), 1.0) != float(raciones_base_menu)
-        ]
-        if recetas_con_racion_ajustada:
-            nombres_ajustados = ", ".join(
-                str(linea.get("nombre_receta", "") or "Receta sin nombre")
-                for linea in recetas_con_racion_ajustada
-            )
-            st.info(f"Ración ajustada respecto al menú base: {nombres_ajustados}")
-
         menu_editor_df = pd.DataFrame([
             {
                 "orden": linea.get("orden", idx + 1),
                 "seccion": linea.get("seccion", ""),
                 "nombre_receta": linea.get("nombre_receta", ""),
-                "raciones_base_menu": raciones_base_menu,
-                "raciones": linea.get("raciones", 1.0),
-                "coste_por_racion": numero_seguro(linea.get("coste_receta", 0.0), 0.0) / max(numero_seguro(linea.get("raciones_base", 1.0), 1.0), 1.0),
+                "coste_por_racion": linea.get("coste_por_racion_receta", 0.0),
+                "raciones_receta_en_menu": linea.get("raciones_receta_en_menu", 1.0),
                 "coste_total_linea": linea.get("coste_total_linea", 0.0),
                 "precio_por_racion": (
                     numero_seguro(linea.get("precio_receta", 0.0), 0.0) / max(numero_seguro(linea.get("raciones_base", 1.0), 1.0), 1.0)
@@ -5470,8 +6152,12 @@ with main_tab_menus:
                     help="Se guarda en menu_recetas.seccion si la columna existe."
                 ),
                 "nombre_receta": st.column_config.TextColumn("Receta", width="medium"),
-                "raciones_base_menu": st.column_config.NumberColumn("Raciones base del menú", format="%.2f"),
-                "raciones": st.column_config.NumberColumn("Raciones de esta receta", min_value=0.0, step=1.0, format="%.2f"),
+                "raciones_receta_en_menu": st.column_config.NumberColumn(
+                    "Raciones asignadas",
+                    min_value=0.001,
+                    step=1.0,
+                    format="%.2f",
+                ),
                 "coste_por_racion": st.column_config.NumberColumn("Coste por ración", format="%.2f €"),
                 "coste_total_linea": st.column_config.NumberColumn("Coste línea", format="%.2f €"),
                 "precio_por_racion": st.column_config.NumberColumn("Precio por ración", format="%.2f €"),
@@ -5479,7 +6165,6 @@ with main_tab_menus:
             },
             disabled=[
                 "nombre_receta",
-                "raciones_base_menu",
                 "coste_por_racion",
                 "coste_total_linea",
                 "precio_por_racion",
@@ -5492,7 +6177,10 @@ with main_tab_menus:
         for idx, fila in menu_editado_df.iterrows():
             linea_actualizada = dict(lineas_menu_actual[idx])
             linea_actualizada["orden"] = int(numero_seguro(fila.get("orden", idx + 1), idx + 1))
-            linea_actualizada["raciones"] = numero_seguro(fila.get("raciones", 1.0), 1.0)
+            linea_actualizada["raciones_receta_en_menu"] = numero_seguro(
+                fila.get("raciones_receta_en_menu", 1.0),
+                1.0,
+            )
             linea_actualizada["seccion"] = str(fila.get("seccion", "") or "").strip()
             lineas_editadas.append(recalcular_linea_menu(linea_actualizada))
         lineas_editadas = normalizar_lineas_menu(lineas_editadas)
@@ -5532,30 +6220,27 @@ with main_tab_menus:
     else:
         st.info("Añade recetas guardadas para construir el menú actual.")
 
-    total_coste_menu = sum(numero_seguro(linea.get("coste_total_linea", 0.0), 0.0) for linea in lineas_menu_actual)
+    total_coste_menu = (
+        calcular_coste_menu(lineas_menu_actual)
+        if lineas_menu_actual else 0.0
+    )
     lineas_con_precio = [
         linea for linea in lineas_menu_actual
         if linea.get("precio_total_linea") is not None and not pd.isna(linea.get("precio_total_linea"))
     ]
     hay_precio_menu = bool(lineas_con_precio)
     total_precio_menu = sum(numero_seguro(linea.get("precio_total_linea", 0.0), 0.0) for linea in lineas_con_precio)
-    coste_por_comensal = total_coste_menu / numero_comensales if numero_comensales > 0 else 0.0
-    precio_por_comensal = total_precio_menu / numero_comensales if hay_precio_menu and numero_comensales > 0 else None
-
     resumen_col1, resumen_col2, resumen_col3 = st.columns(3)
     with resumen_col1:
         st.metric("Recetas / platos", f"{len(lineas_menu_actual)}")
-        st.metric("Raciones base", f"{int(numero_comensales)}")
+        st.metric("Pax de referencia", f"{int(numero_comensales)}")
     with resumen_col2:
         st.metric("Coste total del menú", f"{total_coste_menu:.2f} €")
-        st.metric("Coste por ración base", f"{coste_por_comensal:.2f} €")
     with resumen_col3:
         if hay_precio_menu:
             st.metric("Precio total del menú", f"{total_precio_menu:.2f} €")
-            st.metric("Precio por ración base", f"{precio_por_comensal:.2f} €")
         else:
             st.metric("Precio total del menú", "Sin datos")
-            st.metric("Precio por ración base", "Sin datos")
 
     accion_menu_col1, accion_menu_col2, accion_menu_col3, accion_menu_col4 = st.columns(4)
     with accion_menu_col1:
