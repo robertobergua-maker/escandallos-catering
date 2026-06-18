@@ -93,13 +93,12 @@ def login_supabase(email, password):
         user_id = _obtener_campo_auth(usuario, "id")
         user_email = _obtener_campo_auth(usuario, "email", email_limpio)
         access_token = _obtener_campo_auth(sesion, "access_token")
+        refresh_token = _obtener_campo_auth(sesion, "refresh_token")
 
         if not user_id:
             return False, "No se pudo obtener el usuario autenticado."
 
-        st.session_state["user_id"] = str(user_id)
-        st.session_state["user_email"] = str(user_email or email_limpio)
-        st.session_state["access_token"] = access_token
+        _guardar_sesion_supabase(usuario, sesion)
         asegurar_usuario_app_supabase()
         return True, "Sesión iniciada correctamente."
     except Exception as e:
@@ -134,12 +133,9 @@ def registrar_usuario_supabase(email, password):
 
         user_id = _obtener_campo_auth(usuario, "id")
         user_email = _obtener_campo_auth(usuario, "email", email_limpio)
-        access_token = _obtener_campo_auth(sesion, "access_token")
 
         if sesion and user_id:
-            st.session_state["user_id"] = str(user_id)
-            st.session_state["user_email"] = str(user_email or email_limpio)
-            st.session_state["access_token"] = access_token
+            _guardar_sesion_supabase(usuario, sesion)
             asegurar_usuario_app_supabase()
             return True, "Cuenta creada e iniciada correctamente"
 
@@ -205,6 +201,7 @@ def logout_supabase():
     st.session_state["user_id"] = None
     st.session_state["user_email"] = None
     st.session_state["access_token"] = None
+    st.session_state["refresh_token"] = None
     st.session_state["usuario_app"] = None
     st.session_state["usuario_app_error"] = None
     st.session_state["usuario_app_user_id"] = None
@@ -224,6 +221,46 @@ def obtener_usuario_actual():
         "email": user_email,
         "access_token": st.session_state.get("access_token"),
     }
+
+
+def _guardar_sesion_supabase(usuario, sesion):
+    if usuario is None or sesion is None:
+        return
+    user_id = _obtener_campo_auth(usuario, "id")
+    user_email = _obtener_campo_auth(usuario, "email", "")
+    access_token = _obtener_campo_auth(sesion, "access_token")
+    refresh_token = _obtener_campo_auth(sesion, "refresh_token")
+    if user_id:
+        st.session_state["user_id"] = str(user_id)
+        st.session_state["user_email"] = str(user_email or "")
+        st.session_state["access_token"] = access_token
+        st.session_state["refresh_token"] = refresh_token
+
+
+def restaurar_sesion_supabase():
+    """
+    Intenta restaurar la sesión activa desde los tokens guardados.
+    """
+    if obtener_usuario_actual():
+        return True
+    if not supabase_disponible or supabase is None:
+        return False
+
+    refresh_token = st.session_state.get("refresh_token")
+    if not refresh_token:
+        return False
+
+    try:
+        respuesta = supabase.auth.refresh_session(refresh_token=refresh_token)
+        usuario = _obtener_campo_auth(respuesta, "user")
+        sesion = _obtener_campo_auth(respuesta, "session")
+        if not usuario or not sesion:
+            return False
+        _guardar_sesion_supabase(usuario, sesion)
+        asegurar_usuario_app_supabase()
+        return True
+    except Exception:
+        return False
 
 
 def obtener_user_id_actual():
@@ -481,6 +518,8 @@ if 'user_email' not in st.session_state:
     st.session_state['user_email'] = None
 if 'access_token' not in st.session_state:
     st.session_state['access_token'] = None
+if 'refresh_token' not in st.session_state:
+    st.session_state['refresh_token'] = None
 if 'usuario_app' not in st.session_state:
     st.session_state['usuario_app'] = None
 if 'usuario_app_error' not in st.session_state:
@@ -3939,6 +3978,9 @@ st.markdown(
 )
 
 usuario_actual = obtener_usuario_actual()
+if not usuario_actual:
+    restaurar_sesion_supabase()
+    usuario_actual = obtener_usuario_actual()
 logo_html = (
     f'<img src="data:image/png;base64,{logo_samirarte_base64()}" alt="Samirarte">'
     if logo_samirarte_existe()
