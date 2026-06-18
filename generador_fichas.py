@@ -3091,23 +3091,34 @@ st.markdown(
     }
     .block-container {
         padding-top: 0;
-        padding-bottom: 1.15rem;
-        padding-left: 1.6rem;
-        padding-right: 1.6rem;
+        padding-bottom: 0.8rem;
+        padding-left: 1.35rem;
+        padding-right: 1.35rem;
         max-width: 100%;
     }
+    hr {
+        margin: 0.55rem 0 !important;
+    }
     h1 {
-        margin-bottom: 0.2rem;
+        margin-bottom: 0.12rem;
         color: var(--samirarte-navy);
         font-weight: 800;
     }
     h2, h3, h4 {
-        margin-top: 0.45rem;
-        margin-bottom: 0.35rem;
+        margin-top: 0.28rem;
+        margin-bottom: 0.22rem;
         color: var(--samirarte-navy);
     }
+    h5, h6 {
+        margin-top: 0.18rem;
+        margin-bottom: 0.16rem;
+        color: var(--samirarte-navy);
+    }
+    p {
+        margin-bottom: 0.35rem;
+    }
     div[data-testid="stVerticalBlock"] {
-        gap: 0.45rem;
+        gap: 0.28rem;
     }
     .samirarte-topbar {
         display: flex;
@@ -3162,7 +3173,7 @@ st.markdown(
         border: 1px solid var(--samirarte-border);
         border-radius: 10px;
         background: #ffffff;
-        padding: 0.72rem 1rem 0.82rem;
+        padding: 0.55rem 0.82rem 0.64rem;
         box-shadow: 0 10px 24px rgba(20, 38, 74, 0.04);
     }
     .samirarte-section-title {
@@ -3175,8 +3186,8 @@ st.markdown(
         background: #ffffff;
         border: 1px solid var(--samirarte-border);
         border-radius: 10px;
-        padding: 0.72rem 0.95rem;
-        min-height: 82px;
+        padding: 0.5rem 0.78rem;
+        min-height: 68px;
         box-shadow: 0 10px 24px rgba(20, 38, 74, 0.04);
     }
     div[data-testid="stMetric"] label {
@@ -3186,7 +3197,7 @@ st.markdown(
     }
     div[data-testid="stMetricValue"] {
         color: var(--samirarte-navy);
-        font-size: 1.32rem;
+        font-size: 1.18rem;
         font-weight: 800;
     }
     div[data-testid="stDataFrame"] {
@@ -3203,7 +3214,12 @@ st.markdown(
     div[data-testid="stTextInput"] input,
     div[data-testid="stNumberInput"] input,
     div[data-baseweb="select"] {
-        min-height: 2.35rem;
+        min-height: 2.05rem;
+    }
+    div[data-testid="stTextInput"],
+    div[data-testid="stNumberInput"],
+    div[data-testid="stSelectbox"] {
+        margin-bottom: 0;
     }
     div[data-testid="stTextInput"] input,
     div[data-testid="stNumberInput"] input,
@@ -3242,7 +3258,15 @@ st.markdown(
     div[data-testid="stFormSubmitButton"] button {
         border-radius: 7px;
         font-weight: 800;
-        min-height: 2.45rem;
+        min-height: 2.12rem;
+        padding-top: 0.28rem;
+        padding-bottom: 0.28rem;
+    }
+    div[data-testid="stAlert"] {
+        padding: 0.45rem 0.75rem;
+    }
+    div[data-testid="stAlert"] p {
+        margin-bottom: 0;
     }
     @media (max-width: 720px) {
         .block-container {
@@ -5191,7 +5215,7 @@ with main_tab_recetas:
                         st.error(mensaje)
 
 with main_tab_menus:
-    st.subheader("Menús")
+    st.markdown("### Menús")
     st.caption("Construye un menú básico combinando recetas guardadas.")
     sincronizar_widgets_menu()
 
@@ -5202,7 +5226,7 @@ with main_tab_menus:
     if mensaje_menu_aviso:
         st.warning(mensaje_menu_aviso)
 
-    st.markdown("#### Cargar menú guardado")
+    st.markdown("##### Cargar menú guardado")
     if not supabase_disponible:
         st.warning("El inventario no está disponible. No se pueden cargar menús guardados ahora.")
     else:
@@ -5283,9 +5307,7 @@ with main_tab_menus:
                             st.session_state["mensaje_menu_cargado"] = f"Menú cargado: {st.session_state['menu_nombre']}."
                             st.rerun()
 
-    st.divider()
-
-    menu_col1, menu_col2 = st.columns([2, 1])
+    menu_col1, menu_col2, menu_col3 = st.columns([2.1, 1, 1])
     with menu_col1:
         nombre_menu = st.text_input("Nombre del menú", key="menu_nombre")
     with menu_col2:
@@ -5298,28 +5320,28 @@ with main_tab_menus:
             opciones_tipo_menu,
             key="menu_tipo"
         )
+    with menu_col3:
+        numero_comensales = st.number_input(
+            "Raciones base",
+            min_value=1,
+            step=1,
+            value=int(st.session_state.get("menu_numero_comensales", 1) or 1),
+            help="Número base de raciones que se aplicará por defecto a las recetas añadidas.",
+            key="menu_numero_comensales"
+        )
 
     if st.session_state.get("menu_id"):
         st.caption(f"Menú cargado para actualizar: {st.session_state['menu_id']}")
     if supabase_disponible and not obtener_user_id_actual():
-        st.info("Inicia sesión para guardar menús en tu cuenta")
+        st.caption("Inicia sesión para guardar menús en tu cuenta")
 
-    numero_comensales = st.number_input(
-        "Raciones base del menú",
-        min_value=1,
-        step=1,
-        value=int(st.session_state.get("menu_numero_comensales", 1) or 1),
-        help="Número base de raciones que se aplicará por defecto a las recetas añadidas.",
-        key="menu_numero_comensales"
-    )
     raciones_base_menu = int(numero_seguro(numero_comensales, 1))
     raciones_nueva_linea_default = float(raciones_base_menu) if raciones_base_menu > 0 else 1.0
     if st.session_state.get("menu_comensales_raciones_sync") != int(numero_comensales):
         st.session_state["menu_raciones_receta"] = raciones_nueva_linea_default
         st.session_state["menu_comensales_raciones_sync"] = int(numero_comensales)
 
-    st.divider()
-    st.markdown("#### Añadir recetas")
+    st.markdown("##### Añadir recetas")
 
     recetas_menu_df = pd.DataFrame()
     recetas_menu_por_id = {}
@@ -5389,8 +5411,7 @@ with main_tab_menus:
             st.success(f"Receta añadida al menú: {linea_menu['nombre_receta']}.")
             st.rerun()
 
-    st.divider()
-    st.markdown("#### Menú actual")
+    st.markdown("##### Menú actual")
 
     lineas_menu_actual = normalizar_lineas_menu(st.session_state.get("menu_actual", []))
     if lineas_menu_actual != st.session_state.get("menu_actual", []):
