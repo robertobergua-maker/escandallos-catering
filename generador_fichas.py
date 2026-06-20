@@ -5117,8 +5117,17 @@ with main_tab_recetas:
     st.markdown('</div>', unsafe_allow_html=True)
 
     ingredientes_activos = st.session_state.get("ingredientes", [])
-    df_display = pd.DataFrame(ingredientes_activos)
-    for col in ["codigo", "descripcion", "unidad_medida", "cantidad_bruta", "merma", "precio_unidad"]:
+    # Construir DataFrame solo con las columnas necesarias para evitar incompatibilidades
+    columnas_esperadas = ["codigo", "descripcion", "unidad_medida", "cantidad_bruta", "merma", "precio_unidad"]
+    datos_limpios = []
+    for ing in ingredientes_activos:
+        fila = {}
+        for col in columnas_esperadas:
+            fila[col] = ing.get(col, 0.0 if col in ["cantidad_bruta", "merma", "precio_unidad"] else "")
+        datos_limpios.append(fila)
+    
+    df_display = pd.DataFrame(datos_limpios) if datos_limpios else pd.DataFrame(columns=columnas_esperadas)
+    for col in columnas_esperadas:
         if col not in df_display.columns:
             df_display[col] = 0.0 if col in ["cantidad_bruta", "merma", "precio_unidad"] else ""
     for col in ["cantidad_bruta", "merma", "precio_unidad"]:
@@ -5127,7 +5136,7 @@ with main_tab_recetas:
     fila_seleccionada = st.session_state.get("ingrediente_fila_seleccionada")
     df_display["seleccionar"] = [
         idx == fila_seleccionada for idx in range(len(df_display))
-    ]
+    ].copy()
     fila_alta = pd.DataFrame([{
         "seleccionar": False,
         "descripcion": "",
@@ -5139,6 +5148,7 @@ with main_tab_recetas:
         "codigo": "S/C",
     }])
     df_display = pd.concat([df_display, fila_alta], ignore_index=True)
+    # Reordenar solo las columnas esperadas
     df_display = df_display[
         ["seleccionar", "descripcion", "cantidad_bruta", "unidad_medida", "merma", "precio_unidad", "coste_total", "codigo"]
     ]
