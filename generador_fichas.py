@@ -623,6 +623,8 @@ if 'ingrediente_alta_coincidencias' not in st.session_state:
     st.session_state['ingrediente_alta_coincidencias'] = []
 if 'ingrediente_alta_elegido' not in st.session_state:
     st.session_state['ingrediente_alta_elegido'] = None
+if 'confirmar_limpiar_ingredientes' not in st.session_state:
+    st.session_state['confirmar_limpiar_ingredientes'] = False
 
 if 'menu_actual' not in st.session_state:
     st.session_state['menu_actual'] = []
@@ -3713,6 +3715,90 @@ def preparar_ingredientes_receta_para_sesion(ingredientes_df):
     return ingredientes
 
 
+def cargar_receta_guardada_en_sesion(receta_id):
+    """
+    Carga una receta guardada, incluso si no tiene ingredientes.
+    No modifica ni elimina datos de Supabase.
+    """
+    receta_id = str(receta_id or "").strip()
+    if not receta_id:
+        return False, "No se ha seleccionado ninguna receta."
+
+    cabecera, ingredientes_df = cargar_receta_detalle_supabase(receta_id)
+    if not cabecera:
+        return False, "No se pudo cargar la cabecera de la receta seleccionada."
+
+    ingredientes_cargados = preparar_ingredientes_receta_para_sesion(ingredientes_df)
+    raciones_base_raw = pd.to_numeric(cabecera.get("raciones_base"), errors="coerce")
+    raciones_cargadas = 0.0 if pd.isna(raciones_base_raw) else float(raciones_base_raw)
+    if raciones_cargadas <= 0:
+        raciones_cargadas = 1.0
+        st.session_state["aviso_receta_antigua"] = (
+            "La receta tenía una base de raciones no válida; "
+            "se muestra con 1 ración para poder corregirla."
+        )
+
+    st.session_state["receta_recien_cargada"] = True
+    st.session_state["receta_raciones_base_cargada"] = float(raciones_cargadas)
+    st.session_state["ingredientes"] = ingredientes_cargados
+    st.session_state["ingredientes_snapshot_cargados"] = [
+        dict(ing) for ing in ingredientes_cargados
+    ]
+    limpiar_alta_ingrediente()
+    limpiar_ficha_ingrediente()
+    st.session_state["ingredientes_base_raciones"] = [
+        dict(ing) for ing in ingredientes_cargados
+    ]
+    st.session_state["factor_raciones"] = 1.0
+    st.session_state["receta_tiene_cambios_pendientes"] = False
+    st.session_state["raciones_base"] = raciones_cargadas
+    st.session_state["raciones_deseadas"] = raciones_cargadas
+    st.session_state["receta_raciones_base"] = raciones_cargadas
+    st.session_state["input_raciones_base_receta_pendiente"] = raciones_cargadas
+    st.session_state["receta_raciones_deseadas"] = raciones_cargadas
+    st.session_state["raciones_base_aplicadas"] = raciones_cargadas
+    st.session_state["raciones_deseadas_aplicadas"] = raciones_cargadas
+    st.session_state["sincronizar_inputs_raciones"] = True
+    st.session_state["receta_nombre"] = str(
+        cabecera.get("nombre", "") or "Mi Receta"
+    )
+    st.session_state["receta_categoria"] = str(cabecera.get("categoria", "") or "")
+    st.session_state["receta_tipo_plato"] = str(
+        cabecera.get("tipo_plato", "") or ""
+    )
+    st.session_state["receta_observaciones"] = str(
+        cabecera.get("observaciones") or cabecera.get("descripcion") or ""
+    )
+    st.session_state["sincronizar_campos_receta"] = True
+    codigo_cargado = str(cabecera.get("codigo_receta", "") or "").strip()
+    nombre_cargado = str(cabecera.get("nombre", "") or "receta").strip()
+    st.session_state["receta_id_cargada"] = str(cabecera.get("id", receta_id))
+    st.session_state["codigo_receta_cargada"] = codigo_cargado
+    st.session_state.pop("receta_carga_pendiente_id", None)
+
+    detalle_vacia = " La receta no contiene ingredientes." if not ingredientes_cargados else ""
+    return True, (
+        f"Receta cargada: {nombre_cargado} ({codigo_cargado}).{detalle_vacia}"
+    )
+
+
+def limpiar_ingredientes_receta_actual():
+    """
+    Vacía únicamente los ingredientes de la receta activa.
+    El inventario y la receta guardada en Supabase no se modifican.
+    """
+    st.session_state["ingredientes"] = []
+    st.session_state["ingredientes_base_raciones"] = []
+    st.session_state["ingrediente_fila_seleccionada"] = None
+    limpiar_alta_ingrediente(activar_sin_seleccion=True)
+    st.session_state["receta_tiene_cambios_pendientes"] = True
+    st.session_state["confirmar_limpiar_ingredientes"] = False
+    st.session_state["aviso_ingrediente"] = (
+        "Se han quitado todos los ingredientes de la receta actual. "
+        "El inventario y la receta guardada no se han modificado."
+    )
+
+
 # =============================================================================
 # 🧠 PROCESAMIENTO INTELIGENTE CON CIA
 # =============================================================================
@@ -5274,7 +5360,52 @@ with main_tab_recetas:
     met_col3.metric("PVP por ración", f"{pvp_por_racion_cabecera:.2f} €" if pvp_final_cabecera else "-")
     met_col4.metric("Food Cost", f"{food_cost_cabecera:.1f} %" if food_cost_cabecera else "-")
 
-    st.markdown('<div class="samirarte-section-title">Ingredientes</div>', unsafe_allow_html=True)
+    ingredientes_titulo_col, limpiar_ingredientes_col = st.columns([4, 1])
+    with ingredientes_titulo_col:
+        st.markdown(
+            '<div class="samirarte-section-title">Ingredientes</div>',
+            unsafe_allow_html=True,
+        )
+    with limpiar_ingredientes_col:
+        solicitar_limpiar_ingredientes = st.button(
+            "Limpiar todos",
+            key="solicitar_limpiar_ingredientes",
+            use_container_width=True,
+            disabled=not (
+                st.session_state.get("ingredientes")
+                or st.session_state.get("ingrediente_alta_datos", {}).get("descripcion")
+            ),
+            help="Quita todos los ingredientes de la receta actual, sin borrar el inventario.",
+        )
+    if solicitar_limpiar_ingredientes:
+        st.session_state["confirmar_limpiar_ingredientes"] = True
+
+    if st.session_state.get("confirmar_limpiar_ingredientes", False):
+        st.warning(
+            "Se quitarán todos los ingredientes de la receta actual. "
+            "Esta acción no borra el inventario ni la versión guardada."
+        )
+        confirmar_limpieza_col, cancelar_limpieza_col = st.columns([2, 1])
+        with confirmar_limpieza_col:
+            confirmar_limpieza = st.button(
+                "Sí, limpiar todos los ingredientes",
+                key="confirmar_limpiar_todos_ingredientes",
+                type="primary",
+                use_container_width=True,
+            )
+        with cancelar_limpieza_col:
+            cancelar_limpieza = st.button(
+                "Cancelar limpieza",
+                key="cancelar_limpiar_todos_ingredientes",
+                use_container_width=True,
+            )
+        if confirmar_limpieza:
+            limpiar_ingredientes_receta_actual()
+            st.rerun()
+        if cancelar_limpieza:
+            st.session_state["confirmar_limpiar_ingredientes"] = False
+            st.rerun()
+
     aviso_ingrediente = st.session_state.pop("aviso_ingrediente", None)
     if aviso_ingrediente:
         st.success(aviso_ingrediente)
@@ -6241,7 +6372,9 @@ with main_tab_recetas:
 
 with main_tab_recetas:
     st.markdown("##### Recetas guardadas")
-    st.session_state.pop("mensaje_receta_cargada", None)
+    mensaje_receta_cargada = st.session_state.pop("mensaje_receta_cargada", None)
+    if mensaje_receta_cargada:
+        st.success(mensaje_receta_cargada)
 
     opciones_recetas = []
     recetas_por_id = {}
@@ -6341,10 +6474,6 @@ with main_tab_recetas:
                         receta_id_a_cargar = str(
                             st.session_state.pop("receta_carga_pendiente_id")
                         )
-                        st.session_state['receta_id_cargada'] = None
-                        st.session_state['ingredientes'] = []
-                        limpiar_alta_ingrediente(activar_sin_seleccion=True)
-                        st.session_state['receta_tiene_cambios_pendientes'] = False
                     elif cancelar_carga:
                         st.session_state.pop("receta_carga_pendiente_id", None)
                         st.rerun()
@@ -6354,50 +6483,14 @@ with main_tab_recetas:
                     if receta_seleccionada and not receta_es_propia_o_antigua(receta_seleccionada):
                         st.error("No puedes modificar una receta de otro usuario")
                     else:
-                        cabecera, ingredientes_df = cargar_receta_detalle_supabase(receta_id_a_cargar)
-                        ingredientes_cargados = preparar_ingredientes_receta_para_sesion(ingredientes_df)
-                        if not cabecera:
-                            st.error("No se pudo cargar la cabecera de la receta seleccionada.")
-                        elif not ingredientes_cargados:
-                            st.warning("La receta seleccionada no tiene ingredientes guardados.")
-                        else:
-                            raciones_base_raw = pd.to_numeric(cabecera.get("raciones_base"), errors="coerce")
-                            raciones_cargadas = 0.0 if pd.isna(raciones_base_raw) else float(raciones_base_raw)
-                            if raciones_cargadas <= 0:
-                                raciones_cargadas = 1.0
-                                st.session_state["aviso_receta_antigua"] = (
-                                    "La receta tenía una base de raciones no válida; "
-                                    "se muestra con 1 ración para poder corregirla."
-                                )
-                            st.session_state["receta_raciones_base_cargada"] = float(raciones_cargadas)
-                            st.session_state["ingredientes"] = ingredientes_cargados
-                            st.session_state["ingredientes_snapshot_cargados"] = [dict(ing) for ing in ingredientes_cargados]
-                            limpiar_alta_ingrediente()
-                            limpiar_ficha_ingrediente()
-                            st.session_state["ingredientes_base_raciones"] = [dict(ing) for ing in ingredientes_cargados]
-                            st.session_state["factor_raciones"] = 1.0
-                            st.session_state["receta_tiene_cambios_pendientes"] = False
-                            st.session_state["raciones_base"] = raciones_cargadas
-                            st.session_state["raciones_deseadas"] = raciones_cargadas
-                            st.session_state["receta_raciones_base"] = raciones_cargadas
-                            st.session_state["input_raciones_base_receta_pendiente"] = raciones_cargadas
-                            st.session_state["receta_raciones_deseadas"] = raciones_cargadas
-                            st.session_state["raciones_base_aplicadas"] = raciones_cargadas
-                            st.session_state["raciones_deseadas_aplicadas"] = raciones_cargadas
-                            st.session_state["sincronizar_inputs_raciones"] = True
-                            st.session_state["receta_nombre"] = str(cabecera.get("nombre", "") or "Mi Receta")
-                            st.session_state["receta_categoria"] = str(cabecera.get("categoria", "") or "")
-                            st.session_state["receta_tipo_plato"] = str(cabecera.get("tipo_plato", "") or "")
-                            st.session_state["receta_observaciones"] = str(
-                                cabecera.get("observaciones") or cabecera.get("descripcion") or ""
-                            )
-                            st.session_state["sincronizar_campos_receta"] = True
-                            codigo_cargado = str(cabecera.get("codigo_receta", "") or "").strip()
-                            nombre_cargado = str(cabecera.get("nombre", "") or "receta").strip()
-                            st.session_state["receta_id_cargada"] = str(cabecera.get("id", receta_id_a_cargar))
-                            st.session_state["codigo_receta_cargada"] = codigo_cargado
-                            st.session_state["mensaje_receta_cargada"] = f"Receta cargada: {nombre_cargado} ({codigo_cargado})."
+                        ok_carga, mensaje_carga = cargar_receta_guardada_en_sesion(
+                            receta_id_a_cargar
+                        )
+                        if ok_carga:
+                            st.session_state["mensaje_receta_cargada"] = mensaje_carga
                             st.rerun()
+                        else:
+                            st.error(mensaje_carga)
 
 
     if st.session_state['ingredientes']:
