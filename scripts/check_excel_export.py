@@ -14,7 +14,12 @@ from openpyxl.utils import get_column_letter
 def cargar_funciones_excel():
     source = Path("generador_fichas.py").read_text(encoding="utf-8")
     module = ast.parse(source)
-    needed_assigns = {"PALABRAS_NO_ALIMENTARIAS"}
+    needed_assigns = {
+        "PALABRAS_NO_ALIMENTARIAS",
+        "PALABRAS_BLOQUEO_MATCHING",
+        "FRASES_BLOQUEO_MATCHING",
+        "INGREDIENTES_INCOHERENTES_ARROZ",
+    }
     nodes = [
         node for node in module.body
         if (
@@ -25,8 +30,16 @@ def cargar_funciones_excel():
             "normalizar_texto_busqueda",
             "parece_material_no_alimentario",
             "descripcion_generica_ingrediente",
+            "contiene_bloqueo_matching",
+            "bloqueo_pedido_explicitamente",
             "sugerir_ingredientes_similares",
             "inferir_unidad_medida",
+            "receta_parece_arroz",
+            "ingrediente_incoherente_en_arroz",
+            "motivo_indica_presencia_explicita",
+            "normalizar_unidad_ia",
+            "convertir_cantidad_ia",
+            "buscar_coincidencia_principal_inventario",
             "ajustar_ingredientes_por_raciones",
             "calcular_ajuste_raciones",
             "normalizar_respuesta_ingredientes_ia",
@@ -45,6 +58,7 @@ def cargar_funciones_excel():
         "re": re,
         "unicodedata": unicodedata,
         "SequenceMatcher": SequenceMatcher,
+        "inventario_df": pd.DataFrame(),
     }
     exec(compiled, namespace)
     return (
@@ -88,24 +102,43 @@ def comprobar_ajuste_raciones(ajustar_ingredientes_por_raciones, calcular_ajuste
 
 def comprobar_normalizacion_ia(normalizar_respuesta_ingredientes_ia):
     ingrediente = {"codigo": "ING-0001", "descripcion": "TOMATE PERA", "cantidad_bruta": 1.0, "merma": 0, "precio_unidad": 2.5}
-    raciones, ingredientes = normalizar_respuesta_ingredientes_ia([ingrediente])
+    _, raciones, ingredientes = normalizar_respuesta_ingredientes_ia([ingrediente])
     assert raciones is None
-    assert ingredientes[0]["descripcion"] == "TOMATE PERA"
+    assert ingredientes[0]["descripcion"].upper() == "TOMATE PERA"
     assert ingredientes[0]["unidad_medida"] == "kg"
 
-    raciones, ingredientes = normalizar_respuesta_ingredientes_ia({
+    _, raciones, ingredientes = normalizar_respuesta_ingredientes_ia({
         "raciones_base": 6,
         "ingredientes": [ingrediente],
     })
     assert raciones == 6.0
-    assert ingredientes[0]["descripcion"] == "TOMATE PERA"
+    assert ingredientes[0]["descripcion"].upper() == "TOMATE PERA"
     assert ingredientes[0]["unidad_medida"] == "kg"
 
-    raciones, ingredientes = normalizar_respuesta_ingredientes_ia([
+    _, raciones, ingredientes = normalizar_respuesta_ingredientes_ia([
         {"codigo": "X", "descripcion": "PAPEL ENVOLVER polvorones", "cantidad_bruta": 1}
     ])
     assert raciones is None
     assert ingredientes == []
+
+    nombre, raciones, ingredientes = normalizar_respuesta_ingredientes_ia({
+        "nombre_receta": "Rollitos de pescado",
+        "raciones_base": 4,
+        "ingredientes": [
+            {"nombre": "gambas", "cantidad": 400, "unidad": "gr"},
+            {"nombre": "calamares", "cantidad": 200, "unidad": "gr."},
+            {"nombre": "merluza", "cantidad": 200, "unidad": "gramos"},
+            {"nombre": "champiñones", "cantidad": 200, "unidad": "g"},
+            {"nombre": "ajo", "cantidad": 3, "unidad": "dientes"},
+            {"nombre": "fideos chinos de arroz", "cantidad": 75, "unidad": "gr"},
+        ],
+    })
+    assert nombre == "Rollitos de pescado"
+    assert raciones == 4.0
+    cantidades = [ing["cantidad_bruta"] / raciones for ing in ingredientes]
+    unidades = [ing["unidad_medida"] for ing in ingredientes]
+    assert cantidades == [0.1, 0.05, 0.05, 0.05, 0.75, 0.01875]
+    assert unidades == ["kg", "kg", "kg", "kg", "ud", "kg"]
 
 
 def comprobar_sugerencias(parece_material_no_alimentario, sugerir_ingredientes_similares):

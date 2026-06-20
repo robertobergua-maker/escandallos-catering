@@ -858,6 +858,8 @@ def motivo_indica_presencia_explicita(motivo):
 def normalizar_unidad_ia(unidad, descripcion):
     unidad_norm = normalizar_texto_busqueda(unidad).lower()
     equivalencias = {
+        "gr": "kg",
+        "grs": "kg",
         "gramos": "kg",
         "gramo": "kg",
         "g": "kg",
@@ -867,10 +869,21 @@ def normalizar_unidad_ia(unidad, descripcion):
         "litro": "l",
         "litros": "l",
         "ml": "l",
+        "mililitro": "l",
+        "mililitros": "l",
         "unidad": "ud",
         "unidades": "ud",
         "pieza": "ud",
-        "piezas": "ud"
+        "piezas": "ud",
+        "diente": "ud",
+        "dientes": "ud",
+        "cucharada": "ud",
+        "cucharadas": "ud",
+        "cucharadita": "ud",
+        "cucharaditas": "ud",
+        "gota": "ud",
+        "gotas": "ud",
+        "hojas": "hoja",
     }
     return equivalencias.get(unidad_norm, unidad_norm or inferir_unidad_medida(descripcion))
 
@@ -881,9 +894,9 @@ def convertir_cantidad_ia(cantidad, unidad):
         return 0.0
     cantidad_num = float(cantidad_num)
     unidad_norm = normalizar_texto_busqueda(unidad).lower()
-    if unidad_norm in ["g", "gramo", "gramos"]:
+    if unidad_norm in ["g", "gr", "grs", "gramo", "gramos"]:
         return cantidad_num / 1000
-    if unidad_norm in ["ml"]:
+    if unidad_norm in ["ml", "mililitro", "mililitros"]:
         return cantidad_num / 1000
     return cantidad_num
 
@@ -1239,10 +1252,13 @@ def guardar_receta_nueva_supabase(datos_receta, ingredientes):
     """
     if not supabase_disponible or supabase is None:
         return False, "El inventario no está conectado correctamente.", None
-    receta_valida, mensaje_validacion = validar_receta_para_guardar(
+    datos_receta, ingredientes = preparar_receta_para_una_racion(
+        datos_receta,
         ingredientes,
-        datos_receta.get("raciones_base"),
     )
+    if datos_receta is None:
+        return False, "La base de raciones debe ser mayor que 0.", None
+    receta_valida, mensaje_validacion = validar_receta_para_guardar(ingredientes, 1.0)
     if not receta_valida:
         return False, mensaje_validacion, None
 
@@ -1292,10 +1308,13 @@ def actualizar_receta_supabase(receta_id, datos_receta, ingredientes):
         return False, "No hay una receta cargada para actualizar."
     if not supabase_disponible or supabase is None:
         return False, "El inventario no está conectado correctamente."
-    receta_valida, mensaje_validacion = validar_receta_para_guardar(
+    datos_receta, ingredientes = preparar_receta_para_una_racion(
+        datos_receta,
         ingredientes,
-        datos_receta.get("raciones_base"),
     )
+    if datos_receta is None:
+        return False, "La base de raciones debe ser mayor que 0."
+    receta_valida, mensaje_validacion = validar_receta_para_guardar(ingredientes, 1.0)
     if not receta_valida:
         return False, mensaje_validacion
 
@@ -1397,6 +1416,44 @@ def normalizar_ingredientes_a_una_racion(ingredientes, raciones_base):
         ing_normalizado["cantidad_bruta"] = cantidad_bruta / divisor
         ingredientes_normalizados.append(ing_normalizado)
     return ingredientes_normalizados
+
+
+def preparar_receta_para_una_racion(datos_receta, ingredientes):
+    """
+    Devuelve cabecera e ingredientes listos para persistir, siempre referidos
+    a una sola ración.
+    """
+    datos_normalizados = dict(datos_receta or {})
+    raciones_base = numero_seguro(datos_normalizados.get("raciones_base", 1.0), 1.0)
+    ingredientes_normalizados = normalizar_ingredientes_a_una_racion(
+        ingredientes,
+        raciones_base,
+    )
+    if ingredientes_normalizados is None:
+        return None, None
+
+    subtotal = sum(
+        numero_seguro(ing.get("cantidad_bruta", 0.0), 0.0)
+        * numero_seguro(ing.get("precio_unidad", 0.0), 0.0)
+        for ing in ingredientes_normalizados
+    )
+    ci_pct = numero_seguro(datos_normalizados.get("costes_indirectos_pct", 0.0), 0.0)
+    margen_pct = numero_seguro(datos_normalizados.get("margen_beneficio_pct", 0.0), 0.0)
+    iva_pct = numero_seguro(datos_normalizados.get("iva_pct", 0.0), 0.0)
+    coste_total = subtotal
+    coste_para_precio = coste_total + (coste_total * ci_pct / 100)
+    factor_margen = 1 - (margen_pct / 100)
+    pvp_neto = coste_para_precio / factor_margen if factor_margen > 0 else 0.0
+    pvp_final = pvp_neto + (pvp_neto * iva_pct / 100)
+
+    datos_normalizados.update({
+        "raciones_base": 1.0,
+        "unidad_servicio": "ración",
+        "coste_total": float(coste_total),
+        "precio_venta_sin_iva": float(pvp_neto),
+        "precio_venta_con_iva": float(pvp_final),
+    })
+    return datos_normalizados, ingredientes_normalizados
 
 
 def crear_copia_receta_normalizada_supabase(datos_receta, ingredientes, raciones_base):
@@ -3424,7 +3481,7 @@ INSTRUCCIONES CRÍTICAS:
 5. Descarta envases y utensilios: PAPEL, ENVOLVER, ENVOLTORIO, BANDEJA, CAJA, ETIQUETA, PACKAGING, SERVILLETA, PLATO, VASO, CUCHARA, TENEDOR, CUCHILLO, MOLDE.
 6. No uses automaticamente carcasa, hueso, piel, recorte ni sal especial hornear salvo que el texto lo pida expresamente.
 7. Si la receta parece una paella o arroz, no añadas mango, vinagre, espinaca, setas, zanahoria, secreto, carcasa o habas salvo que aparezcan explicitamente en el texto o imagen.
-8. Si detectas cantidades, normalizalas cuando sea razonable: kg, l, ud, sobre, botella, lata, paquete, caja, bandeja u hoja. Si no hay cantidad, usa 0.
+8. Si detectas cantidades, conserva con precisión la cantidad y su unidad original. Convierte gramos (g, gr, gr.) a kg dividiendo entre 1000 y mililitros (ml) a litros dividiendo entre 1000. Ejemplos: 400 gr = 0.4 kg; 75 gr = 0.075 kg. Para dientes, cucharadas, cucharaditas y gotas usa unidad "ud". Si no hay cantidad, usa 0.
 9. Si detectas el nombre del plato o receta, devuelvelo como "nombre_receta" con el nombre limpio y legible.
 10. Si detectas raciones de receta en expresiones como "6 porciones", "6 raciones", "para 6 personas", "serves 6" o "6 servings", devuelve ese numero como "raciones_base".
 11. La app guardara recetas nuevas siempre a 1 racion. No dividas cantidades aunque detectes otra racion base; ese dato sera solo un aviso para el usuario.
@@ -3630,6 +3687,38 @@ def incorporar_ingredientes_ia(respuesta_ia):
 def marcar_receta_modificada_manualmente():
     st.session_state['ingredientes_base_raciones'] = None
     st.session_state['factor_raciones'] = 1.0
+
+
+def normalizar_raciones_desde_campo_receta():
+    """
+    Aplica el valor introducido en 'Raciones base receta' como divisor y deja
+    inmediatamente la receta activa expresada para una ración.
+    """
+    raciones = numero_seguro(st.session_state.get("input_raciones_base_receta", 1.0), 1.0)
+    if raciones <= 0:
+        st.session_state["input_raciones_base_receta"] = 1.0
+        return
+
+    if abs(raciones - 1.0) > 1e-9 and st.session_state.get("ingredientes"):
+        ingredientes_normalizados = normalizar_ingredientes_a_una_racion(
+            st.session_state["ingredientes"],
+            raciones,
+        )
+        if ingredientes_normalizados is not None:
+            st.session_state["ingredientes"] = ingredientes_normalizados
+            st.session_state["aviso_raciones_ia"] = (
+                f"Las cantidades se han dividido entre {raciones:g} y la receta "
+                "ha quedado referida a 1 ración."
+            )
+            marcar_receta_modificada_manualmente()
+
+    st.session_state["receta_raciones_base"] = 1.0
+    st.session_state["raciones_base"] = 1.0
+    st.session_state["raciones_deseadas"] = 1.0
+    st.session_state["receta_raciones_deseadas"] = 1.0
+    st.session_state["raciones_base_aplicadas"] = 1.0
+    st.session_state["raciones_deseadas_aplicadas"] = 1.0
+    st.session_state["input_raciones_base_receta"] = 1.0
 
 
 def sincronizar_inputs_raciones():
@@ -4730,6 +4819,8 @@ with main_tab_recetas:
             min_value=0.001,
             step=1.0,
             key="input_raciones_base_receta",
+            on_change=normalizar_raciones_desde_campo_receta,
+            help="Introduce las raciones de la receta original. Las cantidades se dividirán automáticamente y el valor volverá a 1.",
         )
         st.session_state["receta_raciones_base"] = float(raciones_base_actual)
         st.session_state["raciones_base"] = float(raciones_base_actual)
@@ -4801,16 +4892,19 @@ with main_tab_recetas:
         df_display["precio_unidad"] = pd.to_numeric(df_display["precio_unidad"], errors="coerce").fillna(0.0)
         df_display["cantidad_neta"] = df_display["cantidad_bruta"] * (1 - (df_display["merma"] / 100))
         df_display["coste_total"] = df_display["cantidad_bruta"] * df_display["precio_unidad"]
+        df_display["eliminar"] = False
 
-        df_display = df_display[["codigo", "descripcion", "cantidad_bruta", "unidad_medida", "merma", "cantidad_neta", "precio_unidad", "coste_total"]]
+        df_display = df_display[["eliminar", "codigo", "descripcion", "cantidad_bruta", "unidad_medida", "merma", "cantidad_neta", "precio_unidad", "coste_total"]]
 
         # Lanzamos el editor interactivo de la receta activa
+        st.caption("Todas las filas son editables. Marca «Eliminar» para quitar cualquier ingrediente, también los no encontrados.")
         ingredientes_editados = st.data_editor(
             df_display,
             num_rows="dynamic",
             use_container_width=True,
             height=560,
             column_config={
+                "eliminar": st.column_config.CheckboxColumn("Eliminar", default=False, width="small"),
                 "codigo": st.column_config.TextColumn("Código", help="Código único del inventario", width="small"),
                 "descripcion": st.column_config.TextColumn("Ingrediente", help="Descripción del producto", width="large"),
                 "cantidad_bruta": st.column_config.NumberColumn("Cantidad", format="%.3f", min_value=0.0, width="small"),
@@ -4820,7 +4914,7 @@ with main_tab_recetas:
                 "precio_unidad": st.column_config.NumberColumn("Precio unidad", format="%.2f €", min_value=0.0, width="medium"),
                 "coste_total": st.column_config.NumberColumn("Coste", format="%.2f €", min_value=0.0, width="small")
             },
-            column_order=["descripcion", "cantidad_bruta", "unidad_medida", "merma", "precio_unidad", "coste_total", "codigo"],
+            column_order=["eliminar", "descripcion", "cantidad_bruta", "unidad_medida", "merma", "precio_unidad", "coste_total", "codigo"],
             disabled=["cantidad_neta", "coste_total"],
             key="editor_receta_activa"
         )
@@ -4831,7 +4925,13 @@ with main_tab_recetas:
         ingredientes_editados["cantidad_neta"] = ingredientes_editados["cantidad_bruta"] * (1 - (ingredientes_editados["merma"] / 100))
         ingredientes_editados["coste_total"] = ingredientes_editados["cantidad_bruta"] * ingredientes_editados["precio_unidad"]
 
-        ingredientes_lista = ingredientes_editados.drop(columns=["cantidad_neta", "coste_total"], errors="ignore").to_dict(orient='records')
+        ingredientes_editados = ingredientes_editados[
+            ~ingredientes_editados["eliminar"].fillna(False).astype(bool)
+        ].copy()
+        ingredientes_lista = ingredientes_editados.drop(
+            columns=["eliminar", "cantidad_neta", "coste_total"],
+            errors="ignore",
+        ).to_dict(orient='records')
 
         # Sincronizar el estado al vuelo
         if ingredientes_lista != st.session_state['ingredientes']:
@@ -5920,6 +6020,8 @@ with main_tab_recetas:
                     "nombre": nombre_limpio,
                     "categoria": categoria_receta.strip(),
                     "tipo_plato": tipo_plato_receta.strip(),
+                    # La capa de persistencia usa este valor como divisor y
+                    # guarda finalmente la cabecera con raciones_base = 1.
                     "raciones_base": float(raciones_base_receta),
                     "unidad_servicio": "ración",
                     "descripcion": observaciones_receta.strip(),
@@ -5940,6 +6042,9 @@ with main_tab_recetas:
                     )
                     if ok:
                         st.session_state["codigo_receta_cargada"] = codigo_receta
+                        st.session_state["receta_raciones_base"] = 1.0
+                        st.session_state["receta_raciones_base_cargada"] = 1.0
+                        st.session_state["input_raciones_base_receta"] = 1.0
                         limpiar_cache_recetas_guardadas()
                         st.session_state["selector_receta_guardada_pendiente"] = receta_id_cargada
                         st.session_state["mensaje_receta_cargada"] = (
@@ -5960,8 +6065,9 @@ with main_tab_recetas:
                         st.session_state["receta_id_cargada"] = receta_guardada.get("id")
                         st.session_state["codigo_receta_cargada"] = nuevo_codigo
                         st.session_state["receta_nombre"] = nuevo_nombre
-                        st.session_state["receta_raciones_base"] = float(raciones_base_receta)
-                        st.session_state["receta_raciones_base_cargada"] = float(raciones_base_receta)
+                        st.session_state["receta_raciones_base"] = 1.0
+                        st.session_state["receta_raciones_base_cargada"] = 1.0
+                        st.session_state["input_raciones_base_receta"] = 1.0
                         st.session_state["sincronizar_campos_receta"] = True
                         limpiar_cache_recetas_guardadas()
                         st.session_state["selector_receta_guardada_pendiente"] = receta_guardada.get("id")
@@ -5982,8 +6088,9 @@ with main_tab_recetas:
                         codigo_mostrado = receta_guardada.get("codigo_receta", codigo_receta)
                         st.session_state["receta_id_cargada"] = receta_guardada.get("id")
                         st.session_state["codigo_receta_cargada"] = codigo_mostrado
-                        st.session_state["receta_raciones_base"] = float(raciones_base_receta)
-                        st.session_state["receta_raciones_base_cargada"] = float(raciones_base_receta)
+                        st.session_state["receta_raciones_base"] = 1.0
+                        st.session_state["receta_raciones_base_cargada"] = 1.0
+                        st.session_state["input_raciones_base_receta"] = 1.0
                         limpiar_cache_recetas_guardadas()
                         st.session_state["selector_receta_guardada_pendiente"] = receta_guardada.get("id")
                         st.session_state["mensaje_receta_cargada"] = (
