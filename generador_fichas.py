@@ -574,7 +574,7 @@ if 'receta_tipo_plato' not in st.session_state:
     st.session_state['receta_tipo_plato'] = ""
 
 if 'input_receta_tipo_plato' not in st.session_state:
-    st.session_state['input_receta_tipo_plato'] = st.session_state['receta_tipo_plato']
+    st.session_state['input_receta_tipo_plato'] = st.session_state['receta_tipo_plato'] 
 
 if 'receta_observaciones' not in st.session_state:
     st.session_state['receta_observaciones'] = ""
