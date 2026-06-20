@@ -623,6 +623,21 @@ if 'margen_beneficio_pct' not in st.session_state:
 if 'iva_pct' not in st.session_state:
     st.session_state['iva_pct'] = 10.0
 
+if 'ingrediente_ficha_modo' not in st.session_state:
+    st.session_state['ingrediente_ficha_modo'] = "sin_seleccion"
+if 'ingrediente_ficha_indice' not in st.session_state:
+    st.session_state['ingrediente_ficha_indice'] = None
+if 'ingrediente_ficha_datos' not in st.session_state:
+    st.session_state['ingrediente_ficha_datos'] = {}
+if 'ingrediente_ficha_revision' not in st.session_state:
+    st.session_state['ingrediente_ficha_revision'] = 0
+if 'ingrediente_tabla_revision' not in st.session_state:
+    st.session_state['ingrediente_tabla_revision'] = 0
+if 'ingrediente_busqueda' not in st.session_state:
+    st.session_state['ingrediente_busqueda'] = ""
+if 'ingrediente_fila_seleccionada' not in st.session_state:
+    st.session_state['ingrediente_fila_seleccionada'] = None
+
 if 'menu_actual' not in st.session_state:
     st.session_state['menu_actual'] = []
 if 'menu_id' not in st.session_state:
@@ -943,6 +958,116 @@ def preparar_fila_inventario_desde_ingrediente(ingrediente, codigo=None):
         "merma": 0.0 if pd.isna(merma) else float(merma),
         "precio_unidad": 0.0 if pd.isna(precio) else float(precio)
     }
+
+
+UNIDADES_INGREDIENTE = [
+    "kg", "l", "ud", "sobre", "botella", "lata",
+    "paquete", "caja", "bandeja", "hoja",
+]
+
+
+def datos_ficha_ingrediente(ingrediente=None):
+    ingrediente = dict(ingrediente or {})
+    unidad = str(ingrediente.get("unidad_medida", "kg") or "kg").strip()
+    if unidad not in UNIDADES_INGREDIENTE:
+        unidad = "kg"
+    return {
+        "codigo": str(ingrediente.get("codigo", "S/C") or "S/C").strip().upper(),
+        "descripcion": str(ingrediente.get("descripcion", "") or "").strip(),
+        "familia": str(ingrediente.get("familia", "SIN CLASIFICAR") or "SIN CLASIFICAR").strip(),
+        "unidad_medida": unidad,
+        "merma": numero_seguro(ingrediente.get("merma", 0.0), 0.0),
+        "precio_unidad": numero_seguro(ingrediente.get("precio_unidad", 0.0), 0.0),
+        "cantidad_bruta": numero_seguro(ingrediente.get("cantidad_bruta", 0.0), 0.0),
+        "observaciones_precio": str(ingrediente.get("observaciones_precio", "") or "").strip(),
+    }
+
+
+def activar_ficha_ingrediente(modo, ingrediente=None, indice=None):
+    st.session_state["ingrediente_ficha_modo"] = modo
+    st.session_state["ingrediente_ficha_indice"] = indice
+    st.session_state["ingrediente_ficha_datos"] = datos_ficha_ingrediente(ingrediente)
+    st.session_state["ingrediente_fila_seleccionada"] = indice if modo == "fila_receta" else None
+    st.session_state["ingrediente_ficha_revision"] += 1
+    st.session_state["ingrediente_tabla_revision"] += 1
+
+
+def limpiar_ficha_ingrediente():
+    activar_ficha_ingrediente("sin_seleccion", {}, None)
+
+
+def validar_datos_ficha_ingrediente(datos, requiere_cantidad=False):
+    if not str(datos.get("descripcion", "")).strip():
+        return False, "La descripción del ingrediente es obligatoria."
+    if str(datos.get("unidad_medida", "")).strip() not in UNIDADES_INGREDIENTE:
+        return False, "Selecciona una unidad válida."
+    cantidad = numero_seguro(datos.get("cantidad_bruta", 0.0), 0.0)
+    if requiere_cantidad and cantidad <= 0:
+        return False, "La cantidad para añadir a la receta debe ser mayor que 0."
+    if numero_seguro(datos.get("precio_unidad", 0.0), 0.0) < 0:
+        return False, "El precio no puede ser negativo."
+    return True, ""
+
+
+def guardar_ficha_en_inventario(datos):
+    if not supabase_disponible or supabase is None:
+        return False, "El inventario no está conectado.", None
+
+    codigo = str(datos.get("codigo", "") or "").strip().upper()
+    if not codigo_ingrediente_valido(codigo):
+        codigo = generar_codigo_ingrediente_nuevo(
+            datos.get("descripcion", ""),
+            set(inventario_dict.keys()),
+        )
+    fila = preparar_fila_inventario_desde_ingrediente(datos, codigo=codigo)
+    fila["observaciones_precio"] = str(datos.get("observaciones_precio", "") or "").strip()
+    try:
+        supabase.table("inventario").upsert(fila).execute()
+        st.session_state["db_trigger"] += 1
+        return True, f"Ingrediente {codigo} guardado en inventario.", codigo
+    except Exception as exc:
+        return False, f"Error al guardar el ingrediente en inventario: {exc}", None
+
+
+def anadir_ficha_a_receta(datos):
+    ingrediente = datos_ficha_ingrediente(datos)
+    codigo = ingrediente["codigo"]
+    if not codigo_ingrediente_valido(codigo):
+        ingrediente["codigo"] = "S/C"
+
+    if codigo_ingrediente_valido(codigo):
+        for idx, existente in enumerate(st.session_state["ingredientes"]):
+            if str(existente.get("codigo", "")).strip().upper() == codigo:
+                cantidad_anterior = numero_seguro(existente.get("cantidad_bruta", 0.0), 0.0)
+                ingrediente["cantidad_bruta"] += cantidad_anterior
+                st.session_state["ingredientes"][idx] = ingrediente
+                activar_ficha_ingrediente("fila_receta", ingrediente, idx)
+                marcar_receta_modificada_manualmente()
+                return "sumado", idx
+
+    st.session_state["ingredientes"].append(ingrediente)
+    idx = len(st.session_state["ingredientes"]) - 1
+    activar_ficha_ingrediente("fila_receta", ingrediente, idx)
+    marcar_receta_modificada_manualmente()
+    return "añadido", idx
+
+
+def actualizar_fila_receta_desde_ficha(datos):
+    idx = st.session_state.get("ingrediente_ficha_indice")
+    if idx is None or not (0 <= int(idx) < len(st.session_state["ingredientes"])):
+        return False, "La fila seleccionada ya no existe."
+    ingrediente_actualizado = datos_ficha_ingrediente(datos)
+    codigo_actualizado = ingrediente_actualizado["codigo"]
+    if codigo_ingrediente_valido(codigo_actualizado):
+        for otro_idx, ingrediente in enumerate(st.session_state["ingredientes"]):
+            if otro_idx == int(idx):
+                continue
+            if str(ingrediente.get("codigo", "")).strip().upper() == codigo_actualizado:
+                return False, "Ese código ya está en otra fila de la receta. Edita la fila existente."
+    st.session_state["ingredientes"][int(idx)] = ingrediente_actualizado
+    activar_ficha_ingrediente("fila_receta", st.session_state["ingredientes"][int(idx)], int(idx))
+    marcar_receta_modificada_manualmente()
+    return True, "Fila de receta actualizada."
 
 
 RECETAS_COLUMNAS = [
@@ -4294,88 +4419,162 @@ with st.sidebar:
     st.divider()
     st.info("💡 Consejo: el inventario común se gestiona desde Administración, disponible solo para usuarios admin.")
 
-    ingredientes_vinculados = [
-        (idx, ing, str(ing.get("codigo", "")).strip().upper())
-        for idx, ing in enumerate(st.session_state['ingredientes'])
-        if str(ing.get("codigo", "")).strip().upper() in inventario_dict
-    ]
-    if ingredientes_vinculados:
-        st.markdown("#### 🧾 Ficha editable del ingrediente seleccionado")
-        opciones_ficha = [f"{idx}|{codigo}" for idx, _, codigo in ingredientes_vinculados]
-        etiquetas_ficha = {
-            f"{idx}|{codigo}": f"{idx + 1}. {codigo} · {inventario_dict[codigo].get('descripcion', '')}"
-            for idx, _, codigo in ingredientes_vinculados
-        }
-        seleccion_ficha = st.selectbox(
-            "Ingrediente vinculado a BBDD",
-            opciones_ficha,
-            format_func=lambda opcion: etiquetas_ficha.get(opcion, opcion),
-            key="selector_ficha_ingrediente_activo"
-        )
-        idx_ficha = int(seleccion_ficha.split("|", 1)[0])
-        codigo_ficha = seleccion_ficha.split("|", 1)[1]
-        ficha_bd = inventario_dict[codigo_ficha]
+    st.markdown("#### 🧾 Ficha de ingrediente")
+    modo_ficha = st.session_state.get("ingrediente_ficha_modo", "sin_seleccion")
+    etiquetas_modo = {
+        "sin_seleccion": "Sin selección",
+        "fila_receta": "Editando fila de receta",
+        "inventario": "Ingrediente de inventario",
+        "nuevo": "Nuevo ingrediente",
+    }
+    st.caption(etiquetas_modo.get(modo_ficha, "Sin selección"))
 
-        with st.form(f"ficha_inventario_seleccionada_{codigo_ficha}_{idx_ficha}"):
-            st.caption(f"Código: {codigo_ficha}")
-            descripcion_ficha = st.text_input("Descripción", value=str(ficha_bd.get("descripcion", "")))
-            familia_ficha = st.text_input("Familia", value=str(ficha_bd.get("familia", "SIN CLASIFICAR")))
-            unidades_validas = ["kg", "l", "ud", "sobre", "botella", "lata", "paquete", "caja", "bandeja", "hoja"]
-            unidad_actual = str(ficha_bd.get("unidad_medida", "kg")).strip() or "kg"
+    if modo_ficha == "sin_seleccion":
+        st.info("Selecciona una fila de la receta, busca en inventario o crea un ingrediente nuevo.")
+    else:
+        ficha = datos_ficha_ingrediente(st.session_state.get("ingrediente_ficha_datos", {}))
+        revision_ficha = st.session_state.get("ingrediente_ficha_revision", 0)
+        with st.form(f"form_ficha_ingrediente_{revision_ficha}"):
+            codigo_ficha = st.text_input("Código", value=ficha["codigo"])
+            descripcion_ficha = st.text_input("Descripción / nombre", value=ficha["descripcion"])
+            familia_ficha = st.text_input("Familia", value=ficha["familia"])
             unidad_ficha = st.selectbox(
                 "Unidad base",
-                unidades_validas,
-                index=unidades_validas.index(unidad_actual) if unidad_actual in unidades_validas else 0
+                UNIDADES_INGREDIENTE,
+                index=UNIDADES_INGREDIENTE.index(ficha["unidad_medida"]),
             )
             merma_ficha = st.number_input(
-                "% Merma",
+                "Merma %",
                 min_value=0.0,
                 max_value=100.0,
                 step=0.01,
-                value=float(ficha_bd.get("merma", 0.0))
+                value=float(ficha["merma"]),
             )
             precio_ficha = st.number_input(
-                "Precio Unidad (€)",
+                "Precio unidad (€)",
                 min_value=0.0,
                 step=0.01,
-                value=float(ficha_bd.get("precio_unidad", 0.0))
+                value=float(ficha["precio_unidad"]),
+            )
+            cantidad_ficha = st.number_input(
+                "Cantidad para la receta",
+                min_value=0.0,
+                step=0.001,
+                format="%.3f",
+                value=float(ficha["cantidad_bruta"]),
+            )
+            observaciones_ficha = st.text_area(
+                "Observaciones",
+                value=ficha["observaciones_precio"],
+                height=70,
             )
 
-            st.text_input("Proveedor precio", value=str(ficha_bd.get("proveedor_precio", "")), disabled=True)
-            st.text_input("Formato compra", value=str(ficha_bd.get("formato_compra", "")), disabled=True)
-            st.text_input("Fecha precio", value=str(ficha_bd.get("fecha_precio", "")), disabled=True)
-            st.text_input("Cantidad formato", value="" if pd.isna(ficha_bd.get("cantidad_formato_compra", None)) else str(ficha_bd.get("cantidad_formato_compra", "")), disabled=True)
-            st.text_input("Unidad formato", value=str(ficha_bd.get("unidad_formato_compra", "")), disabled=True)
-            st.text_input("Precio formato", value="" if pd.isna(ficha_bd.get("precio_formato_compra", None)) else str(ficha_bd.get("precio_formato_compra", "")), disabled=True)
-            st.text_input("URL precio", value=str(ficha_bd.get("url_precio", "")), disabled=True)
-            st.text_area("Observaciones precio", value=str(ficha_bd.get("observaciones_precio", "")), disabled=True, height=80)
+            datos_editados_ficha = {
+                "codigo": codigo_ficha,
+                "descripcion": descripcion_ficha,
+                "familia": familia_ficha,
+                "unidad_medida": unidad_ficha,
+                "merma": merma_ficha,
+                "precio_unidad": precio_ficha,
+                "cantidad_bruta": cantidad_ficha,
+                "observaciones_precio": observaciones_ficha,
+            }
 
-            if st.form_submit_button("Guardar cambios en BBDD"):
-                if not supabase_disponible:
-                    st.error("El inventario no está conectado correctamente.")
+            accion_col1, accion_col2 = st.columns(2)
+            with accion_col1:
+                anadir_receta_ficha = st.form_submit_button(
+                    "Añadir a receta",
+                    use_container_width=True,
+                    disabled=modo_ficha == "fila_receta",
+                )
+                actualizar_fila_ficha = st.form_submit_button(
+                    "Actualizar fila",
+                    use_container_width=True,
+                    disabled=modo_ficha != "fila_receta",
+                )
+            with accion_col2:
+                guardar_inventario_ficha = st.form_submit_button(
+                    "Guardar en inventario",
+                    use_container_width=True,
+                )
+                guardar_y_anadir_ficha = st.form_submit_button(
+                    "Guardar y añadir",
+                    use_container_width=True,
+                    disabled=modo_ficha == "fila_receta",
+                )
+            eliminar_fila_ficha = st.form_submit_button(
+                "Eliminar de esta receta",
+                use_container_width=True,
+                disabled=modo_ficha != "fila_receta",
+            )
+
+            if anadir_receta_ficha:
+                valido, mensaje = validar_datos_ficha_ingrediente(datos_editados_ficha, requiere_cantidad=True)
+                if not valido:
+                    st.error(mensaje)
                 else:
-                    datos_ficha = {
-                        "codigo": codigo_ficha,
-                        "familia": familia_ficha,
-                        "descripcion": descripcion_ficha,
-                        "unidad_medida": unidad_ficha,
-                        "merma": float(merma_ficha),
-                        "precio_unidad": float(precio_ficha)
-                    }
-                    try:
-                        supabase.table("inventario").upsert(datos_ficha).execute()
-                        st.session_state['ingredientes'][idx_ficha].update({
-                            "descripcion": descripcion_ficha,
-                            "unidad_medida": unidad_ficha,
-                            "merma": float(merma_ficha),
-                            "precio_unidad": float(precio_ficha)
-                        })
-                        st.session_state['db_trigger'] += 1
-                        marcar_receta_modificada_manualmente()
-                        st.success(f"Ficha {codigo_ficha} actualizada.")
+                    resultado, _ = anadir_ficha_a_receta(datos_editados_ficha)
+                    if precio_ficha <= 0:
+                        st.session_state["aviso_ingrediente"] = "Ingrediente añadido con coste 0 porque no tiene precio."
+                    elif resultado == "sumado":
+                        st.session_state["aviso_ingrediente"] = "El ingrediente ya existía: se ha sumado la cantidad."
+                    else:
+                        st.session_state["aviso_ingrediente"] = "Ingrediente añadido a la receta."
+                    st.rerun()
+
+            elif actualizar_fila_ficha:
+                valido, mensaje = validar_datos_ficha_ingrediente(datos_editados_ficha)
+                if not valido:
+                    st.error(mensaje)
+                else:
+                    ok, mensaje = actualizar_fila_receta_desde_ficha(datos_editados_ficha)
+                    if ok:
+                        st.session_state["aviso_ingrediente"] = mensaje
                         st.rerun()
-                    except Exception as e:
-                        st.error(f"Error al guardar la ficha en el inventario: {e}")
+                    else:
+                        st.error(mensaje)
+
+            elif guardar_inventario_ficha:
+                valido, mensaje = validar_datos_ficha_ingrediente(datos_editados_ficha)
+                if not valido:
+                    st.error(mensaje)
+                else:
+                    ok, mensaje, codigo_guardado = guardar_ficha_en_inventario(datos_editados_ficha)
+                    if ok:
+                        datos_editados_ficha["codigo"] = codigo_guardado
+                        activar_ficha_ingrediente("inventario", datos_editados_ficha)
+                        st.session_state["aviso_ingrediente"] = mensaje
+                        st.rerun()
+                    else:
+                        st.error(mensaje)
+
+            elif guardar_y_anadir_ficha:
+                valido, mensaje = validar_datos_ficha_ingrediente(datos_editados_ficha, requiere_cantidad=True)
+                if not valido:
+                    st.error(mensaje)
+                else:
+                    ok, mensaje, codigo_guardado = guardar_ficha_en_inventario(datos_editados_ficha)
+                    if ok:
+                        datos_editados_ficha["codigo"] = codigo_guardado
+                        resultado, _ = anadir_ficha_a_receta(datos_editados_ficha)
+                        extra = " Se ha sumado la cantidad existente." if resultado == "sumado" else ""
+                        st.session_state["aviso_ingrediente"] = mensaje + extra
+                        st.rerun()
+                    else:
+                        st.error(mensaje)
+
+            elif eliminar_fila_ficha:
+                idx_eliminar = st.session_state.get("ingrediente_ficha_indice")
+                if idx_eliminar is None or not (0 <= int(idx_eliminar) < len(st.session_state["ingredientes"])):
+                    st.error("La fila seleccionada ya no existe.")
+                else:
+                    st.session_state["ingredientes"].pop(int(idx_eliminar))
+                    limpiar_ficha_ingrediente()
+                    marcar_receta_modificada_manualmente()
+                    st.session_state["aviso_ingrediente"] = (
+                        "Ingrediente eliminado solo de esta receta. El inventario no se ha modificado."
+                    )
+                    st.rerun()
 
 
 
@@ -4834,201 +5033,142 @@ with main_tab_recetas:
     met_col4.metric("Food Cost", f"{food_cost_cabecera:.1f} %" if food_cost_cabecera else "-")
 
     st.markdown('<div class="samirarte-section-title">Ingredientes</div>', unsafe_allow_html=True)
-    # La tabla es el único punto de alta, edición y eliminación de ingredientes.
-    # Se muestra incluso vacía para que la primera fila también pueda añadirse aquí.
-    columnas_ingrediente = [
-        "codigo", "descripcion", "cantidad_bruta",
-        "unidad_medida", "merma", "precio_unidad",
-    ]
-    df_display = pd.DataFrame(st.session_state.get("ingredientes", []))
-    for col in columnas_ingrediente:
-        if col not in df_display.columns:
-            df_display[col] = (
-                0.0 if col in ["cantidad_bruta", "merma", "precio_unidad"]
-                else ("kg" if col == "unidad_medida" else "")
-            )
-    df_display["codigo"] = df_display["codigo"].fillna("S/C").astype(str).str.strip().replace("", "S/C")
-    df_display["descripcion"] = df_display["descripcion"].fillna("").astype(str)
-    df_display["unidad_medida"] = (
-        df_display["unidad_medida"].fillna("kg").astype(str).str.strip().replace({"": "kg", "S/C": "kg"})
-    )
-    for col in ["cantidad_bruta", "merma", "precio_unidad"]:
-        df_display[col] = pd.to_numeric(df_display[col], errors="coerce").fillna(0.0)
-    df_display["coste_total"] = df_display["cantidad_bruta"] * df_display["precio_unidad"]
-    df_display["eliminar"] = False
-    df_display = df_display[
-        ["eliminar", "descripcion", "cantidad_bruta", "unidad_medida", "merma", "precio_unidad", "coste_total", "codigo"]
-    ]
-    codigos_editor = ["S/C"] + list(inventario_dict.keys())
-    for codigo_existente in df_display["codigo"].dropna().astype(str).str.strip().str.upper():
-        if codigo_existente and codigo_existente not in codigos_editor:
-            codigos_editor.append(codigo_existente)
+    aviso_ingrediente = st.session_state.pop("aviso_ingrediente", None)
+    if aviso_ingrediente:
+        st.success(aviso_ingrediente)
 
-    st.caption(
-        "Añade filas con el control de la tabla. Puedes editar cualquier ingrediente y marcar «Eliminar» "
-        "para quitarlo de la receta, esté o no en inventario."
-    )
-    ingredientes_editados = st.data_editor(
-        df_display,
-        num_rows="dynamic",
-        use_container_width=True,
-        height=560,
-        column_config={
-            "eliminar": st.column_config.CheckboxColumn("Eliminar", default=False, width="small"),
-            "descripcion": st.column_config.TextColumn(
-                "Ingrediente",
-                help="Nombre editable del ingrediente, exista o no en inventario.",
-                width="large",
-            ),
-            "cantidad_bruta": st.column_config.NumberColumn(
-                "Cantidad", format="%.3f", min_value=0.0, default=0.0, width="small"
-            ),
-            "unidad_medida": st.column_config.SelectboxColumn(
-                "Unidad",
-                options=["kg", "l", "ud", "sobre", "botella", "lata", "paquete", "caja", "bandeja", "hoja"],
-                default="kg",
-                width="small",
-            ),
-            "merma": st.column_config.NumberColumn(
-                "Merma %", format="%.2f %%", min_value=0.0, max_value=100.0, default=0.0, width="small"
-            ),
-            "precio_unidad": st.column_config.NumberColumn(
-                "Precio unidad", format="%.2f €", min_value=0.0, default=0.0, width="medium"
-            ),
-            "coste_total": st.column_config.NumberColumn(
-                "Coste", format="%.2f €", min_value=0.0, width="small"
-            ),
-            "codigo": st.column_config.SelectboxColumn(
-                "Código",
-                help="Selecciona un ingrediente del inventario o usa S/C para una fila manual.",
-                options=codigos_editor,
-                format_func=lambda codigo: (
-                    f"{codigo} · {inventario_dict[codigo]['descripcion']}"
-                    if codigo in inventario_dict
-                    else (
-                        "S/C · No encontrado en inventario"
-                        if codigo == "S/C" else f"{codigo} · No encontrado en inventario"
-                    )
-                ),
-                default="S/C",
-                width="small",
-            ),
-        },
-        disabled=["coste_total"],
-        key="editor_receta_activa",
-    )
-
-    ingredientes_editados = ingredientes_editados[
-        ~ingredientes_editados["eliminar"].fillna(False).astype(bool)
-    ].copy()
-    ingredientes_editados["descripcion"] = (
-        ingredientes_editados["descripcion"].fillna("").astype(str).str.strip()
-    )
-    ingredientes_editados["codigo"] = (
-        ingredientes_editados["codigo"].fillna("S/C").astype(str).str.strip().str.upper().replace("", "S/C")
-    )
-    ingredientes_originales = st.session_state.get("ingredientes", [])
-    for idx in ingredientes_editados.index:
-        codigo_actual = ingredientes_editados.at[idx, "codigo"]
-        try:
-            indice_original = int(idx)
-        except (TypeError, ValueError):
-            indice_original = None
-        codigo_anterior = (
-            str(ingredientes_originales[indice_original].get("codigo", "S/C")).strip().upper()
-            if indice_original is not None and 0 <= indice_original < len(ingredientes_originales)
-            else "S/C"
+    st.markdown('<div class="samirarte-form-card">', unsafe_allow_html=True)
+    buscar_col, resultado_col, accion_col = st.columns([1.6, 2.4, 1])
+    with buscar_col:
+        texto_busqueda = st.text_input(
+            "Buscar en inventario",
+            key="ingrediente_busqueda",
+            placeholder="Código, descripción o familia",
         )
-        if codigo_actual in inventario_dict and codigo_actual != codigo_anterior:
-            info_bd = inventario_dict[codigo_actual]
-            ingredientes_editados.at[idx, "descripcion"] = info_bd.get("descripcion", "")
-            ingredientes_editados.at[idx, "unidad_medida"] = info_bd.get("unidad_medida", "kg")
-            ingredientes_editados.at[idx, "merma"] = info_bd.get("merma", 0.0)
-            ingredientes_editados.at[idx, "precio_unidad"] = info_bd.get("precio_unidad", 0.0)
+    termino_busqueda = normalizar_texto_busqueda(texto_busqueda)
+    resultados_busqueda = []
+    if termino_busqueda:
+        for codigo, item in inventario_dict.items():
+            texto_item = normalizar_texto_busqueda(
+                f"{codigo} {item.get('descripcion', '')} {item.get('familia', '')}"
+            )
+            if termino_busqueda in texto_item:
+                resultados_busqueda.append(codigo)
+        resultados_busqueda = resultados_busqueda[:20]
 
-    # Una fila recién creada no entra en la receta hasta que tenga nombre.
-    ingredientes_editados = ingredientes_editados[
-        ingredientes_editados["descripcion"] != ""
-    ].copy()
-    ingredientes_editados["unidad_medida"] = (
-        ingredientes_editados["unidad_medida"].fillna("kg").astype(str).str.strip().replace("", "kg")
-    )
-    for col in ["cantidad_bruta", "merma", "precio_unidad"]:
-        ingredientes_editados[col] = pd.to_numeric(
-            ingredientes_editados[col], errors="coerce"
-        ).fillna(0.0)
-
-    ingredientes_lista = ingredientes_editados.drop(
-        columns=["eliminar", "coste_total"],
-        errors="ignore",
-    ).to_dict(orient="records")
-    if ingredientes_lista != st.session_state.get("ingredientes", []):
-        st.session_state["ingredientes"] = ingredientes_lista
-        marcar_receta_modificada_manualmente()
+    with resultado_col:
+        codigo_resultado = st.selectbox(
+            "Resultados",
+            resultados_busqueda,
+            format_func=lambda codigo: (
+                f"{codigo} - {inventario_dict[codigo].get('descripcion', '')} - "
+                f"{inventario_dict[codigo].get('unidad_medida', 'kg')} - "
+                f"{inventario_dict[codigo].get('precio_unidad', 0.0):.2f} €"
+            ),
+            disabled=not resultados_busqueda,
+            placeholder="Escribe para buscar",
+        )
+    with accion_col:
+        st.write("")
+        cargar_en_ficha = st.button(
+            "Cargar en ficha",
+            use_container_width=True,
+            disabled=not resultados_busqueda,
+        )
+    if cargar_en_ficha and codigo_resultado:
+        datos_inventario = dict(inventario_dict[codigo_resultado])
+        datos_inventario["codigo"] = codigo_resultado
+        datos_inventario["cantidad_bruta"] = 0.0
+        activar_ficha_ingrediente("inventario", datos_inventario)
         st.rerun()
 
-    if st.session_state.get("ingredientes"):
-        with st.expander("Acciones secundarias de ingredientes", expanded=False):
-            acciones_db_col1, acciones_db_col2, acciones_db_col3 = st.columns([1, 1, 1])
-            with acciones_db_col1:
-                if st.button("Actualizar BBDD con códigos existentes", use_container_width=True):
-                    if not supabase_disponible:
-                        st.error("El inventario no está conectado correctamente.")
-                    else:
-                        filas_validas = [
-                            preparar_fila_inventario_desde_ingrediente(ing)
-                            for ing in st.session_state['ingredientes']
-                            if codigo_ingrediente_valido(ing.get("codigo")) and str(ing.get("codigo", "")).strip().upper() in inventario_dict
-                        ]
-                        if filas_validas:
-                            try:
-                                for fila in filas_validas:
-                                    supabase.table("inventario").upsert(fila).execute()
-                                st.session_state['db_trigger'] += 1
-                                st.success(f"{len(filas_validas)} ingredientes actualizados en el inventario.")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Error al actualizar el inventario: {e}")
-                        else:
-                            st.info("No hay ingredientes con código existente para actualizar.")
+    nuevo_col, limpiar_col = st.columns(2)
+    with nuevo_col:
+        if st.button("+ Crear ingrediente nuevo", use_container_width=True):
+            activar_ficha_ingrediente("nuevo", {"codigo": "S/C"})
+            st.rerun()
+    with limpiar_col:
+        if st.button("Limpiar selección", use_container_width=True):
+            limpiar_ficha_ingrediente()
+            st.rerun()
+    if termino_busqueda and not resultados_busqueda:
+        st.info("No encontrado. Puedes crear un ingrediente nuevo.")
+    st.markdown('</div>', unsafe_allow_html=True)
 
-            with acciones_db_col2:
-                if st.button("Crear nuevos en BBDD", use_container_width=True):
-                    if not supabase_disponible:
-                        st.error("El inventario no está conectado correctamente.")
-                    else:
-                        existentes = set(inventario_dict.keys())
-                        ingredientes_actualizados = [dict(ing) for ing in st.session_state['ingredientes']]
-                        filas_nuevas = []
-                        for idx, ing in enumerate(ingredientes_actualizados):
-                            codigo_actual = str(ing.get("codigo", "")).strip().upper()
-                            if not codigo_ingrediente_valido(codigo_actual) or codigo_actual not in inventario_dict:
-                                nuevo_codigo = codigo_actual if codigo_ingrediente_valido(codigo_actual) else generar_codigo_ingrediente_nuevo(ing.get("descripcion", ""), existentes)
-                                existentes.add(nuevo_codigo)
-                                ing["codigo"] = nuevo_codigo
-                                filas_nuevas.append(preparar_fila_inventario_desde_ingrediente(ing, codigo=nuevo_codigo))
-                        if filas_nuevas:
-                            try:
-                                for fila in filas_nuevas:
-                                    supabase.table("inventario").upsert(fila).execute()
-                                st.session_state['ingredientes'] = ingredientes_actualizados
-                                st.session_state['db_trigger'] += 1
-                                marcar_receta_modificada_manualmente()
-                                st.success(f"{len(filas_nuevas)} ingredientes nuevos creados en el inventario.")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Error al crear ingredientes en el inventario: {e}")
-                        else:
-                            st.info("No hay ingredientes nuevos pendientes de crear.")
+    ingredientes_activos = st.session_state.get("ingredientes", [])
+    if ingredientes_activos:
+        df_display = pd.DataFrame(ingredientes_activos)
+        for col in ["codigo", "descripcion", "unidad_medida", "cantidad_bruta", "merma", "precio_unidad"]:
+            if col not in df_display.columns:
+                df_display[col] = 0.0 if col in ["cantidad_bruta", "merma", "precio_unidad"] else ""
+        for col in ["cantidad_bruta", "merma", "precio_unidad"]:
+            df_display[col] = pd.to_numeric(df_display[col], errors="coerce").fillna(0.0)
+        df_display["coste_total"] = df_display["cantidad_bruta"] * df_display["precio_unidad"]
+        fila_seleccionada = st.session_state.get("ingrediente_fila_seleccionada")
+        df_display["seleccionar"] = [
+            idx == fila_seleccionada for idx in range(len(df_display))
+        ]
+        df_display = df_display[
+            ["seleccionar", "descripcion", "cantidad_bruta", "unidad_medida", "merma", "precio_unidad", "coste_total", "codigo"]
+        ]
+        tabla_ingredientes = st.data_editor(
+            df_display,
+            num_rows="fixed",
+            hide_index=True,
+            use_container_width=True,
+            height=min(560, 40 + 36 * len(df_display)),
+            column_config={
+                "seleccionar": st.column_config.CheckboxColumn("Seleccionar", width="small"),
+                "descripcion": st.column_config.TextColumn("Ingrediente", width="large"),
+                "cantidad_bruta": st.column_config.NumberColumn("Cantidad", format="%.3f"),
+                "unidad_medida": st.column_config.TextColumn("Unidad"),
+                "merma": st.column_config.NumberColumn("Merma %", format="%.2f %%"),
+                "precio_unidad": st.column_config.NumberColumn("Precio unidad", format="%.2f €"),
+                "coste_total": st.column_config.NumberColumn("Coste", format="%.2f €"),
+                "codigo": st.column_config.TextColumn("Código"),
+            },
+            disabled=[
+                "descripcion", "cantidad_bruta", "unidad_medida", "merma",
+                "precio_unidad", "coste_total", "codigo",
+            ],
+            key=f"editor_receta_activa_{st.session_state.get('ingrediente_tabla_revision', 0)}",
+        )
+        indices_marcados = [
+            int(idx)
+            for idx, marcado in tabla_ingredientes["seleccionar"].fillna(False).items()
+            if bool(marcado)
+        ]
+        indice_elegido = None
+        if len(indices_marcados) == 1:
+            indice_elegido = indices_marcados[0]
+        elif len(indices_marcados) > 1:
+            nuevos = [idx for idx in indices_marcados if idx != fila_seleccionada]
+            indice_elegido = nuevos[-1] if nuevos else indices_marcados[-1]
 
-            with acciones_db_col3:
-                if st.button("Limpiar toda la receta", use_container_width=True):
-                    st.session_state['ingredientes'] = []
-                    st.session_state['ingredientes_base_raciones'] = None
-                    st.session_state['factor_raciones'] = 1.0
-                    st.session_state['receta_id_cargada'] = None
-                    st.session_state['codigo_receta_cargada'] = ""
-                    st.rerun()
+        if indice_elegido != fila_seleccionada:
+            if indice_elegido is None:
+                limpiar_ficha_ingrediente()
+            else:
+                activar_ficha_ingrediente(
+                    "fila_receta",
+                    {
+                        **(
+                            inventario_dict.get(
+                                str(st.session_state["ingredientes"][indice_elegido].get("codigo", "")).strip().upper(),
+                                {},
+                            )
+                        ),
+                        **st.session_state["ingredientes"][indice_elegido],
+                    },
+                    indice_elegido,
+                )
+            st.rerun()
+    else:
+        st.info("La receta todavía no tiene ingredientes activos.")
+
+    if st.button("+ Añadir ingrediente", use_container_width=True):
+        activar_ficha_ingrediente("nuevo", {"codigo": "S/C"})
+        st.rerun()
 
     with st.expander("IA: Generar receta con IA", expanded=False):
         texto_tab, imagen_tab = st.tabs(["Texto", "Imagen"])
@@ -5839,6 +5979,7 @@ with main_tab_recetas:
                                 )
                             st.session_state["receta_raciones_base_cargada"] = float(raciones_cargadas)
                             st.session_state["ingredientes"] = ingredientes_cargados
+                            limpiar_ficha_ingrediente()
                             st.session_state["ingredientes_base_raciones"] = [dict(ing) for ing in ingredientes_cargados]
                             st.session_state["factor_raciones"] = 1.0
                             st.session_state["raciones_base"] = raciones_cargadas
