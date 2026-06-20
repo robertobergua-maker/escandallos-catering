@@ -1304,6 +1304,60 @@ def numero_seguro(valor, defecto=0.0):
     return float(defecto) if pd.isna(numero) else float(numero)
 
 
+def parse_numero_usuario(valor, defecto=0.0, minimo=None, maximo=None):
+    """
+    Convierte entradas numéricas escritas por el usuario a float sin arrastrar
+    el valor visual anterior del widget.
+
+    Acepta números Python y textos como "1", "1,5", "1.5", "1.234,56",
+    "12,50 €" o "8 %". Si no puede parsear, devuelve el defecto.
+    """
+    if valor is None:
+        numero = float(defecto)
+    elif isinstance(valor, (int, float)) and not isinstance(valor, bool):
+        numero = numero_seguro(valor, defecto)
+    else:
+        texto = str(valor or "").strip()
+        if not texto:
+            numero = float(defecto)
+        else:
+            texto = (
+                texto.replace("€", "")
+                .replace("%", "")
+                .replace(" ", "")
+                .replace(" ", "")
+            )
+            if "," in texto and "." in texto:
+                # 1.234,56 -> 1234.56 / 1,234.56 -> 1234.56
+                if texto.rfind(",") > texto.rfind("."):
+                    texto = texto.replace(".", "").replace(",", ".")
+                else:
+                    texto = texto.replace(",", "")
+            else:
+                texto = texto.replace(",", ".")
+            try:
+                numero = float(texto)
+            except (TypeError, ValueError):
+                numero = float(defecto)
+
+    if minimo is not None and numero < minimo:
+        numero = float(minimo)
+    if maximo is not None and numero > maximo:
+        numero = float(maximo)
+    return float(numero)
+
+
+def formatear_numero_usuario(valor, decimales=3, vacio_si_cero=True):
+    """Devuelve un texto editable limpio para la tabla/ficha."""
+    numero = numero_seguro(valor, 0.0)
+    if vacio_si_cero and abs(numero) < 1e-12:
+        return ""
+    texto = f"{numero:.{decimales}f}".rstrip("0").rstrip(".")
+    if texto == "-0":
+        texto = "0"
+    return texto.replace(".", ",")
+
+
 def generar_codigo_receta():
     """
     Genera el siguiente codigo REC-0001, REC-0002... leyendo public.recetas.
@@ -3782,6 +3836,93 @@ def cargar_receta_guardada_en_sesion(receta_id):
     )
 
 
+
+def sincronizar_receta_guardada_en_sesion(receta_guardada=None, datos_receta=None, ingredientes_guardados=None):
+    """
+    Deja la receta activa exactamente en estado de recién guardada/cargada.
+
+    Evita avisos falsos de cambios pendientes después de guardar, actualizar o
+    duplicar. Los ingredientes recibidos deben ser los que realmente se han
+    persistido, normalmente ya normalizados a 1 ración.
+    """
+    receta_guardada = dict(receta_guardada or {})
+    datos_receta = dict(datos_receta or {})
+    receta_id = str(
+        receta_guardada.get("id")
+        or datos_receta.get("id")
+        or st.session_state.get("receta_id_cargada")
+        or ""
+    ).strip()
+    codigo_receta = str(
+        receta_guardada.get("codigo_receta")
+        or datos_receta.get("codigo_receta")
+        or st.session_state.get("codigo_receta_cargada")
+        or ""
+    ).strip()
+    nombre_receta = str(
+        receta_guardada.get("nombre")
+        or datos_receta.get("nombre")
+        or st.session_state.get("receta_nombre")
+        or "Mi Receta"
+    ).strip() or "Mi Receta"
+
+    ingredientes_limpios = [
+        datos_ficha_ingrediente(ingrediente)
+        for ingrediente in (ingredientes_guardados or [])
+    ]
+
+    st.session_state["receta_id_cargada"] = receta_id or None
+    st.session_state["codigo_receta_cargada"] = codigo_receta
+    st.session_state["receta_nombre"] = nombre_receta
+    st.session_state["receta_categoria"] = str(
+        receta_guardada.get("categoria")
+        or datos_receta.get("categoria")
+        or st.session_state.get("receta_categoria")
+        or ""
+    )
+    st.session_state["receta_tipo_plato"] = str(
+        receta_guardada.get("tipo_plato")
+        or datos_receta.get("tipo_plato")
+        or st.session_state.get("receta_tipo_plato")
+        or ""
+    )
+    st.session_state["receta_observaciones"] = str(
+        receta_guardada.get("observaciones")
+        or datos_receta.get("observaciones")
+        or datos_receta.get("descripcion")
+        or st.session_state.get("receta_observaciones")
+        or ""
+    )
+
+    st.session_state["ingredientes"] = [dict(ing) for ing in ingredientes_limpios]
+    st.session_state["ingredientes_snapshot_cargados"] = [
+        dict(ing) for ing in ingredientes_limpios
+    ]
+    st.session_state["ingredientes_base_raciones"] = [
+        dict(ing) for ing in ingredientes_limpios
+    ]
+
+    st.session_state["factor_raciones"] = 1.0
+    st.session_state["raciones_base"] = 1.0
+    st.session_state["raciones_deseadas"] = 1.0
+    st.session_state["receta_raciones_base"] = 1.0
+    st.session_state["receta_raciones_base_cargada"] = 1.0
+    st.session_state["receta_raciones_deseadas"] = 1.0
+    st.session_state["raciones_base_aplicadas"] = 1.0
+    st.session_state["raciones_deseadas_aplicadas"] = 1.0
+    st.session_state["input_raciones_base_receta_pendiente"] = 1.0
+    st.session_state["sincronizar_inputs_raciones"] = True
+    st.session_state["sincronizar_campos_receta"] = True
+
+    st.session_state["receta_tiene_cambios_pendientes"] = False
+    st.session_state.pop("receta_carga_pendiente_id", None)
+    limpiar_alta_ingrediente()
+    limpiar_ficha_ingrediente()
+    st.session_state["ingrediente_tabla_revision"] += 1
+    if receta_id:
+        st.session_state["selector_receta_guardada_pendiente"] = receta_id
+
+
 def limpiar_ingredientes_receta_actual():
     """
     Vacía únicamente los ingredientes de la receta activa.
@@ -4729,30 +4870,27 @@ with st.sidebar:
                 st.caption(
                     f"Unidad específica «{unidad_ficha}»: se conservará sin convertirla a kg."
                 )
-            merma_ficha = st.number_input(
+            merma_ficha_txt = st.text_input(
                 "Merma %",
-                min_value=0.0,
-                max_value=100.0,
-                step=0.01,
-                value=float(ficha["merma"]),
+                value=formatear_numero_usuario(ficha["merma"], decimales=2),
+                help="Escribe el valor completo. Ejemplo: 8 o 8,5.",
             )
-            precio_ficha = st.number_input(
+            precio_ficha_txt = st.text_input(
                 "Precio unidad (€)",
-                min_value=0.0,
-                step=0.01,
-                value=float(ficha["precio_unidad"]),
+                value=formatear_numero_usuario(ficha["precio_unidad"], decimales=4),
+                help="Escribe el valor completo. Ejemplo: 1,25.",
             )
-            cantidad_ficha = st.number_input(
+            cantidad_ficha_txt = st.text_input(
                 "Cantidad de compra (bruta)",
-                min_value=0.0,
-                step=0.001,
-                format="%.3f",
-                value=float(ficha["cantidad_bruta"]),
+                value=formatear_numero_usuario(ficha["cantidad_bruta"], decimales=3),
                 help=(
                     "Cantidad adquirida antes de aplicar la merma. "
-                    "El coste se calcula sobre esta cantidad."
+                    "El coste se calcula sobre esta cantidad. Ejemplo: 1 o 0,250."
                 ),
             )
+            merma_ficha = parse_numero_usuario(merma_ficha_txt, 0.0, minimo=0.0, maximo=100.0)
+            precio_ficha = parse_numero_usuario(precio_ficha_txt, 0.0, minimo=0.0)
+            cantidad_ficha = parse_numero_usuario(cantidad_ficha_txt, 0.0, minimo=0.0)
             observaciones_ficha = st.text_area(
                 "Observaciones",
                 value=ficha["observaciones_precio"],
@@ -5424,8 +5562,11 @@ with main_tab_recetas:
             "descripcion": str(ing.get("descripcion", "") or ""),
             "unidad_medida": str(ing.get("unidad_medida", "") or "").strip(),
             "cantidad_bruta": float(ing.get("cantidad_bruta", 0.0) or 0.0),
+            "cantidad_bruta_txt": formatear_numero_usuario(ing.get("cantidad_bruta", 0.0), decimales=3),
             "merma": float(ing.get("merma", 0.0) or 0.0),
+            "merma_txt": formatear_numero_usuario(ing.get("merma", 0.0), decimales=2),
             "precio_unidad": float(ing.get("precio_unidad", 0.0) or 0.0),
+            "precio_unidad_txt": formatear_numero_usuario(ing.get("precio_unidad", 0.0), decimales=4),
         })
 
     # Única fila final de alta rápida. Vive separada de las filas reales para
@@ -5436,8 +5577,11 @@ with main_tab_recetas:
         "descripcion": borrador_alta["descripcion"],
         "unidad_medida": borrador_alta["unidad_medida"],
         "cantidad_bruta": borrador_alta["cantidad_bruta"],
+        "cantidad_bruta_txt": formatear_numero_usuario(borrador_alta["cantidad_bruta"], decimales=3),
         "merma": borrador_alta["merma"],
+        "merma_txt": formatear_numero_usuario(borrador_alta["merma"], decimales=2),
         "precio_unidad": borrador_alta["precio_unidad"],
+        "precio_unidad_txt": formatear_numero_usuario(borrador_alta["precio_unidad"], decimales=4),
     })
 
     df_display = pd.DataFrame(datos_filas)
@@ -5448,10 +5592,13 @@ with main_tab_recetas:
     df_display["cantidad_bruta"] = pd.to_numeric(df_display["cantidad_bruta"], errors="coerce").fillna(0.0).astype(float)
     df_display["merma"] = pd.to_numeric(df_display["merma"], errors="coerce").fillna(0.0).astype(float)
     df_display["precio_unidad"] = pd.to_numeric(df_display["precio_unidad"], errors="coerce").fillna(0.0).astype(float)
+    df_display["cantidad_bruta_txt"] = df_display["cantidad_bruta_txt"].fillna("").astype(str)
+    df_display["merma_txt"] = df_display["merma_txt"].fillna("").astype(str)
+    df_display["precio_unidad_txt"] = df_display["precio_unidad_txt"].fillna("").astype(str)
     df_display["coste_total"] = (df_display["cantidad_bruta"] * df_display["precio_unidad"]).astype(float)
 
     df_display = df_display[
-        ["seleccionar", "descripcion", "cantidad_bruta", "unidad_medida", "merma", "precio_unidad", "coste_total", "codigo"]
+        ["seleccionar", "descripcion", "cantidad_bruta_txt", "unidad_medida", "merma_txt", "precio_unidad_txt", "coste_total", "codigo"]
     ]
     st.caption(
         "Edita las filas activas. La última fila es un borrador pendiente: escribir en ella "
@@ -5473,14 +5620,14 @@ with main_tab_recetas:
         column_config={
             "seleccionar": st.column_config.CheckboxColumn("Seleccionar", width="small"),
             "descripcion": st.column_config.TextColumn("Ingrediente", width="large"),
-            "cantidad_bruta": st.column_config.NumberColumn(
-                "Cantidad compra", format="%.3f", min_value=0.0
+            "cantidad_bruta_txt": st.column_config.TextColumn(
+                "Cantidad compra", help="Escribe un número nuevo: 1, 0,250, 1,5..."
             ),
             "unidad_medida": st.column_config.SelectboxColumn(
                 "Unidad", options=opciones_unidad_tabla
             ),
-            "merma": st.column_config.NumberColumn("Merma %", format="%.2f %%", min_value=0.0, max_value=100.0),
-            "precio_unidad": st.column_config.NumberColumn("Precio unidad", format="%.2f €", min_value=0.0),
+            "merma_txt": st.column_config.TextColumn("Merma %"),
+            "precio_unidad_txt": st.column_config.TextColumn("Precio unidad"),
             "coste_total": st.column_config.NumberColumn("Coste", format="%.2f €"),
             "codigo": st.column_config.TextColumn("Código"),
         },
@@ -5513,10 +5660,10 @@ with main_tab_recetas:
         original.update({
             "codigo": codigo_editado,
             "descripcion": descripcion_editada,
-            "cantidad_bruta": numero_seguro(fila.get("cantidad_bruta", 0.0), 0.0),
+            "cantidad_bruta": parse_numero_usuario(fila.get("cantidad_bruta_txt", ""), 0.0, minimo=0.0),
             "unidad_medida": str(fila.get("unidad_medida", "") or "").strip(),
-            "merma": numero_seguro(fila.get("merma", 0.0), 0.0),
-            "precio_unidad": numero_seguro(fila.get("precio_unidad", 0.0), 0.0),
+            "merma": parse_numero_usuario(fila.get("merma_txt", ""), 0.0, minimo=0.0, maximo=100.0),
+            "precio_unidad": parse_numero_usuario(fila.get("precio_unidad_txt", ""), 0.0, minimo=0.0),
             "inventario_vinculado": bool(
                 codigo_ingrediente_valido(codigo_editado)
                 and codigo_editado in inventario_dict
@@ -5529,10 +5676,10 @@ with main_tab_recetas:
         **borrador_alta,
         "codigo": str(fila_nueva.get("codigo", "S/C") or "S/C").strip().upper() or "S/C",
         "descripcion": str(fila_nueva.get("descripcion", "") or "").strip(),
-        "cantidad_bruta": numero_seguro(fila_nueva.get("cantidad_bruta", 0.0), 0.0),
+        "cantidad_bruta": parse_numero_usuario(fila_nueva.get("cantidad_bruta_txt", ""), 0.0, minimo=0.0),
         "unidad_medida": str(fila_nueva.get("unidad_medida", "") or "").strip(),
-        "merma": numero_seguro(fila_nueva.get("merma", 0.0), 0.0),
-        "precio_unidad": numero_seguro(fila_nueva.get("precio_unidad", 0.0), 0.0),
+        "merma": parse_numero_usuario(fila_nueva.get("merma_txt", ""), 0.0, minimo=0.0, maximo=100.0),
+        "precio_unidad": parse_numero_usuario(fila_nueva.get("precio_unidad_txt", ""), 0.0, minimo=0.0),
         "inventario_vinculado": False,
     })
     descripcion_nueva = borrador_actualizado["descripcion"]
@@ -6582,12 +6729,20 @@ with main_tab_recetas:
                         st.session_state["ingredientes"]
                     )
                     if ok:
-                        st.session_state["codigo_receta_cargada"] = codigo_receta
-                        st.session_state["receta_raciones_base"] = 1.0
-                        st.session_state["receta_raciones_base_cargada"] = 1.0
-                        st.session_state["input_raciones_base_receta_pendiente"] = 1.0
+                        datos_guardados, ingredientes_guardados = preparar_receta_para_una_racion(
+                            datos_receta,
+                            st.session_state["ingredientes"],
+                        )
+                        if datos_guardados is None:
+                            st.error("La receta se actualizó, pero no se pudo sincronizar la vista. Recarga la receta.")
+                            st.stop()
+                        datos_guardados["id"] = receta_id_cargada
+                        sincronizar_receta_guardada_en_sesion(
+                            receta_guardada={"id": receta_id_cargada, "codigo_receta": codigo_receta, "nombre": nombre_limpio},
+                            datos_receta=datos_guardados,
+                            ingredientes_guardados=ingredientes_guardados,
+                        )
                         limpiar_cache_recetas_guardadas()
-                        st.session_state["selector_receta_guardada_pendiente"] = receta_id_cargada
                         st.session_state["mensaje_receta_cargada"] = (
                             f"Receta actualizada correctamente con código {codigo_receta}. "
                             "Listado de recetas actualizado."
@@ -6602,16 +6757,19 @@ with main_tab_recetas:
                     )
                     if ok:
                         nuevo_codigo = receta_guardada.get("codigo_receta", "")
-                        nuevo_nombre = receta_guardada.get("nombre", nombre_limpio)
-                        st.session_state["receta_id_cargada"] = receta_guardada.get("id")
-                        st.session_state["codigo_receta_cargada"] = nuevo_codigo
-                        st.session_state["receta_nombre"] = nuevo_nombre
-                        st.session_state["receta_raciones_base"] = 1.0
-                        st.session_state["receta_raciones_base_cargada"] = 1.0
-                        st.session_state["input_raciones_base_receta_pendiente"] = 1.0
-                        st.session_state["sincronizar_campos_receta"] = True
+                        datos_guardados, ingredientes_guardados = preparar_receta_para_una_racion(
+                            datos_receta,
+                            st.session_state["ingredientes"],
+                        )
+                        if datos_guardados is None:
+                            st.error("La receta se duplicó, pero no se pudo sincronizar la vista. Recarga la receta.")
+                            st.stop()
+                        sincronizar_receta_guardada_en_sesion(
+                            receta_guardada=receta_guardada,
+                            datos_receta=datos_guardados,
+                            ingredientes_guardados=ingredientes_guardados,
+                        )
                         limpiar_cache_recetas_guardadas()
-                        st.session_state["selector_receta_guardada_pendiente"] = receta_guardada.get("id")
                         st.session_state["mensaje_receta_cargada"] = (
                             f"{'Receta duplicada en tu cuenta' if obtener_user_id_actual() else 'Receta duplicada correctamente'} "
                             f"con código {nuevo_codigo}. "
@@ -6627,13 +6785,19 @@ with main_tab_recetas:
                     )
                     if ok:
                         codigo_mostrado = receta_guardada.get("codigo_receta", codigo_receta)
-                        st.session_state["receta_id_cargada"] = receta_guardada.get("id")
-                        st.session_state["codigo_receta_cargada"] = codigo_mostrado
-                        st.session_state["receta_raciones_base"] = 1.0
-                        st.session_state["receta_raciones_base_cargada"] = 1.0
-                        st.session_state["input_raciones_base_receta_pendiente"] = 1.0
+                        datos_guardados, ingredientes_guardados = preparar_receta_para_una_racion(
+                            datos_receta,
+                            st.session_state["ingredientes"],
+                        )
+                        if datos_guardados is None:
+                            st.error("La receta se guardó, pero no se pudo sincronizar la vista. Recarga la receta.")
+                            st.stop()
+                        sincronizar_receta_guardada_en_sesion(
+                            receta_guardada=receta_guardada,
+                            datos_receta=datos_guardados,
+                            ingredientes_guardados=ingredientes_guardados,
+                        )
                         limpiar_cache_recetas_guardadas()
-                        st.session_state["selector_receta_guardada_pendiente"] = receta_guardada.get("id")
                         st.session_state["mensaje_receta_cargada"] = (
                             f"{mensaje} con código {codigo_mostrado}. "
                             "Listado de recetas actualizado."
