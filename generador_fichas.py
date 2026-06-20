@@ -3580,7 +3580,15 @@ def incorporar_ingredientes_ia(respuesta_ia):
 
     # Si la IA detectó un número de raciones en la captura, normalizamos
     # automáticamente las cantidades a 1 ración (todo se guarda referido a 1 ración).
-    if raciones_base_detectadas is not None and float(raciones_base_detectadas) > 0:
+    # Solo normalizamos automáticamente si las raciones detectadas son un valor
+    # razonable (entero >= 1). Evitamos normalizar frente a detecciones erróneas
+    # que pudieran producir factores extremos (p.ej. 0.01 -> x100).
+    if (
+        raciones_base_detectadas is not None
+        and isinstance(raciones_base_detectadas, (int, float))
+        and float(raciones_base_detectadas) >= 1.0
+        and float(raciones_base_detectadas) <= 10000.0
+    ):
         factor_normalizar = 1.0 / float(raciones_base_detectadas)
         ingredientes_normalizados = ajustar_ingredientes_por_raciones(nuevos, factor_normalizar)
         st.session_state['ingredientes'].extend(ingredientes_normalizados)
@@ -3601,6 +3609,20 @@ def incorporar_ingredientes_ia(respuesta_ia):
         st.session_state['ingredientes'].extend(nuevos)
         st.session_state['ingredientes_base_raciones'] = [dict(ing) for ing in st.session_state['ingredientes']]
         st.session_state['factor_raciones'] = 1.0
+        # Si la IA devolvió un valor de raciones sospechoso (por ejemplo <1 o no numérico),
+        # avisamos al usuario para que ajuste manualmente.
+        if raciones_base_detectadas is not None:
+            try:
+                val = float(raciones_base_detectadas)
+                if val < 1.0 or val > 10000.0:
+                    st.session_state["aviso_raciones_ia"] = (
+                        f"La detección de raciones ({raciones_base_detectadas}) parece errónea; "
+                        "no se ha normalizado automáticamente. Ajusta las cantidades manualmente."
+                    )
+            except Exception:
+                st.session_state["aviso_raciones_ia"] = (
+                    "La detección de raciones no es numérica; no se ha normalizado automáticamente."
+                )
 
     return True
 
