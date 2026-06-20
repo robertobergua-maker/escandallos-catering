@@ -3722,6 +3722,11 @@ def normalizar_raciones_desde_campo_receta():
 
 
 def sincronizar_inputs_raciones():
+    if "input_raciones_base_receta_pendiente" in st.session_state:
+        st.session_state["input_raciones_base_receta"] = float(
+            st.session_state.pop("input_raciones_base_receta_pendiente")
+        )
+
     if st.session_state.get('sincronizar_campos_receta', False):
         st.session_state['input_nombre_plato'] = st.session_state.get('receta_nombre', "Mi Receta")
         st.session_state['input_receta_categoria'] = st.session_state.get('receta_categoria', "")
@@ -5839,7 +5844,7 @@ with main_tab_recetas:
                             st.session_state["raciones_base"] = raciones_cargadas
                             st.session_state["raciones_deseadas"] = raciones_cargadas
                             st.session_state["receta_raciones_base"] = raciones_cargadas
-                            st.session_state["input_raciones_base_receta"] = raciones_cargadas
+                            st.session_state["input_raciones_base_receta_pendiente"] = raciones_cargadas
                             st.session_state["receta_raciones_deseadas"] = raciones_cargadas
                             st.session_state["raciones_base_aplicadas"] = raciones_cargadas
                             st.session_state["raciones_deseadas_aplicadas"] = raciones_cargadas
@@ -5951,7 +5956,7 @@ with main_tab_recetas:
                         st.session_state["codigo_receta_cargada"] = codigo_receta
                         st.session_state["receta_raciones_base"] = 1.0
                         st.session_state["receta_raciones_base_cargada"] = 1.0
-                        st.session_state["input_raciones_base_receta"] = 1.0
+                        st.session_state["input_raciones_base_receta_pendiente"] = 1.0
                         limpiar_cache_recetas_guardadas()
                         st.session_state["selector_receta_guardada_pendiente"] = receta_id_cargada
                         st.session_state["mensaje_receta_cargada"] = (
@@ -5974,7 +5979,7 @@ with main_tab_recetas:
                         st.session_state["receta_nombre"] = nuevo_nombre
                         st.session_state["receta_raciones_base"] = 1.0
                         st.session_state["receta_raciones_base_cargada"] = 1.0
-                        st.session_state["input_raciones_base_receta"] = 1.0
+                        st.session_state["input_raciones_base_receta_pendiente"] = 1.0
                         st.session_state["sincronizar_campos_receta"] = True
                         limpiar_cache_recetas_guardadas()
                         st.session_state["selector_receta_guardada_pendiente"] = receta_guardada.get("id")
@@ -5997,7 +6002,7 @@ with main_tab_recetas:
                         st.session_state["codigo_receta_cargada"] = codigo_mostrado
                         st.session_state["receta_raciones_base"] = 1.0
                         st.session_state["receta_raciones_base_cargada"] = 1.0
-                        st.session_state["input_raciones_base_receta"] = 1.0
+                        st.session_state["input_raciones_base_receta_pendiente"] = 1.0
                         limpiar_cache_recetas_guardadas()
                         st.session_state["selector_receta_guardada_pendiente"] = receta_guardada.get("id")
                         st.session_state["mensaje_receta_cargada"] = (
