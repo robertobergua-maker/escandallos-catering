@@ -3578,16 +3578,29 @@ def incorporar_ingredientes_ia(respuesta_ia):
         st.session_state['receta_nombre'] = nombre_receta_detectado
         st.session_state['sincronizar_campos_receta'] = True
 
-    st.session_state['ingredientes'].extend(nuevos)
-    st.session_state['ingredientes_base_raciones'] = [dict(ing) for ing in st.session_state['ingredientes']]
-    st.session_state['factor_raciones'] = 1.0
-
-    if raciones_base_detectadas is not None:
+    # Si la IA detectó un número de raciones en la captura, normalizamos
+    # automáticamente las cantidades a 1 ración (todo se guarda referido a 1 ración).
+    if raciones_base_detectadas is not None and float(raciones_base_detectadas) > 0:
+        factor_normalizar = 1.0 / float(raciones_base_detectadas)
+        ingredientes_normalizados = ajustar_ingredientes_por_raciones(nuevos, factor_normalizar)
+        st.session_state['ingredientes'].extend(ingredientes_normalizados)
+        # Guardar copia de las cantidades originales detectadas por la IA
+        st.session_state['ingredientes_base_raciones'] = [dict(ing) for ing in nuevos]
+        st.session_state['factor_raciones'] = float(factor_normalizar)
+        # Actualizar raciones base de la receta a 1 (ahora todo está normalizado por ración)
+        st.session_state['receta_raciones_base'] = 1.0
+        st.session_state['input_raciones_base'] = 1.0
+        st.session_state['raciones_base'] = 1.0
+        st.session_state['raciones_base_aplicadas'] = 1.0
         raciones_detectadas_texto = f"{raciones_base_detectadas:g}"
         st.session_state["aviso_raciones_ia"] = (
-            f"La receta detectada parece estar pensada para {raciones_detectadas_texto} raciones. "
-            "Ajusta las cantidades manualmente o usa la futura normalización a 1 ración antes de guardar."
+            f"La receta detectada estaba pensada para {raciones_detectadas_texto} raciones; "
+            "las cantidades se han normalizado a 1 ración automáticamente."
         )
+    else:
+        st.session_state['ingredientes'].extend(nuevos)
+        st.session_state['ingredientes_base_raciones'] = [dict(ing) for ing in st.session_state['ingredientes']]
+        st.session_state['factor_raciones'] = 1.0
 
     return True
 
