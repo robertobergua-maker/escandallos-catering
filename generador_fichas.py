@@ -599,6 +599,12 @@ if 'receta_id_cargada' not in st.session_state:
 if 'codigo_receta_cargada' not in st.session_state:
     st.session_state['codigo_receta_cargada'] = ""
 
+if 'receta_tiene_cambios_pendientes' not in st.session_state:
+    st.session_state['receta_tiene_cambios_pendientes'] = False
+
+if 'ingredientes_snapshot_cargados' not in st.session_state:
+    st.session_state['ingredientes_snapshot_cargados'] = []
+
 if 'costes_indirectos_pct' not in st.session_state:
     st.session_state['costes_indirectos_pct'] = 10.0
 
@@ -3772,6 +3778,9 @@ def incorporar_ingredientes_ia(respuesta_ia):
             f"La receta detectada estaba pensada para {raciones_detectadas_texto} raciones; "
             "las cantidades se han normalizado a 1 ración automáticamente."
         )
+        # Marcar como cambio si se incorporan ingredientes a una receta ya cargada
+        if st.session_state.get('receta_id_cargada'):
+            st.session_state['receta_tiene_cambios_pendientes'] = True
     else:
         st.session_state['ingredientes'].extend(nuevos)
         st.session_state['ingredientes_base_raciones'] = [dict(ing) for ing in st.session_state['ingredientes']]
@@ -3791,12 +3800,37 @@ def incorporar_ingredientes_ia(respuesta_ia):
                     "La detección de raciones no es numérica; no se ha normalizado automáticamente."
                 )
 
+    # Marcar como cambio si se incorporan ingredientes a una receta ya cargada
+    if st.session_state.get('receta_id_cargada') and nuevos:
+        st.session_state['receta_tiene_cambios_pendientes'] = True
+
     return True
 
 
 def marcar_receta_modificada_manualmente():
     st.session_state['ingredientes_base_raciones'] = None
     st.session_state['factor_raciones'] = 1.0
+    st.session_state['receta_tiene_cambios_pendientes'] = True
+
+
+def detectar_cambios_receta():
+    """
+    Detecta si la receta activa tiene cambios no guardados comparándola
+    con el snapshot de ingredientes cargados.
+    """
+    snapshot = st.session_state.get('ingredientes_snapshot_cargados', [])
+    actuales = st.session_state.get('ingredientes', [])
+    if len(snapshot) != len(actuales):
+        return True
+    for orig, actual in zip(snapshot, actuales):
+        if orig != actual:
+            return True
+    return False
+
+
+def marcar_cambios_receta():
+    """Marca si hay cambios pendientes basado en comparación actual vs snapshot."""
+    st.session_state['receta_tiene_cambios_pendientes'] = detectar_cambios_receta()
 
 
 def normalizar_raciones_desde_campo_receta():
@@ -5984,6 +6018,19 @@ with main_tab_recetas:
                     cargar_receta_btn = st.button("Cargar receta", use_container_width=True)
 
                 if cargar_receta_btn:
+                    tiene_cambios = st.session_state.get('receta_tiene_cambios_pendientes', False)
+                    if tiene_cambios and st.session_state.get('ingredientes', []):
+                        st.warning(
+                            "⚠️ La receta actual tiene cambios pendientes de guardar. "
+                            "Al cargar una nueva receta se descartarán."
+                        )
+                        if st.button("Continuar y descartar cambios", key="confirmar_cargar_receta_nuevo"):
+                            st.session_state['receta_id_cargada'] = None
+                            st.session_state['ingredientes'] = []
+                            st.session_state['receta_tiene_cambios_pendientes'] = False
+                            st.rerun()
+                        st.stop()
+
                     receta_seleccionada = recetas_por_id.get(str(receta_id_seleccionada), {})
                     if receta_seleccionada and not receta_es_propia_o_antigua(receta_seleccionada):
                         st.error("No puedes modificar una receta de otro usuario")
@@ -6005,9 +6052,11 @@ with main_tab_recetas:
                                 )
                             st.session_state["receta_raciones_base_cargada"] = float(raciones_cargadas)
                             st.session_state["ingredientes"] = ingredientes_cargados
+                            st.session_state["ingredientes_snapshot_cargados"] = [dict(ing) for ing in ingredientes_cargados]
                             limpiar_ficha_ingrediente()
                             st.session_state["ingredientes_base_raciones"] = [dict(ing) for ing in ingredientes_cargados]
                             st.session_state["factor_raciones"] = 1.0
+                            st.session_state["receta_tiene_cambios_pendientes"] = False
                             st.session_state["raciones_base"] = raciones_cargadas
                             st.session_state["raciones_deseadas"] = raciones_cargadas
                             st.session_state["receta_raciones_base"] = raciones_cargadas
