@@ -5117,38 +5117,44 @@ with main_tab_recetas:
     st.markdown('</div>', unsafe_allow_html=True)
 
     ingredientes_activos = st.session_state.get("ingredientes", [])
-    # Construir DataFrame solo con las columnas necesarias para evitar incompatibilidades
-    columnas_esperadas = ["codigo", "descripcion", "unidad_medida", "cantidad_bruta", "merma", "precio_unidad"]
-    datos_limpios = []
-    for ing in ingredientes_activos:
-        fila = {}
-        for col in columnas_esperadas:
-            fila[col] = ing.get(col, 0.0 if col in ["cantidad_bruta", "merma", "precio_unidad"] else "")
-        datos_limpios.append(fila)
-    
-    df_display = pd.DataFrame(datos_limpios) if datos_limpios else pd.DataFrame(columns=columnas_esperadas)
-    for col in columnas_esperadas:
-        if col not in df_display.columns:
-            df_display[col] = 0.0 if col in ["cantidad_bruta", "merma", "precio_unidad"] else ""
-    for col in ["cantidad_bruta", "merma", "precio_unidad"]:
-        df_display[col] = pd.to_numeric(df_display[col], errors="coerce").fillna(0.0)
-    df_display["coste_total"] = df_display["cantidad_bruta"] * df_display["precio_unidad"]
+    # Construir DataFrame con todas las columnas desde el inicio para evitar problemas de tipo
     fila_seleccionada = st.session_state.get("ingrediente_fila_seleccionada")
-    df_display["seleccionar"] = [
-        idx == fila_seleccionada for idx in range(len(df_display))
-    ].copy()
-    fila_alta = pd.DataFrame([{
+    
+    datos_filas = []
+    for idx, ing in enumerate(ingredientes_activos):
+        datos_filas.append({
+            "seleccionar": bool(idx == fila_seleccionada),
+            "codigo": str(ing.get("codigo", "S/C") or "S/C"),
+            "descripcion": str(ing.get("descripcion", "") or ""),
+            "unidad_medida": str(ing.get("unidad_medida", "kg") or "kg"),
+            "cantidad_bruta": float(ing.get("cantidad_bruta", 0.0) or 0.0),
+            "merma": float(ing.get("merma", 0.0) or 0.0),
+            "precio_unidad": float(ing.get("precio_unidad", 0.0) or 0.0),
+        })
+    
+    # Agregar fila vacía para nueva entrada
+    datos_filas.append({
         "seleccionar": False,
+        "codigo": "S/C",
         "descripcion": "",
-        "cantidad_bruta": 0.0,
         "unidad_medida": "kg",
+        "cantidad_bruta": 0.0,
         "merma": 0.0,
         "precio_unidad": 0.0,
-        "coste_total": 0.0,
-        "codigo": "S/C",
-    }])
-    df_display = pd.concat([df_display, fila_alta], ignore_index=True)
-    # Reordenar solo las columnas esperadas
+    })
+    
+    df_display = pd.DataFrame(datos_filas)
+    # Asegurar tipos explícitos para compatibilidad con st.data_editor
+    df_display["seleccionar"] = df_display["seleccionar"].astype(bool)
+    df_display["codigo"] = df_display["codigo"].astype(str)
+    df_display["descripcion"] = df_display["descripcion"].astype(str)
+    df_display["unidad_medida"] = df_display["unidad_medida"].astype(str)
+    df_display["cantidad_bruta"] = pd.to_numeric(df_display["cantidad_bruta"], errors="coerce").fillna(0.0).astype(float)
+    df_display["merma"] = pd.to_numeric(df_display["merma"], errors="coerce").fillna(0.0).astype(float)
+    df_display["precio_unidad"] = pd.to_numeric(df_display["precio_unidad"], errors="coerce").fillna(0.0).astype(float)
+    df_display["coste_total"] = (df_display["cantidad_bruta"] * df_display["precio_unidad"]).astype(float)
+    
+    # Reordenar columnas para display
     df_display = df_display[
         ["seleccionar", "descripcion", "cantidad_bruta", "unidad_medida", "merma", "precio_unidad", "coste_total", "codigo"]
     ]
