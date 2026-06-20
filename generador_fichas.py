@@ -156,37 +156,22 @@ def registrar_usuario_supabase(email, password):
         return False, f"No se pudo crear la cuenta: {mensaje_error}"
 
 
-def cambiar_password_usuario(nueva_password):
+def enviar_recuperacion_password(email):
     """
-    Actualiza la contraseña del usuario conectado mediante Inventario/Auth.
+    Envía el correo de recuperación de contraseña mediante Inventario/Auth.
     """
     if not supabase_disponible or supabase is None:
         return False, "El inventario no está conectado correctamente."
 
-    if not obtener_usuario_actual():
-        return False, "La sesión ha caducado. Vuelve a iniciar sesión para cambiar la contraseña."
-
-    nueva_password_limpia = str(nueva_password or "")
-    if not nueva_password_limpia:
-        return False, "Introduce una nueva contraseña."
-    if len(nueva_password_limpia) < 6:
-        return False, "La contraseña debe tener al menos 6 caracteres."
+    email_limpio = str(email or "").strip()
+    if not email_limpio or "@" not in email_limpio:
+        return False, "Introduce un email válido."
 
     try:
-        supabase.auth.update_user({"password": nueva_password_limpia})
-        return True, "Contraseña actualizada correctamente."
+        supabase.auth.reset_password_email(email_limpio)
+        return True, "Correo de recuperación enviado. Revisa también la carpeta de spam."
     except Exception as e:
-        mensaje_error = str(e)
-        mensaje_error_lower = mensaje_error.lower()
-        if (
-            "session" in mensaje_error_lower
-            or "jwt" in mensaje_error_lower
-            or "expired" in mensaje_error_lower
-            or "not authenticated" in mensaje_error_lower
-            or "auth session missing" in mensaje_error_lower
-        ):
-            return False, "La sesión ha caducado. Vuelve a iniciar sesión para cambiar la contraseña."
-        return False, f"No se pudo actualizar la contraseña: {mensaje_error}"
+        return False, f"No se pudo enviar el correo de recuperación: {e}"
 
 
 def logout_supabase():
@@ -4367,26 +4352,20 @@ with st.sidebar:
             else:
                 st.error(mensaje_logout)
 
-        st.markdown("#### Cambiar contraseña")
-        with st.form("form_cambiar_password", clear_on_submit=True):
-            nueva_password = st.text_input("Nueva contraseña", type="password")
-            repetir_password = st.text_input("Repetir nueva contraseña", type="password")
-            actualizar_password = st.form_submit_button("Actualizar contraseña", use_container_width=True)
-
-            if actualizar_password:
-                if not obtener_usuario_actual():
-                    st.error("La sesión ha caducado. Vuelve a iniciar sesión para cambiar la contraseña.")
-                elif not nueva_password:
-                    st.error("Introduce una nueva contraseña.")
-                elif len(str(nueva_password)) < 6:
-                    st.error("La contraseña debe tener al menos 6 caracteres.")
-                elif nueva_password != repetir_password:
-                    st.error("Las contraseñas no coinciden.")
-                else:
-                    ok_password, mensaje_password = cambiar_password_usuario(nueva_password)
+        with st.expander("¿Has olvidado tu contraseña?", expanded=False):
+            with st.form("form_recuperar_password_sesion", clear_on_submit=True):
+                email_recuperacion = st.text_input(
+                    "Email de recuperación",
+                    value=str(usuario_actual.get("email") or ""),
+                )
+                recuperar_password = st.form_submit_button(
+                    "Enviar enlace de recuperación",
+                    use_container_width=True,
+                )
+                if recuperar_password:
+                    ok_password, mensaje_password = enviar_recuperacion_password(email_recuperacion)
                     if ok_password:
-                        st.session_state["auth_feedback"] = ("success", mensaje_password)
-                        st.rerun()
+                        st.success(mensaje_password)
                     else:
                         st.error(mensaje_password)
     else:
@@ -4415,6 +4394,20 @@ with st.sidebar:
                         st.success(mensaje_registro)
                 else:
                     st.error(mensaje_registro)
+
+        with st.expander("¿Has olvidado tu contraseña?", expanded=False):
+            with st.form("form_recuperar_password", clear_on_submit=True):
+                email_recuperacion = st.text_input("Email de tu cuenta")
+                recuperar_password = st.form_submit_button(
+                    "Enviar enlace de recuperación",
+                    use_container_width=True,
+                )
+                if recuperar_password:
+                    ok_password, mensaje_password = enviar_recuperacion_password(email_recuperacion)
+                    if ok_password:
+                        st.success(mensaje_password)
+                    else:
+                        st.error(mensaje_password)
 
     st.divider()
     st.info("💡 Consejo: el inventario común se gestiona desde Administración, disponible solo para usuarios admin.")
@@ -5082,92 +5075,125 @@ with main_tab_recetas:
         activar_ficha_ingrediente("inventario", datos_inventario)
         st.rerun()
 
-    nuevo_col, limpiar_col = st.columns(2)
-    with nuevo_col:
-        if st.button("+ Crear ingrediente nuevo", use_container_width=True):
-            activar_ficha_ingrediente("nuevo", {"codigo": "S/C"})
-            st.rerun()
-    with limpiar_col:
-        if st.button("Limpiar selección", use_container_width=True):
-            limpiar_ficha_ingrediente()
-            st.rerun()
+    if st.button("Limpiar selección", use_container_width=True):
+        limpiar_ficha_ingrediente()
+        st.rerun()
     if termino_busqueda and not resultados_busqueda:
-        st.info("No encontrado. Puedes crear un ingrediente nuevo.")
+        st.info("No encontrado. Puedes crearlo en la última fila de la tabla de la receta activa.")
     st.markdown('</div>', unsafe_allow_html=True)
 
     ingredientes_activos = st.session_state.get("ingredientes", [])
-    if ingredientes_activos:
-        df_display = pd.DataFrame(ingredientes_activos)
-        for col in ["codigo", "descripcion", "unidad_medida", "cantidad_bruta", "merma", "precio_unidad"]:
-            if col not in df_display.columns:
-                df_display[col] = 0.0 if col in ["cantidad_bruta", "merma", "precio_unidad"] else ""
-        for col in ["cantidad_bruta", "merma", "precio_unidad"]:
-            df_display[col] = pd.to_numeric(df_display[col], errors="coerce").fillna(0.0)
-        df_display["coste_total"] = df_display["cantidad_bruta"] * df_display["precio_unidad"]
-        fila_seleccionada = st.session_state.get("ingrediente_fila_seleccionada")
-        df_display["seleccionar"] = [
-            idx == fila_seleccionada for idx in range(len(df_display))
-        ]
-        df_display = df_display[
-            ["seleccionar", "descripcion", "cantidad_bruta", "unidad_medida", "merma", "precio_unidad", "coste_total", "codigo"]
-        ]
-        tabla_ingredientes = st.data_editor(
-            df_display,
-            num_rows="fixed",
-            hide_index=True,
-            use_container_width=True,
-            height=min(560, 40 + 36 * len(df_display)),
-            column_config={
-                "seleccionar": st.column_config.CheckboxColumn("Seleccionar", width="small"),
-                "descripcion": st.column_config.TextColumn("Ingrediente", width="large"),
-                "cantidad_bruta": st.column_config.NumberColumn("Cantidad", format="%.3f"),
-                "unidad_medida": st.column_config.TextColumn("Unidad"),
-                "merma": st.column_config.NumberColumn("Merma %", format="%.2f %%"),
-                "precio_unidad": st.column_config.NumberColumn("Precio unidad", format="%.2f €"),
-                "coste_total": st.column_config.NumberColumn("Coste", format="%.2f €"),
-                "codigo": st.column_config.TextColumn("Código"),
-            },
-            disabled=[
-                "descripcion", "cantidad_bruta", "unidad_medida", "merma",
-                "precio_unidad", "coste_total", "codigo",
-            ],
-            key=f"editor_receta_activa_{st.session_state.get('ingrediente_tabla_revision', 0)}",
-        )
-        indices_marcados = [
-            int(idx)
-            for idx, marcado in tabla_ingredientes["seleccionar"].fillna(False).items()
-            if bool(marcado)
-        ]
-        indice_elegido = None
-        if len(indices_marcados) == 1:
-            indice_elegido = indices_marcados[0]
-        elif len(indices_marcados) > 1:
-            nuevos = [idx for idx in indices_marcados if idx != fila_seleccionada]
-            indice_elegido = nuevos[-1] if nuevos else indices_marcados[-1]
+    df_display = pd.DataFrame(ingredientes_activos)
+    for col in ["codigo", "descripcion", "unidad_medida", "cantidad_bruta", "merma", "precio_unidad"]:
+        if col not in df_display.columns:
+            df_display[col] = 0.0 if col in ["cantidad_bruta", "merma", "precio_unidad"] else ""
+    for col in ["cantidad_bruta", "merma", "precio_unidad"]:
+        df_display[col] = pd.to_numeric(df_display[col], errors="coerce").fillna(0.0)
+    df_display["coste_total"] = df_display["cantidad_bruta"] * df_display["precio_unidad"]
+    fila_seleccionada = st.session_state.get("ingrediente_fila_seleccionada")
+    df_display["seleccionar"] = [
+        idx == fila_seleccionada for idx in range(len(df_display))
+    ]
+    fila_alta = pd.DataFrame([{
+        "seleccionar": False,
+        "descripcion": "",
+        "cantidad_bruta": 0.0,
+        "unidad_medida": "kg",
+        "merma": 0.0,
+        "precio_unidad": 0.0,
+        "coste_total": 0.0,
+        "codigo": "S/C",
+    }])
+    df_display = pd.concat([df_display, fila_alta], ignore_index=True)
+    df_display = df_display[
+        ["seleccionar", "descripcion", "cantidad_bruta", "unidad_medida", "merma", "precio_unidad", "coste_total", "codigo"]
+    ]
+    st.caption(
+        "Edita directamente las filas activas. Para una entrada manual, escribe el ingrediente "
+        "en la última fila; solo se muestra una fila de alta."
+    )
+    tabla_ingredientes = st.data_editor(
+        df_display,
+        num_rows="fixed",
+        hide_index=True,
+        use_container_width=True,
+        height=min(560, 76 + 36 * len(ingredientes_activos)),
+        column_config={
+            "seleccionar": st.column_config.CheckboxColumn("Seleccionar", width="small"),
+            "descripcion": st.column_config.TextColumn("Ingrediente", width="large"),
+            "cantidad_bruta": st.column_config.NumberColumn("Cantidad", format="%.3f", min_value=0.0),
+            "unidad_medida": st.column_config.SelectboxColumn("Unidad", options=UNIDADES_INGREDIENTE),
+            "merma": st.column_config.NumberColumn("Merma %", format="%.2f %%", min_value=0.0, max_value=100.0),
+            "precio_unidad": st.column_config.NumberColumn("Precio unidad", format="%.2f €", min_value=0.0),
+            "coste_total": st.column_config.NumberColumn("Coste", format="%.2f €"),
+            "codigo": st.column_config.TextColumn("Código"),
+        },
+        disabled=["coste_total"],
+        key=f"editor_receta_activa_{st.session_state.get('ingrediente_tabla_revision', 0)}",
+    )
 
-        if indice_elegido != fila_seleccionada:
-            if indice_elegido is None:
-                limpiar_ficha_ingrediente()
-            else:
-                activar_ficha_ingrediente(
-                    "fila_receta",
-                    {
-                        **(
-                            inventario_dict.get(
-                                str(st.session_state["ingredientes"][indice_elegido].get("codigo", "")).strip().upper(),
-                                {},
-                            )
-                        ),
-                        **st.session_state["ingredientes"][indice_elegido],
-                    },
-                    indice_elegido,
-                )
-            st.rerun()
-    else:
-        st.info("La receta todavía no tiene ingredientes activos.")
+    ingredientes_actualizados = []
+    for idx in range(len(ingredientes_activos)):
+        fila = tabla_ingredientes.iloc[idx]
+        original = dict(ingredientes_activos[idx])
+        original.update({
+            "codigo": str(fila.get("codigo", "S/C") or "S/C").strip().upper() or "S/C",
+            "descripcion": str(fila.get("descripcion", "") or "").strip(),
+            "cantidad_bruta": numero_seguro(fila.get("cantidad_bruta", 0.0), 0.0),
+            "unidad_medida": str(fila.get("unidad_medida", "kg") or "kg").strip() or "kg",
+            "merma": numero_seguro(fila.get("merma", 0.0), 0.0),
+            "precio_unidad": numero_seguro(fila.get("precio_unidad", 0.0), 0.0),
+        })
+        if original["descripcion"]:
+            ingredientes_actualizados.append(original)
 
-    if st.button("+ Añadir ingrediente", use_container_width=True):
-        activar_ficha_ingrediente("nuevo", {"codigo": "S/C"})
+    fila_nueva = tabla_ingredientes.iloc[len(ingredientes_activos)]
+    descripcion_nueva = str(fila_nueva.get("descripcion", "") or "").strip()
+    if descripcion_nueva:
+        ingredientes_actualizados.append(datos_ficha_ingrediente({
+            "codigo": str(fila_nueva.get("codigo", "S/C") or "S/C").strip().upper() or "S/C",
+            "descripcion": descripcion_nueva,
+            "cantidad_bruta": numero_seguro(fila_nueva.get("cantidad_bruta", 0.0), 0.0),
+            "unidad_medida": str(fila_nueva.get("unidad_medida", "kg") or "kg").strip() or "kg",
+            "merma": numero_seguro(fila_nueva.get("merma", 0.0), 0.0),
+            "precio_unidad": numero_seguro(fila_nueva.get("precio_unidad", 0.0), 0.0),
+        }))
+
+    if ingredientes_actualizados != ingredientes_activos:
+        if len(ingredientes_actualizados) != len(ingredientes_activos):
+            limpiar_ficha_ingrediente()
+        st.session_state["ingredientes"] = ingredientes_actualizados
+        marcar_receta_modificada_manualmente()
+        st.session_state["ingrediente_tabla_revision"] += 1
+        st.rerun()
+
+    indices_marcados = [
+        int(idx)
+        for idx, marcado in tabla_ingredientes["seleccionar"].fillna(False).items()
+        if bool(marcado) and int(idx) < len(ingredientes_activos)
+    ]
+    indice_elegido = None
+    if len(indices_marcados) == 1:
+        indice_elegido = indices_marcados[0]
+    elif len(indices_marcados) > 1:
+        nuevos = [idx for idx in indices_marcados if idx != fila_seleccionada]
+        indice_elegido = nuevos[-1] if nuevos else indices_marcados[-1]
+
+    if indice_elegido != fila_seleccionada:
+        if indice_elegido is None:
+            limpiar_ficha_ingrediente()
+        else:
+            activar_ficha_ingrediente(
+                "fila_receta",
+                {
+                    **inventario_dict.get(
+                        str(st.session_state["ingredientes"][indice_elegido].get("codigo", "")).strip().upper(),
+                        {},
+                    ),
+                    **st.session_state["ingredientes"][indice_elegido],
+                },
+                indice_elegido,
+            )
         st.rerun()
 
     with st.expander("IA: Generar receta con IA", expanded=False):
