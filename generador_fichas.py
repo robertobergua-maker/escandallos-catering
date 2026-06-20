@@ -50,7 +50,6 @@ if supabase_disponible:
 
 BASE_DIR = Path(__file__).resolve().parent
 LOGO_SAMIRARTE_PATH = BASE_DIR / "assets" / "logo_samirarte.png"
-SESSION_FILE_PATH = BASE_DIR / ".supabase_session.json"
 
 
 def logo_samirarte_existe():
@@ -226,7 +225,6 @@ def logout_supabase():
             pass
 
     _limpiar_sesion_autenticacion()
-    _borrar_sesion_local()
     return True, "Sesión cerrada correctamente."
 
 
@@ -245,34 +243,6 @@ def obtener_usuario_actual():
     }
 
 
-def _leer_sesion_local():
-    if not SESSION_FILE_PATH.exists():
-        return None
-    try:
-        contenido = SESSION_FILE_PATH.read_text(encoding="utf-8")
-        datos = json.loads(contenido)
-        if not isinstance(datos, dict):
-            return None
-        return datos
-    except Exception:
-        return None
-
-
-def _guardar_sesion_local(datos):
-    try:
-        SESSION_FILE_PATH.write_text(json.dumps(datos), encoding="utf-8")
-    except Exception:
-        pass
-
-
-def _borrar_sesion_local():
-    try:
-        if SESSION_FILE_PATH.exists():
-            SESSION_FILE_PATH.unlink()
-    except Exception:
-        pass
-
-
 def _limpiar_sesion_autenticacion():
     st.session_state["user_id"] = None
     st.session_state["user_email"] = None
@@ -281,20 +251,6 @@ def _limpiar_sesion_autenticacion():
     st.session_state["usuario_app"] = None
     st.session_state["usuario_app_error"] = None
     st.session_state["usuario_app_user_id"] = None
-
-
-def _cargar_sesion_local_en_session_state():
-    datos = _leer_sesion_local()
-    if not datos or not isinstance(datos, dict):
-        return False
-    user_id = datos.get("user_id")
-    if not user_id:
-        return False
-    st.session_state["user_id"] = str(user_id)
-    st.session_state["user_email"] = str(datos.get("user_email", ""))
-    st.session_state["access_token"] = datos.get("access_token")
-    st.session_state["refresh_token"] = datos.get("refresh_token")
-    return True
 
 
 def _guardar_sesion_supabase(usuario, sesion):
@@ -309,24 +265,16 @@ def _guardar_sesion_supabase(usuario, sesion):
         st.session_state["user_email"] = str(user_email or "")
         st.session_state["access_token"] = access_token
         st.session_state["refresh_token"] = refresh_token
-        _guardar_sesion_local({
-            "user_id": str(user_id),
-            "user_email": str(user_email or ""),
-            "access_token": access_token,
-            "refresh_token": refresh_token,
-        })
 
 
 def restaurar_sesion_supabase():
     """
-    Intenta restaurar la sesión activa desde los tokens guardados.
+    Refresca la sesión usando exclusivamente los tokens aislados en
+    st.session_state. Nunca persiste tokens en el sistema de archivos.
     """
     if obtener_usuario_actual():
         return True
     if not supabase_disponible or supabase is None:
-        return False
-
-    if not _cargar_sesion_local_en_session_state():
         return False
 
     refresh_token = st.session_state.get("refresh_token")
@@ -704,15 +652,29 @@ def cargar_inventario_supabase(trigger):
         "unidad_formato_compra", "precio_formato_compra", "fecha_precio",
         "url_precio", "observaciones_precio"
     ]
+    cols_minimas = [
+        "codigo", "familia", "descripcion", "unidad_medida", "merma", "precio_unidad"
+    ]
     if not supabase_disponible or supabase is None:
         return pd.DataFrame(columns=cols_deseadas)
+
     try:
-        respuesta = (
-            supabase
-            .table("inventario")
-            .select(",".join(cols_deseadas))
-            .execute()
-        )
+        try:
+            respuesta = (
+                supabase
+                .table("inventario")
+                .select(",".join(cols_deseadas))
+                .execute()
+            )
+        except Exception:
+            # Compatibilidad con instalaciones cuyo inventario todavía no
+            # incluye proveedor, formato, URL u otras columnas avanzadas.
+            respuesta = (
+                supabase
+                .table("inventario")
+                .select(",".join(cols_minimas))
+                .execute()
+            )
         df = pd.DataFrame(respuesta.data)
 
         if df.empty:
@@ -727,7 +689,7 @@ def cargar_inventario_supabase(trigger):
         df["codigo"] = df["codigo"].fillna("").astype(str).str.strip().str.upper()
         df["familia"] = df["familia"].fillna("").astype(str).str.strip()
         df["descripcion"] = df["descripcion"].fillna("").astype(str).str.strip()
-        df["unidad_medida"] = df["unidad_medida"].fillna("kg").astype(str).str.strip().replace("", "kg")
+        df["unidad_medida"] = df["unidad_medida"].fillna("").astype(str).str.strip()
         df["merma"] = pd.to_numeric(df["merma"], errors="coerce").fillna(0.0)
         df["precio_unidad"] = pd.to_numeric(df["precio_unidad"], errors="coerce").fillna(0.0)
         df["cantidad_formato_compra"] = pd.to_numeric(df["cantidad_formato_compra"], errors="coerce")
@@ -751,7 +713,7 @@ if not inventario_df.empty:
             inventario_dict[codigo_str] = {
                 "familia": row.get("familia", "VARIOS"),
                 "descripcion": row.get("descripcion", ""),
-                "unidad_medida": row.get("unidad_medida", "kg"),
+                "unidad_medida": str(row.get("unidad_medida", "") or "").strip(),
                 "merma": float(row.get("merma", 0.0)) if pd.notna(row.get("merma")) else 0.0,
                 "precio_unidad": float(row.get("precio_unidad", 0.0)) if pd.notna(row.get("precio_unidad")) else 0.0,
                 "proveedor_precio": row.get("proveedor_precio", ""),
@@ -864,7 +826,7 @@ def sugerir_ingredientes_similares(descripcion, inventario, limite=8, umbral=0.3
                 "codigo": str(row.get("codigo", "")).strip().upper(),
                 "familia": str(row.get("familia", "")).strip(),
                 "descripcion": desc_bd,
-                "unidad_medida": str(row.get("unidad_medida", "kg")).strip() or "kg",
+                "unidad_medida": str(row.get("unidad_medida", "") or "").strip(),
                 "merma": float(row.get("merma", 0.0)) if pd.notna(row.get("merma")) else 0.0,
                 "precio_unidad": float(row.get("precio_unidad", 0.0)) if pd.notna(row.get("precio_unidad")) else 0.0,
                 "proveedor_precio": str(row.get("proveedor_precio", "") or "").strip(),
@@ -1067,11 +1029,27 @@ UNIDADES_INGREDIENTE = [
 ]
 
 
+def opciones_unidad_ingrediente(*unidades_extra):
+    """
+    Mantiene las unidades estándar y añade las existentes sin transformarlas.
+    Así una unidad antigua o específica nunca se convierte silenciosamente.
+    """
+    opciones = ["", *UNIDADES_INGREDIENTE]
+    unidades_inventario = (
+        inventario_df.get("unidad_medida", pd.Series(dtype=str))
+        if isinstance(inventario_df, pd.DataFrame)
+        else pd.Series(dtype=str)
+    )
+    for unidad in [*unidades_inventario.tolist(), *unidades_extra]:
+        unidad_limpia = str(unidad or "").strip()
+        if unidad_limpia and unidad_limpia not in opciones:
+            opciones.append(unidad_limpia)
+    return opciones
+
+
 def datos_ficha_ingrediente(ingrediente=None):
     ingrediente = dict(ingrediente or {})
-    unidad = str(ingrediente.get("unidad_medida", "kg") or "kg").strip()
-    if unidad not in UNIDADES_INGREDIENTE:
-        unidad = "kg"
+    unidad = str(ingrediente.get("unidad_medida", "") or "").strip()
     return {
         "codigo": str(ingrediente.get("codigo", "S/C") or "S/C").strip().upper(),
         "descripcion": str(ingrediente.get("descripcion", "") or "").strip(),
@@ -1112,8 +1090,8 @@ def limpiar_alta_ingrediente(activar_sin_seleccion=False):
 def validar_datos_ficha_ingrediente(datos, requiere_cantidad=False):
     if not str(datos.get("descripcion", "")).strip():
         return False, "La descripción del ingrediente es obligatoria."
-    if str(datos.get("unidad_medida", "")).strip() not in UNIDADES_INGREDIENTE:
-        return False, "Selecciona una unidad válida."
+    if not str(datos.get("unidad_medida", "")).strip():
+        return False, "La unidad es obligatoria para calcular el coste."
     cantidad = numero_seguro(datos.get("cantidad_bruta", 0.0), 0.0)
     if requiere_cantidad and cantidad <= 0:
         return False, "La cantidad para añadir a la receta debe ser mayor que 0."
@@ -4652,11 +4630,19 @@ with st.sidebar:
             codigo_ficha = st.text_input("Código", value=ficha["codigo"])
             descripcion_ficha = st.text_input("Descripción / nombre", value=ficha["descripcion"])
             familia_ficha = st.text_input("Familia", value=ficha["familia"])
+            opciones_unidad_ficha = opciones_unidad_ingrediente(
+                ficha["unidad_medida"]
+            )
             unidad_ficha = st.selectbox(
                 "Unidad base",
-                UNIDADES_INGREDIENTE,
-                index=UNIDADES_INGREDIENTE.index(ficha["unidad_medida"]),
+                opciones_unidad_ficha,
+                index=opciones_unidad_ficha.index(ficha["unidad_medida"]),
+                format_func=lambda unidad: unidad or "Selecciona una unidad",
             )
+            if unidad_ficha and unidad_ficha not in UNIDADES_INGREDIENTE:
+                st.caption(
+                    f"Unidad específica «{unidad_ficha}»: se conservará sin convertirla a kg."
+                )
             merma_ficha = st.number_input(
                 "Merma %",
                 min_value=0.0,
@@ -4671,11 +4657,15 @@ with st.sidebar:
                 value=float(ficha["precio_unidad"]),
             )
             cantidad_ficha = st.number_input(
-                "Cantidad para la receta",
+                "Cantidad de compra (bruta)",
                 min_value=0.0,
                 step=0.001,
                 format="%.3f",
                 value=float(ficha["cantidad_bruta"]),
+                help=(
+                    "Cantidad adquirida antes de aplicar la merma. "
+                    "El coste se calcula sobre esta cantidad."
+                ),
             )
             observaciones_ficha = st.text_area(
                 "Observaciones",
@@ -5301,7 +5291,7 @@ with main_tab_recetas:
             "seleccionar": bool(idx == fila_seleccionada),
             "codigo": str(ing.get("codigo", "S/C") or "S/C"),
             "descripcion": str(ing.get("descripcion", "") or ""),
-            "unidad_medida": str(ing.get("unidad_medida", "kg") or "kg"),
+            "unidad_medida": str(ing.get("unidad_medida", "") or "").strip(),
             "cantidad_bruta": float(ing.get("cantidad_bruta", 0.0) or 0.0),
             "merma": float(ing.get("merma", 0.0) or 0.0),
             "precio_unidad": float(ing.get("precio_unidad", 0.0) or 0.0),
@@ -5333,8 +5323,15 @@ with main_tab_recetas:
         ["seleccionar", "descripcion", "cantidad_bruta", "unidad_medida", "merma", "precio_unidad", "coste_total", "codigo"]
     ]
     st.caption(
-        "Edita directamente las filas activas. Para una entrada manual, escribe el ingrediente "
-        "en la última fila; solo se muestra una fila de alta."
+        "Edita las filas activas. La última fila es un borrador pendiente: escribir en ella "
+        "no crea una fila real hasta que eliges una sugerencia o usas la ficha lateral."
+    )
+    st.caption(
+        "Cantidad = cantidad de compra (bruta). La cantidad neta se obtiene aplicando la "
+        "merma; el coste se calcula sobre la cantidad bruta comprada."
+    )
+    opciones_unidad_tabla = opciones_unidad_ingrediente(
+        *(fila.get("unidad_medida", "") for fila in datos_filas)
     )
     tabla_ingredientes = st.data_editor(
         df_display,
@@ -5345,8 +5342,12 @@ with main_tab_recetas:
         column_config={
             "seleccionar": st.column_config.CheckboxColumn("Seleccionar", width="small"),
             "descripcion": st.column_config.TextColumn("Ingrediente", width="large"),
-            "cantidad_bruta": st.column_config.NumberColumn("Cantidad", format="%.3f", min_value=0.0),
-            "unidad_medida": st.column_config.SelectboxColumn("Unidad", options=UNIDADES_INGREDIENTE),
+            "cantidad_bruta": st.column_config.NumberColumn(
+                "Cantidad compra", format="%.3f", min_value=0.0
+            ),
+            "unidad_medida": st.column_config.SelectboxColumn(
+                "Unidad", options=opciones_unidad_tabla
+            ),
             "merma": st.column_config.NumberColumn("Merma %", format="%.2f %%", min_value=0.0, max_value=100.0),
             "precio_unidad": st.column_config.NumberColumn("Precio unidad", format="%.2f €", min_value=0.0),
             "coste_total": st.column_config.NumberColumn("Coste", format="%.2f €"),
@@ -5382,7 +5383,7 @@ with main_tab_recetas:
             "codigo": codigo_editado,
             "descripcion": descripcion_editada,
             "cantidad_bruta": numero_seguro(fila.get("cantidad_bruta", 0.0), 0.0),
-            "unidad_medida": str(fila.get("unidad_medida", "kg") or "kg").strip() or "kg",
+            "unidad_medida": str(fila.get("unidad_medida", "") or "").strip(),
             "merma": numero_seguro(fila.get("merma", 0.0), 0.0),
             "precio_unidad": numero_seguro(fila.get("precio_unidad", 0.0), 0.0),
             "inventario_vinculado": bool(
@@ -5398,7 +5399,7 @@ with main_tab_recetas:
         "codigo": str(fila_nueva.get("codigo", "S/C") or "S/C").strip().upper() or "S/C",
         "descripcion": str(fila_nueva.get("descripcion", "") or "").strip(),
         "cantidad_bruta": numero_seguro(fila_nueva.get("cantidad_bruta", 0.0), 0.0),
-        "unidad_medida": str(fila_nueva.get("unidad_medida", "kg") or "kg").strip() or "kg",
+        "unidad_medida": str(fila_nueva.get("unidad_medida", "") or "").strip(),
         "merma": numero_seguro(fila_nueva.get("merma", 0.0), 0.0),
         "precio_unidad": numero_seguro(fila_nueva.get("precio_unidad", 0.0), 0.0),
         "inventario_vinculado": False,
@@ -5459,6 +5460,11 @@ with main_tab_recetas:
         for codigo in st.session_state.get("ingrediente_alta_coincidencias", [])
         if codigo in inventario_dict
     ]
+    if descripcion_nueva:
+        st.info(
+            f"Ingrediente pendiente de añadir: «{descripcion_nueva}». "
+            "Todavía no forma parte de la receta."
+        )
     if descripcion_nueva and codigos_coincidentes:
         sugerencia_col, usar_col = st.columns([4, 1])
         with sugerencia_col:

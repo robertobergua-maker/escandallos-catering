@@ -3,6 +3,7 @@
 *.env
 __pycache__/
 *.pyc
+.supabase_session.json
 .venv/
 venv/
 ~$*.xlsx
