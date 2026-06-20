@@ -6291,26 +6291,64 @@ with main_tab_recetas:
                 with cargar_col2:
                     cargar_receta_btn = st.button("Cargar receta", use_container_width=True)
 
+                receta_id_a_cargar = None
                 if cargar_receta_btn:
                     tiene_cambios = st.session_state.get('receta_tiene_cambios_pendientes', False)
                     if tiene_cambios and st.session_state.get('ingredientes', []):
-                        st.warning(
-                            "⚠️ La receta actual tiene cambios pendientes de guardar. "
-                            "Al cargar una nueva receta se descartarán."
+                        st.session_state["receta_carga_pendiente_id"] = str(
+                            receta_id_seleccionada
                         )
-                        if st.button("Continuar y descartar cambios", key="confirmar_cargar_receta_nuevo"):
-                            st.session_state['receta_id_cargada'] = None
-                            st.session_state['ingredientes'] = []
-                            limpiar_alta_ingrediente(activar_sin_seleccion=True)
-                            st.session_state['receta_tiene_cambios_pendientes'] = False
-                            st.rerun()
-                        st.stop()
+                    else:
+                        receta_id_a_cargar = str(receta_id_seleccionada)
 
-                    receta_seleccionada = recetas_por_id.get(str(receta_id_seleccionada), {})
+                receta_carga_pendiente_id = st.session_state.get(
+                    "receta_carga_pendiente_id"
+                )
+                if receta_carga_pendiente_id:
+                    receta_pendiente = recetas_por_id.get(
+                        str(receta_carga_pendiente_id),
+                        {},
+                    )
+                    etiqueta_pendiente = receta_pendiente.get(
+                        "etiqueta_selector",
+                        str(receta_carga_pendiente_id),
+                    )
+                    st.warning(
+                        "⚠️ La receta actual tiene cambios pendientes de guardar. "
+                        f"Al cargar «{etiqueta_pendiente}» se descartarán."
+                    )
+                    confirmar_col, cancelar_col = st.columns([2, 1])
+                    with confirmar_col:
+                        confirmar_carga = st.button(
+                            "Continuar, descartar cambios y cargar",
+                            key="confirmar_cargar_receta_nuevo",
+                            use_container_width=True,
+                        )
+                    with cancelar_col:
+                        cancelar_carga = st.button(
+                            "Cancelar",
+                            key="cancelar_cargar_receta_nuevo",
+                            use_container_width=True,
+                        )
+
+                    if confirmar_carga:
+                        receta_id_a_cargar = str(
+                            st.session_state.pop("receta_carga_pendiente_id")
+                        )
+                        st.session_state['receta_id_cargada'] = None
+                        st.session_state['ingredientes'] = []
+                        limpiar_alta_ingrediente(activar_sin_seleccion=True)
+                        st.session_state['receta_tiene_cambios_pendientes'] = False
+                    elif cancelar_carga:
+                        st.session_state.pop("receta_carga_pendiente_id", None)
+                        st.rerun()
+
+                if receta_id_a_cargar:
+                    receta_seleccionada = recetas_por_id.get(str(receta_id_a_cargar), {})
                     if receta_seleccionada and not receta_es_propia_o_antigua(receta_seleccionada):
                         st.error("No puedes modificar una receta de otro usuario")
                     else:
-                        cabecera, ingredientes_df = cargar_receta_detalle_supabase(receta_id_seleccionada)
+                        cabecera, ingredientes_df = cargar_receta_detalle_supabase(receta_id_a_cargar)
                         ingredientes_cargados = preparar_ingredientes_receta_para_sesion(ingredientes_df)
                         if not cabecera:
                             st.error("No se pudo cargar la cabecera de la receta seleccionada.")
@@ -6350,7 +6388,7 @@ with main_tab_recetas:
                             st.session_state["sincronizar_campos_receta"] = True
                             codigo_cargado = str(cabecera.get("codigo_receta", "") or "").strip()
                             nombre_cargado = str(cabecera.get("nombre", "") or "receta").strip()
-                            st.session_state["receta_id_cargada"] = str(cabecera.get("id", receta_id_seleccionada))
+                            st.session_state["receta_id_cargada"] = str(cabecera.get("id", receta_id_a_cargar))
                             st.session_state["codigo_receta_cargada"] = codigo_cargado
                             st.session_state["mensaje_receta_cargada"] = f"Receta cargada: {nombre_cargado} ({codigo_cargado})."
                             st.rerun()
