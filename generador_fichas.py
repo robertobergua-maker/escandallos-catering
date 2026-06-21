@@ -7,6 +7,7 @@ import io
 import base64
 import html
 import json
+import copy
 import re
 import unicodedata
 from pathlib import Path
@@ -1580,16 +1581,16 @@ def guardar_receta_nueva_supabase(datos_receta, ingredientes):
     Guarda una receta nueva y sus lineas de escandallo en el inventario.
     """
     if not supabase_disponible or supabase is None:
-        return False, "El inventario no está conectado correctamente.", None
+        return False, "El inventario no está conectado correctamente.", None, None, None
     datos_receta, ingredientes = preparar_receta_para_una_racion(
         datos_receta,
         ingredientes,
     )
     if datos_receta is None:
-        return False, "La base de raciones debe ser mayor que 0.", None
+        return False, "La base de raciones debe ser mayor que 0.", None, None, None
     receta_valida, mensaje_validacion = validar_receta_para_guardar(ingredientes, 1.0)
     if not receta_valida:
-        return False, mensaje_validacion, None
+        return False, mensaje_validacion, None, None, None
 
     try:
         user_id_actual = obtener_user_id_actual()
@@ -1604,7 +1605,13 @@ def guardar_receta_nueva_supabase(datos_receta, ingredientes):
         receta_guardada = (respuesta_receta.data or [{}])[0]
         receta_id = receta_guardada.get("id")
         if not receta_id:
-            return False, "No se pudo obtener el identificador de la receta guardada.", None
+            return (
+                False,
+                "No se pudo obtener el identificador de la receta guardada.",
+                None,
+                None,
+                None,
+            )
 
         lineas = []
         for orden, ing in enumerate(ingredientes, start=1):
@@ -1623,10 +1630,28 @@ def guardar_receta_nueva_supabase(datos_receta, ingredientes):
         limpiar_cache_recetas_guardadas()
 
         if user_id_actual:
-            return True, "Receta guardada en tu cuenta", receta_guardada
-        return True, "Receta guardada correctamente. Inicia sesión para guardar recetas en tu cuenta", receta_guardada
+            return (
+                True,
+                "Receta guardada en tu cuenta",
+                receta_guardada,
+                datos_guardar,
+                ingredientes,
+            )
+        return (
+            True,
+            "Receta guardada correctamente. Inicia sesión para guardar recetas en tu cuenta",
+            receta_guardada,
+            datos_guardar,
+            ingredientes,
+        )
     except Exception as e:
-        return False, f"Error al guardar la receta en el inventario: {e}", None
+        return (
+            False,
+            f"Error al guardar la receta en el inventario: {e}",
+            None,
+            None,
+            None,
+        )
 
 
 def actualizar_receta_supabase(receta_id, datos_receta, ingredientes):
@@ -1634,25 +1659,30 @@ def actualizar_receta_supabase(receta_id, datos_receta, ingredientes):
     Actualiza una receta existente y reemplaza solo sus lineas de escandallo.
     """
     if not receta_id:
-        return False, "No hay una receta cargada para actualizar."
+        return False, "No hay una receta cargada para actualizar.", None, None
     if not supabase_disponible or supabase is None:
-        return False, "El inventario no está conectado correctamente."
+        return False, "El inventario no está conectado correctamente.", None, None
     datos_receta, ingredientes = preparar_receta_para_una_racion(
         datos_receta,
         ingredientes,
     )
     if datos_receta is None:
-        return False, "La base de raciones debe ser mayor que 0."
+        return False, "La base de raciones debe ser mayor que 0.", None, None
     receta_valida, mensaje_validacion = validar_receta_para_guardar(ingredientes, 1.0)
     if not receta_valida:
-        return False, mensaje_validacion
+        return False, mensaje_validacion, None, None
 
     try:
         cabecera_actual, _ = cargar_receta_detalle_supabase(receta_id)
         if not cabecera_actual:
-            return False, "No se pudo comprobar la receta antes de actualizarla."
+            return (
+                False,
+                "No se pudo comprobar la receta antes de actualizarla.",
+                None,
+                None,
+            )
         if not receta_es_modificable(cabecera_actual):
-            return False, mensaje_receta_no_modificable()
+            return False, mensaje_receta_no_modificable(), None, None
 
         datos_actualizar = dict(datos_receta)
         datos_actualizar["user_id"] = valor_user_id_receta(cabecera_actual)
@@ -1688,9 +1718,20 @@ def actualizar_receta_supabase(receta_id, datos_receta, ingredientes):
 
         limpiar_cache_recetas_guardadas()
 
-        return True, "Receta actualizada correctamente."
+        datos_actualizar["id"] = str(receta_id)
+        return (
+            True,
+            "Receta actualizada correctamente.",
+            datos_actualizar,
+            ingredientes,
+        )
     except Exception as e:
-        return False, f"Error al actualizar la receta en el inventario: {e}"
+        return (
+            False,
+            f"Error al actualizar la receta en el inventario: {e}",
+            None,
+            None,
+        )
 
 
 def duplicar_receta_supabase(datos_receta, ingredientes):
@@ -1698,9 +1739,9 @@ def duplicar_receta_supabase(datos_receta, ingredientes):
     Duplica una receta cargada como una receta nueva con codigo y nombre nuevos.
     """
     if not supabase_disponible or supabase is None:
-        return False, "El inventario no está conectado correctamente.", None
+        return False, "El inventario no está conectado correctamente.", None, None, None
     if not ingredientes:
-        return False, "No hay ingredientes para duplicar.", None
+        return False, "No hay ingredientes para duplicar.", None, None, None
 
     datos_copia = dict(datos_receta)
     datos_copia["user_id"] = obtener_user_id_actual()
@@ -1822,8 +1863,14 @@ def crear_copia_receta_normalizada_supabase(datos_receta, ingredientes, raciones
         "activa": True
     })
 
-    ok, mensaje, receta_guardada = guardar_receta_nueva_supabase(datos_copia, ingredientes_normalizados)
-    return ok, mensaje, receta_guardada, ingredientes_normalizados
+    (
+        ok,
+        mensaje,
+        receta_guardada,
+        _,
+        ingredientes_guardados,
+    ) = guardar_receta_nueva_supabase(datos_copia, ingredientes_normalizados)
+    return ok, mensaje, receta_guardada, ingredientes_guardados
 
 
 def eliminar_receta_supabase(receta_id):
@@ -3894,13 +3941,13 @@ def sincronizar_receta_guardada_en_sesion(receta_guardada=None, datos_receta=Non
         or ""
     )
 
-    st.session_state["ingredientes"] = [dict(ing) for ing in ingredientes_limpios]
-    st.session_state["ingredientes_snapshot_cargados"] = [
-        dict(ing) for ing in ingredientes_limpios
-    ]
-    st.session_state["ingredientes_base_raciones"] = [
-        dict(ing) for ing in ingredientes_limpios
-    ]
+    st.session_state["ingredientes"] = copy.deepcopy(ingredientes_limpios)
+    st.session_state["ingredientes_snapshot_cargados"] = copy.deepcopy(
+        ingredientes_limpios
+    )
+    st.session_state["ingredientes_base_raciones"] = copy.deepcopy(
+        ingredientes_limpios
+    )
 
     st.session_state["factor_raciones"] = 1.0
     st.session_state["raciones_base"] = 1.0
@@ -3918,7 +3965,6 @@ def sincronizar_receta_guardada_en_sesion(receta_guardada=None, datos_receta=Non
     st.session_state.pop("receta_carga_pendiente_id", None)
     limpiar_alta_ingrediente()
     limpiar_ficha_ingrediente()
-    st.session_state["ingrediente_tabla_revision"] += 1
     if receta_id:
         st.session_state["selector_receta_guardada_pendiente"] = receta_id
 
@@ -6579,8 +6625,14 @@ with main_tab_recetas:
 
                 receta_id_a_cargar = None
                 if cargar_receta_btn:
-                    tiene_cambios = st.session_state.get('receta_tiene_cambios_pendientes', False)
-                    if tiene_cambios and st.session_state.get('ingredientes', []):
+                    tiene_cambios = bool(
+                        st.session_state.get(
+                            "receta_tiene_cambios_pendientes",
+                            False,
+                        )
+                        or detectar_cambios_receta()
+                    )
+                    if tiene_cambios:
                         st.session_state["receta_carga_pendiente_id"] = str(
                             receta_id_seleccionada
                         )
@@ -6723,22 +6775,19 @@ with main_tab_recetas:
                     "activa": True
                 }
                 if actualizar_existente:
-                    ok, mensaje = actualizar_receta_supabase(
+                    (
+                        ok,
+                        mensaje,
+                        datos_guardados,
+                        ingredientes_guardados,
+                    ) = actualizar_receta_supabase(
                         receta_id_cargada,
                         datos_receta,
                         st.session_state["ingredientes"]
                     )
                     if ok:
-                        datos_guardados, ingredientes_guardados = preparar_receta_para_una_racion(
-                            datos_receta,
-                            st.session_state["ingredientes"],
-                        )
-                        if datos_guardados is None:
-                            st.error("La receta se actualizó, pero no se pudo sincronizar la vista. Recarga la receta.")
-                            st.stop()
-                        datos_guardados["id"] = receta_id_cargada
                         sincronizar_receta_guardada_en_sesion(
-                            receta_guardada={"id": receta_id_cargada, "codigo_receta": codigo_receta, "nombre": nombre_limpio},
+                            receta_guardada=datos_guardados,
                             datos_receta=datos_guardados,
                             ingredientes_guardados=ingredientes_guardados,
                         )
@@ -6751,19 +6800,18 @@ with main_tab_recetas:
                     else:
                         st.error(mensaje)
                 elif duplicar_existente:
-                    ok, mensaje, receta_guardada = duplicar_receta_supabase(
+                    (
+                        ok,
+                        mensaje,
+                        receta_guardada,
+                        datos_guardados,
+                        ingredientes_guardados,
+                    ) = duplicar_receta_supabase(
                         datos_receta,
                         st.session_state["ingredientes"]
                     )
                     if ok:
                         nuevo_codigo = receta_guardada.get("codigo_receta", "")
-                        datos_guardados, ingredientes_guardados = preparar_receta_para_una_racion(
-                            datos_receta,
-                            st.session_state["ingredientes"],
-                        )
-                        if datos_guardados is None:
-                            st.error("La receta se duplicó, pero no se pudo sincronizar la vista. Recarga la receta.")
-                            st.stop()
                         sincronizar_receta_guardada_en_sesion(
                             receta_guardada=receta_guardada,
                             datos_receta=datos_guardados,
@@ -6779,19 +6827,18 @@ with main_tab_recetas:
                     else:
                         st.error(mensaje)
                 else:
-                    ok, mensaje, receta_guardada = guardar_receta_nueva_supabase(
+                    (
+                        ok,
+                        mensaje,
+                        receta_guardada,
+                        datos_guardados,
+                        ingredientes_guardados,
+                    ) = guardar_receta_nueva_supabase(
                         datos_receta,
                         st.session_state["ingredientes"]
                     )
                     if ok:
                         codigo_mostrado = receta_guardada.get("codigo_receta", codigo_receta)
-                        datos_guardados, ingredientes_guardados = preparar_receta_para_una_racion(
-                            datos_receta,
-                            st.session_state["ingredientes"],
-                        )
-                        if datos_guardados is None:
-                            st.error("La receta se guardó, pero no se pudo sincronizar la vista. Recarga la receta.")
-                            st.stop()
                         sincronizar_receta_guardada_en_sesion(
                             receta_guardada=receta_guardada,
                             datos_receta=datos_guardados,
@@ -7286,4 +7333,3 @@ with main_tab_menus:
             st.session_state["menu_id"] = None
             st.success("Menú actual limpiado.")
             st.rerun()
-
