@@ -267,19 +267,65 @@ def es_flujo_recuperacion_password():
     )
 
 
+def _activar_sesion_recuperacion_en_cliente():
+    """
+    Restaura en el cliente Auth recién creado la sesión conservada únicamente
+    en st.session_state. Es necesario después de cada rerun de Streamlit.
+    """
+    access_token = st.session_state.get("access_token")
+    refresh_token = st.session_state.get("refresh_token")
+    if not access_token or not refresh_token:
+        return False
+    try:
+        respuesta = supabase.auth.set_session(access_token, refresh_token)
+        sesion = _obtener_campo_auth(respuesta, "session")
+        usuario = _obtener_campo_auth(respuesta, "user")
+        if sesion and usuario:
+            _guardar_sesion_supabase(usuario, sesion)
+        return bool(supabase.auth.get_session())
+    except Exception:
+        return False
+
+
+def _limpiar_estado_recuperacion_password():
+    for clave in (
+        "reset_password_verified",
+        "reset_password_token_hash",
+        "reset_password_error",
+        "password_recovery_ready",
+    ):
+        st.session_state.pop(clave, None)
+
+
 def preparar_sesion_recuperacion_password():
     """
     Verifica una sola vez token_hash o code y establece la sesión temporal
     necesaria para update_user. Nunca muestra ni persiste esos valores.
     """
-    if st.session_state.get("password_recovery_ready"):
-        return True, ""
     if not supabase_disponible or supabase is None:
         return False, "Supabase no está conectado."
 
     token_hash = _valor_query_param("token_hash")
     tipo = _valor_query_param("type").lower()
     codigo = _valor_query_param("code")
+    token_verificado = st.session_state.get("reset_password_token_hash")
+
+    if token_hash and token_verificado and token_hash != token_verificado:
+        _limpiar_estado_recuperacion_password()
+
+    if st.session_state.get("reset_password_verified"):
+        if _activar_sesion_recuperacion_en_cliente():
+            return True, ""
+        st.session_state["reset_password_error"] = (
+            "La sesión de recuperación ha caducado. Solicita un nuevo enlace."
+        )
+        st.session_state["reset_password_verified"] = False
+        return False, st.session_state["reset_password_error"]
+
+    error_previo = st.session_state.get("reset_password_error")
+    if error_previo and token_hash == token_verificado:
+        return False, error_previo
+
     try:
         respuesta = None
         if token_hash and tipo == "recovery":
@@ -302,20 +348,40 @@ def preparar_sesion_recuperacion_password():
 
         sesion = _obtener_campo_auth(respuesta, "session")
         usuario = _obtener_campo_auth(respuesta, "user")
-        if not sesion and _obtener_campo_auth(respuesta, "access_token"):
-            sesion = respuesta
-            usuario = _obtener_campo_auth(sesion, "user")
+        access_token = _obtener_campo_auth(sesion, "access_token")
+        refresh_token = _obtener_campo_auth(sesion, "refresh_token")
+        if not sesion:
+            access_token = _obtener_campo_auth(respuesta, "access_token")
+            refresh_token = _obtener_campo_auth(respuesta, "refresh_token")
+        if access_token and refresh_token:
+            respuesta_sesion = supabase.auth.set_session(
+                access_token,
+                refresh_token,
+            )
+            sesion = _obtener_campo_auth(respuesta_sesion, "session") or sesion
+            usuario = _obtener_campo_auth(respuesta_sesion, "user") or usuario
         if sesion and usuario:
             _guardar_sesion_supabase(usuario, sesion)
-        if sesion or obtener_usuario_actual():
+
+        if (sesion or obtener_usuario_actual()) and supabase.auth.get_session():
+            st.session_state["reset_password_verified"] = True
+            st.session_state["reset_password_token_hash"] = token_hash
+            st.session_state["reset_password_error"] = None
             st.session_state["password_recovery_ready"] = True
             return True, ""
-        return False, (
+        mensaje = (
             "El enlace no contiene una sesión de recuperación utilizable. "
             "Solicita un enlace nuevo o configura la plantilla con token_hash."
         )
-    except Exception as exc:
-        return False, f"No se pudo verificar el enlace de recuperación: {exc}"
+        st.session_state["reset_password_token_hash"] = token_hash
+        st.session_state["reset_password_error"] = mensaje
+        return False, mensaje
+    except Exception:
+        mensaje = "No se pudo verificar el enlace. Solicita un nuevo enlace."
+        st.session_state["reset_password_token_hash"] = token_hash
+        st.session_state["reset_password_error"] = mensaje
+        st.session_state["reset_password_verified"] = False
+        return False, mensaje
 
 
 def limpiar_parametros_recuperacion():
@@ -339,7 +405,7 @@ def render_reset_password_screen():
             except Exception:
                 pass
             _limpiar_sesion_autenticacion()
-            st.session_state["password_recovery_ready"] = False
+            _limpiar_estado_recuperacion_password()
             st.session_state["password_recovery_completed"] = False
             limpiar_parametros_recuperacion()
             st.rerun()
@@ -364,22 +430,59 @@ def render_reset_password_screen():
             "Guardar nueva contraseña",
             type="primary",
             use_container_width=True,
+            disabled=not (
+                listo
+                and st.session_state.get("reset_password_verified", False)
+            ),
         )
 
+    password_actualizada = False
     if guardar_password:
         if len(nueva_password) < 6:
             st.error("La contraseña debe tener al menos 6 caracteres.")
         elif nueva_password != repetir_password:
             st.error("Las contraseñas no coinciden.")
+        elif not st.session_state.get("reset_password_verified"):
+            st.error(
+                "No se pudo actualizar la contraseña. Solicita un nuevo enlace."
+            )
+        elif not _activar_sesion_recuperacion_en_cliente():
+            st.error(
+                "No se pudo actualizar la contraseña. Solicita un nuevo enlace."
+            )
         else:
             try:
+                if not supabase.auth.get_session():
+                    raise RuntimeError("missing recovery session")
                 supabase.auth.update_user({"password": nueva_password})
+                _limpiar_estado_recuperacion_password()
                 st.session_state["password_recovery_completed"] = True
-                st.rerun()
-            except Exception as exc:
-                st.error(f"No se pudo actualizar la contraseña: {exc}")
+                limpiar_parametros_recuperacion()
+                password_actualizada = True
+                st.success("Contraseña actualizada correctamente.")
+            except Exception:
+                st.session_state["reset_password_error"] = (
+                    "No se pudo actualizar la contraseña. Solicita un nuevo enlace."
+                )
+                st.error(st.session_state["reset_password_error"])
+
+    if password_actualizada:
+        if st.button(
+            "Cerrar sesión y volver al acceso",
+            type="primary",
+            key="volver_login_password_actualizada",
+        ):
+            try:
+                supabase.auth.sign_out()
+            except Exception:
+                pass
+            _limpiar_sesion_autenticacion()
+            st.session_state["password_recovery_completed"] = False
+            st.rerun()
+        return
 
     if st.button("Volver al inicio", key="volver_inicio_password"):
+        _limpiar_estado_recuperacion_password()
         limpiar_parametros_recuperacion()
         st.rerun()
 
