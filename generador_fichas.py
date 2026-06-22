@@ -5508,7 +5508,7 @@ ADMIN_NUMERIC_COLUMNS = {
 ADMIN_BOOLEAN_COLUMNS = {"activa", "es_temporal", "activo"}
 ADMIN_READONLY_COLUMNS = {
     "id", "created_at", "updated_at", "user_id", "receta_id", "menu_id",
-    "cliente_id", "factura_id", "presupuesto_id",
+    "cliente_id", "factura_id", "presupuesto_id", "origen_id",
 }
 
 ADMIN_GRUPOS_TABLAS = {
@@ -5521,7 +5521,257 @@ ADMIN_GRUPOS_TABLAS = {
     ],
     "Sistema": ["usuarios_app"],
 }
-ADMIN_TABLAS_INSERTABLES = {"inventario"}
+ADMIN_TABLAS_INSERTABLES = {
+    "inventario", "receta_ingredientes", "menu_recetas",
+    "presupuesto_menus", "factura_menus", "factura_lineas",
+}
+
+ADMIN_COLUMNAS_TECNICAS = {
+    "id", "user_id", "receta_id", "menu_id", "cliente_id",
+    "presupuesto_id", "factura_id", "origen_id", "created_at", "updated_at",
+}
+
+ADMIN_REFERENCIAS_UI = {
+    "user_id": ("propietario", "usuarios"),
+    "receta_id": ("receta", "recetas"),
+    "menu_id": ("menu", "menus"),
+    "cliente_id": ("cliente", "clientes"),
+    "presupuesto_id": ("presupuesto", "presupuestos"),
+    "factura_id": ("factura", "facturas"),
+}
+
+ADMIN_COLUMNAS_CALCULADAS = {
+    "cantidad_neta", "coste_total", "precio_venta_sin_iva",
+    "precio_venta_con_iva", "base_imponible", "iva_importe",
+    "retencion_importe", "total", "base_linea", "iva_linea",
+    "total_linea", "coste_linea_menu_presupuesto",
+    "precio_linea_menu_presupuesto", "coste_linea_menu_factura",
+    "precio_linea_menu_factura",
+}
+
+
+def admin_formatear_opcion_receta(row):
+    codigo = str(row.get("codigo_receta", "") or "").strip()
+    nombre = str(row.get("nombre", "") or "Receta sin nombre").strip()
+    return " · ".join(parte for parte in (codigo, nombre) if parte)
+
+
+def admin_formatear_opcion_menu(row):
+    nombre = str(row.get("nombre", "") or "Menú sin nombre").strip()
+    tipo = str(row.get("tipo_menu", "") or "").strip()
+    pax = numero_seguro(
+        row.get("numero_comensales", row.get("pax_referencia_menu", 0)),
+        0,
+    )
+    partes = [nombre]
+    if tipo:
+        partes.append(tipo)
+    if pax > 0:
+        partes.append(f"{pax:g} comensales")
+    return " · ".join(partes)
+
+
+def admin_formatear_opcion_usuario(row):
+    email = str(row.get("email", "") or "").strip()
+    nombre = str(row.get("nombre", "") or "").strip()
+    rol = normalizar_rol_usuario(row.get("rol"))
+    return " · ".join(parte for parte in (email, nombre, rol) if parte)
+
+
+def admin_formatear_opcion_cliente(row):
+    nombre = str(row.get("nombre", "") or "Cliente sin nombre").strip()
+    nif = str(row.get("nif_cif", "") or "").strip()
+    email = str(row.get("email", "") or "").strip()
+    return " · ".join(parte for parte in (nombre, nif, email) if parte)
+
+
+def _admin_formatear_documento(row, numero_columna):
+    numero = str(row.get(numero_columna, "") or "").strip()
+    concepto = str(row.get("concepto", "") or "").strip()
+    return " · ".join(parte for parte in (numero, concepto) if parte) or "Sin referencia"
+
+
+def _admin_catalogo_desde_df(df, id_columna, formateador):
+    por_id = {}
+    por_etiqueta = {}
+    for row in df.to_dict("records"):
+        id_valor = str(row.get(id_columna, "") or "").strip()
+        if not id_valor:
+            continue
+        etiqueta_base = formateador(row) or id_valor
+        etiqueta = etiqueta_base
+        if etiqueta in por_etiqueta and por_etiqueta[etiqueta] != id_valor:
+            etiqueta = f"{etiqueta_base} · {id_valor[:8]}"
+        por_id[id_valor] = etiqueta
+        por_etiqueta[etiqueta] = id_valor
+    return {
+        "por_id": por_id,
+        "por_etiqueta": por_etiqueta,
+        "opciones": sorted(por_etiqueta),
+    }
+
+
+def admin_obtener_catalogos_referencia(limite=2000):
+    """
+    Construye catálogos humanos para la UI. Una tabla ausente produce un
+    catálogo vacío y no impide administrar el resto.
+    """
+    definiciones = {
+        "recetas": ("recetas", "id", admin_formatear_opcion_receta),
+        "menus": ("menus", "id", admin_formatear_opcion_menu),
+        "usuarios": ("usuarios_app", "user_id", admin_formatear_opcion_usuario),
+        "clientes": ("clientes", "id", admin_formatear_opcion_cliente),
+        "presupuestos": (
+            "presupuestos", "id",
+            lambda row: _admin_formatear_documento(row, "numero_presupuesto"),
+        ),
+        "facturas": (
+            "facturas", "id",
+            lambda row: _admin_formatear_documento(row, "numero_factura"),
+        ),
+        "inventario": (
+            "inventario", "codigo",
+            lambda row: " · ".join(
+                parte for parte in (
+                    str(row.get("codigo", "") or "").strip(),
+                    str(row.get("descripcion", "") or "").strip(),
+                ) if parte
+            ),
+        ),
+    }
+    catalogos = {}
+    avisos = []
+    for nombre, (tabla, id_columna, formateador) in definiciones.items():
+        ok, mensaje, df = admin_cargar_tabla(tabla, limite=limite)
+        if ok:
+            catalogos[nombre] = _admin_catalogo_desde_df(
+                df,
+                id_columna,
+                formateador,
+            )
+        else:
+            catalogos[nombre] = {
+                "por_id": {},
+                "por_etiqueta": {},
+                "opciones": [],
+            }
+            avisos.append(f"{tabla}: {mensaje}")
+    return catalogos, avisos
+
+
+def _admin_etiqueta_referencia(catalogo, id_valor, vacio="sin referencia"):
+    id_limpio = str(id_valor or "").strip()
+    if not id_limpio:
+        return vacio
+    return catalogo.get("por_id", {}).get(
+        id_limpio,
+        f"referencia desconocida: {id_limpio[:8]}",
+    )
+
+
+def admin_enriquecer_tabla_para_ui(nombre_tabla, df, catalogos):
+    df_ui = df.copy()
+    for columna_id, (columna_ui, catalogo_nombre) in ADMIN_REFERENCIAS_UI.items():
+        if nombre_tabla == "usuarios_app" and columna_id == "user_id":
+            continue
+        if columna_id not in df_ui.columns:
+            continue
+        vacio = "sin propietario" if columna_id == "user_id" else "sin referencia"
+        catalogo = catalogos.get(catalogo_nombre, {})
+        posicion = df_ui.columns.get_loc(columna_id) + 1
+        def resolver_referencia(valor):
+            id_limpio = str(valor or "").strip()
+            if columna_id == "user_id" and id_limpio:
+                return catalogo.get("por_id", {}).get(
+                    id_limpio,
+                    f"usuario desconocido: {id_limpio[:8]}",
+                )
+            return _admin_etiqueta_referencia(
+                catalogo,
+                valor,
+                vacio=vacio,
+            )
+        df_ui.insert(
+            posicion,
+            columna_ui,
+            df_ui[columna_id].apply(resolver_referencia),
+        )
+
+    if nombre_tabla == "receta_ingredientes":
+        inventario = catalogos.get("inventario", {})
+        etiquetas = []
+        for row in df_ui.to_dict("records"):
+            codigo = str(row.get("codigo_ingrediente", "") or "").strip()
+            descripcion = str(row.get("descripcion_ingrediente", "") or "").strip()
+            etiqueta = inventario.get("por_id", {}).get(codigo)
+            etiquetas.append(
+                etiqueta
+                or " · ".join(parte for parte in (codigo, descripcion) if parte)
+                or "ingrediente temporal"
+            )
+        posicion = (
+            df_ui.columns.get_loc("codigo_ingrediente") + 1
+            if "codigo_ingrediente" in df_ui.columns
+            else len(df_ui.columns)
+        )
+        df_ui.insert(posicion, "ingrediente", etiquetas)
+
+    if nombre_tabla == "factura_lineas" and "origen_id" in df_ui.columns:
+        origenes = []
+        for row in df_ui.to_dict("records"):
+            origen_id = row.get("origen_id")
+            origen_tipo = str(row.get("origen_tipo", "") or "").lower()
+            catalogo = (
+                catalogos.get("menus", {})
+                if "menu" in origen_tipo
+                else catalogos.get("recetas", {})
+                if "receta" in origen_tipo
+                else {}
+            )
+            origenes.append(
+                _admin_etiqueta_referencia(catalogo, origen_id)
+            )
+        df_ui.insert(
+            df_ui.columns.get_loc("origen_id") + 1,
+            "origen",
+            origenes,
+        )
+    return df_ui
+
+
+def admin_preparar_payload_desde_ui(nombre_tabla, fila_ui, catalogos):
+    """
+    Convierte etiquetas humanas a las claves reales. Las columnas auxiliares
+    nunca forman parte del payload que se envía a Supabase.
+    """
+    fila = dict(fila_ui or {})
+    for columna_id, (columna_ui, catalogo_nombre) in ADMIN_REFERENCIAS_UI.items():
+        if columna_ui not in fila:
+            continue
+        etiqueta = str(fila.get(columna_ui, "") or "").strip()
+        catalogo = catalogos.get(catalogo_nombre, {})
+        if etiqueta in {"", "sin propietario", "sin referencia"}:
+            fila[columna_id] = None
+        elif etiqueta in catalogo.get("por_etiqueta", {}):
+            fila[columna_id] = catalogo["por_etiqueta"][etiqueta]
+
+    if nombre_tabla == "receta_ingredientes" and "ingrediente" in fila:
+        etiqueta = str(fila.get("ingrediente", "") or "").strip()
+        inventario = catalogos.get("inventario", {})
+        codigo = inventario.get("por_etiqueta", {}).get(etiqueta)
+        if codigo:
+            fila["codigo_ingrediente"] = codigo
+            descripcion = inventario.get("por_id", {}).get(codigo, "")
+            if " · " in descripcion:
+                fila["descripcion_ingrediente"] = descripcion.split(" · ", 1)[1]
+            fila["es_temporal"] = False
+
+    columnas_reales = set(ADMIN_TABLAS_BBDD[nombre_tabla]["columns"])
+    return {
+        columna: valor
+        for columna, valor in fila.items()
+        if columna in columnas_reales
+    }
 
 
 def normalizar_valor_admin(valor, columna):
@@ -5553,10 +5803,36 @@ def admin_columnas_editables(nombre_tabla):
     if nombre_tabla == "usuarios_app":
         bloqueadas.add("user_id")
         bloqueadas.add("email")
+    bloqueadas.update(ADMIN_COLUMNAS_CALCULADAS)
     return [
         columna for columna in config["columns"]
         if columna not in bloqueadas
     ]
+
+
+def admin_columnas_guardables(nombre_tabla):
+    columnas = set(admin_columnas_editables(nombre_tabla))
+    columnas_tabla = set(ADMIN_TABLAS_BBDD[nombre_tabla]["columns"])
+    columnas.update(
+        columna_id for columna_id in ADMIN_REFERENCIAS_UI
+        if columna_id in columnas_tabla
+    )
+    return columnas
+
+
+def admin_columnas_ui_editables(nombre_tabla):
+    columnas_reales = set(ADMIN_TABLAS_BBDD[nombre_tabla]["columns"])
+    columnas = [
+        columna for columna in admin_columnas_editables(nombre_tabla)
+        if columna not in ADMIN_REFERENCIAS_UI
+    ]
+    for columna_id, (columna_ui, _) in ADMIN_REFERENCIAS_UI.items():
+        if columna_id in columnas_reales:
+            columnas.insert(0, columna_ui)
+    if nombre_tabla == "receta_ingredientes":
+        posicion = 1 if "receta" in columnas else 0
+        columnas.insert(posicion, "ingrediente")
+    return list(dict.fromkeys(columnas))
 
 
 def admin_limpiar_payload_fila(nombre_tabla, fila, incluir_pk=True):
@@ -5646,7 +5922,7 @@ def admin_actualizar_fila(nombre_tabla, id_columna, id_valor, datos):
     try:
         payload = {
             k: v for k, v in datos.items()
-            if k in admin_columnas_editables(nombre_tabla)
+            if k in admin_columnas_guardables(nombre_tabla)
         }
         if not payload:
             return True, "No había cambios editables."
@@ -5707,11 +5983,50 @@ def admin_invalidar_cache(nombre_tabla):
             pass
 
 
-def _admin_column_config(columnas):
+def _admin_column_config(columnas, catalogos=None, valores_actuales=None):
+    catalogos = catalogos or {}
+    valores_actuales = valores_actuales or {}
     config = {}
     for columna in columnas:
         if columna == "_seleccionar":
             config[columna] = st.column_config.CheckboxColumn("Seleccionar")
+        elif columna in {
+            "receta", "menu", "propietario", "cliente",
+            "presupuesto", "factura",
+        }:
+            catalogo_nombre = {
+                "receta": "recetas",
+                "menu": "menus",
+                "propietario": "usuarios",
+                "cliente": "clientes",
+                "presupuesto": "presupuestos",
+                "factura": "facturas",
+            }[columna]
+            opciones = list(catalogos.get(catalogo_nombre, {}).get("opciones", []))
+            opciones.extend(
+                valor for valor in valores_actuales.get(columna, [])
+                if valor and valor not in opciones
+            )
+            if columna == "propietario" and "sin propietario" not in opciones:
+                opciones.insert(0, "sin propietario")
+            elif columna != "propietario" and "sin referencia" not in opciones:
+                opciones.insert(0, "sin referencia")
+            config[columna] = st.column_config.SelectboxColumn(
+                columna.capitalize(),
+                options=opciones,
+            )
+        elif columna == "ingrediente":
+            opciones = list(catalogos.get("inventario", {}).get("opciones", []))
+            if "" not in opciones:
+                opciones.insert(0, "")
+            opciones.extend(
+                valor for valor in valores_actuales.get(columna, [])
+                if valor and valor not in opciones
+            )
+            config[columna] = st.column_config.SelectboxColumn(
+                "Ingrediente",
+                options=opciones,
+            )
         elif columna in ADMIN_BOOLEAN_COLUMNS:
             config[columna] = st.column_config.CheckboxColumn(columna)
         elif columna == "rol":
@@ -5725,7 +6040,7 @@ def _admin_column_config(columnas):
     return config
 
 
-def _admin_guardar_editor(nombre_tabla, original, editado):
+def _admin_guardar_editor(nombre_tabla, original, editado, catalogos):
     config = ADMIN_TABLAS_BBDD[nombre_tabla]
     pk = config["pk"]
     filas_originales = original.to_dict("records")
@@ -5741,11 +6056,19 @@ def _admin_guardar_editor(nombre_tabla, original, editado):
             if pk_valor in (None, ""):
                 errores.append(f"La fila {indice + 1} no tiene clave primaria.")
                 continue
+            fila_convertida = admin_preparar_payload_desde_ui(
+                nombre_tabla,
+                fila,
+                catalogos,
+            )
             cambios = {}
-            for columna in admin_columnas_editables(nombre_tabla):
-                if columna not in fila:
+            for columna in admin_columnas_guardables(nombre_tabla):
+                if columna not in fila_convertida:
                     continue
-                nuevo = normalizar_valor_admin(fila.get(columna), columna)
+                nuevo = normalizar_valor_admin(
+                    fila_convertida.get(columna),
+                    columna,
+                )
                 previo = normalizar_valor_admin(anterior.get(columna), columna)
                 if nuevo != previo:
                     cambios[columna] = nuevo
@@ -5756,7 +6079,12 @@ def _admin_guardar_editor(nombre_tabla, original, editado):
                 else:
                     errores.append(mensaje)
         elif any(valor not in (None, "", False) for valor in fila.values()):
-            ok, mensaje = admin_insertar_fila(nombre_tabla, fila)
+            fila_convertida = admin_preparar_payload_desde_ui(
+                nombre_tabla,
+                fila,
+                catalogos,
+            )
+            ok, mensaje = admin_insertar_fila(nombre_tabla, fila_convertida)
             if ok:
                 insertadas += 1
             else:
@@ -5801,6 +6129,16 @@ def render_admin_bbdd_tab():
             "Límite", min_value=50, max_value=2000, value=500, step=50,
             key=f"admin_limite_{tabla}",
         )
+    mostrar_tecnicas = st.checkbox(
+        "Mostrar columnas técnicas",
+        value=False,
+        key=f"admin_mostrar_tecnicas_{tabla}",
+    )
+    if mostrar_tecnicas:
+        st.warning(
+            "Columnas técnicas: se muestran solo como referencia. "
+            "No editar salvo que sepas lo que haces."
+        )
 
     ok, mensaje, df = admin_cargar_tabla(tabla, limite=int(limite))
     if not ok:
@@ -5808,32 +6146,58 @@ def render_admin_bbdd_tab():
         return
     if "Columnas no disponibles" in mensaje:
         st.warning(mensaje)
+
+    catalogos, avisos_catalogos = admin_obtener_catalogos_referencia()
+    if avisos_catalogos:
+        st.caption(
+            "Algunas referencias no pudieron resolverse: "
+            + " | ".join(avisos_catalogos)
+        )
+    df_ui = admin_enriquecer_tabla_para_ui(tabla, df, catalogos)
     if filtro:
-        mascara = df.astype(str).apply(
+        mascara = df_ui.astype(str).apply(
             lambda col: col.str.contains(filtro, case=False, na=False)
         ).any(axis=1)
-        df = df[mascara].copy()
+        df = df[mascara].reset_index(drop=True)
+        df_ui = df_ui[mascara].reset_index(drop=True)
+    else:
+        df = df.reset_index(drop=True)
+        df_ui = df_ui.reset_index(drop=True)
 
-    csv = df.to_csv(index=False).encode("utf-8-sig")
+    columnas_ocultas = set()
+    if not mostrar_tecnicas:
+        columnas_ocultas.update(ADMIN_COLUMNAS_TECNICAS)
+    columnas_visibles = [
+        columna for columna in df_ui.columns
+        if columna not in columnas_ocultas
+    ]
+    df_visible = df_ui[columnas_visibles].copy()
+
+    csv = df_visible.to_csv(index=False).encode("utf-8-sig")
     st.download_button(
         "Descargar CSV", csv, f"{tabla}.csv", "text/csv",
         use_container_width=False,
     )
     if tabla == "usuarios_app":
-        st.dataframe(df, hide_index=True, use_container_width=True)
+        st.dataframe(df_visible, hide_index=True, use_container_width=True)
         st.info(
             "La edición y eliminación de perfiles se realiza en la pestaña "
             "Usuarios, donde se aplican las protecciones del administrador actual."
         )
         return
 
-    editable = df.copy()
+    editable = df_visible.copy()
     editable.insert(0, "_seleccionar", False)
+    columnas_ui_editables = set(admin_columnas_ui_editables(tabla))
     bloqueadas = [
         columna for columna in editable.columns
         if columna != "_seleccionar"
-        and columna not in admin_columnas_editables(tabla)
+        and columna not in columnas_ui_editables
     ]
+    valores_actuales = {
+        columna: editable[columna].dropna().astype(str).tolist()
+        for columna in editable.columns
+    }
     editor = st.data_editor(
         editable,
         num_rows="fixed",
@@ -5841,12 +6205,16 @@ def render_admin_bbdd_tab():
         use_container_width=True,
         height=520,
         disabled=bloqueadas,
-        column_config=_admin_column_config(editable.columns),
+        column_config=_admin_column_config(
+            editable.columns,
+            catalogos,
+            valores_actuales,
+        ),
         key=f"admin_editor_seguro_{tabla}",
     )
     if tabla in ADMIN_TABLAS_INSERTABLES:
         with st.expander("Insertar nueva fila", expanded=False):
-            columnas_nuevas = admin_columnas_editables(tabla)
+            columnas_nuevas = admin_columnas_ui_editables(tabla)
             fila_vacia = {
                 columna: False if columna in ADMIN_BOOLEAN_COLUMNS else None
                 for columna in columnas_nuevas
@@ -5856,13 +6224,21 @@ def render_admin_bbdd_tab():
                 num_rows="fixed",
                 hide_index=True,
                 use_container_width=True,
-                column_config=_admin_column_config(columnas_nuevas),
+                column_config=_admin_column_config(
+                    columnas_nuevas,
+                    catalogos,
+                ),
                 key=f"admin_nueva_fila_{tabla}",
             )
             if st.button("Insertar fila", key=f"admin_insertar_{tabla}"):
-                ok_insertar, mensaje_insertar = admin_insertar_fila(
+                payload_nuevo = admin_preparar_payload_desde_ui(
                     tabla,
                     nueva_fila_df.iloc[0].to_dict(),
+                    catalogos,
+                )
+                ok_insertar, mensaje_insertar = admin_insertar_fila(
+                    tabla,
+                    payload_nuevo,
                 )
                 if ok_insertar:
                     admin_invalidar_cache(tabla)
@@ -5877,7 +6253,12 @@ def render_admin_bbdd_tab():
         )
 
     if st.button("Guardar cambios", type="primary", key=f"admin_guardar_{tabla}"):
-        actualizadas, insertadas, errores = _admin_guardar_editor(tabla, df, editor)
+        actualizadas, insertadas, errores = _admin_guardar_editor(
+            tabla,
+            df,
+            editor,
+            catalogos,
+        )
         if errores:
             st.error(" | ".join(errores))
         if actualizadas or insertadas:
@@ -5932,7 +6313,12 @@ def render_admin_usuarios_tab():
         if not fila_propia.empty and not bool(fila_propia.iloc[0].get("activo", True)):
             st.error("No puedes desactivar tu propio usuario administrador.")
         else:
-            actualizadas, _, errores = _admin_guardar_editor("usuarios_app", df, editor)
+            actualizadas, _, errores = _admin_guardar_editor(
+                "usuarios_app",
+                df,
+                editor,
+                {},
+            )
             if errores:
                 st.error(" | ".join(errores))
             elif actualizadas:
