@@ -4,3 +4,4 @@ openpyxl
 openai
 supabase
 reportlab
+extra-streamlit-components
