@@ -5059,8 +5059,8 @@ ADMIN_TABLAS_BBDD = {
         "order": "nombre",
         "columns": [
             "id", "user_id", "nombre", "tipo_menu", "descripcion",
-            "numero_comensales", "coste_total", "precio_total",
-            "created_at", "updated_at"
+            "numero_comensales", "pax_referencia_menu", "coste_total",
+            "precio_total", "created_at", "updated_at"
         ],
         "generated_pk": True,
     },
@@ -5069,7 +5069,9 @@ ADMIN_TABLAS_BBDD = {
         "pk": "id",
         "order": "orden",
         "columns": [
-            "id", "menu_id", "receta_id", "raciones", "orden", "seccion", "created_at"
+            "id", "menu_id", "receta_id", "raciones",
+            "raciones_receta_en_menu", "orden", "seccion",
+            "observaciones", "created_at"
         ],
         "generated_pk": True,
     },
@@ -5093,8 +5095,29 @@ ADMIN_TABLAS_BBDD = {
             "estado", "fecha_emision", "fecha_vencimiento", "concepto",
             "base_imponible", "iva_pct", "iva_importe", "retencion_pct",
             "retencion_importe", "total", "metodo_pago", "estado_cobro",
-            "notas", "created_at", "updated_at"
+            "presupuesto_id", "coste_total", "notas", "created_at", "updated_at"
         ],
+        "generated_pk": True,
+    },
+    "presupuestos": {
+        "label": "Presupuestos",
+        "pk": "id",
+        "order": "fecha_emision",
+        "columns": PRESUPUESTOS_COLUMNAS,
+        "generated_pk": True,
+    },
+    "presupuesto_menus": {
+        "label": "Menús de presupuestos",
+        "pk": "id",
+        "order": "orden",
+        "columns": PRESUPUESTO_MENUS_COLUMNAS,
+        "generated_pk": True,
+    },
+    "factura_menus": {
+        "label": "Menús de facturas",
+        "pk": "id",
+        "order": "orden",
+        "columns": FACTURA_MENUS_COLUMNAS,
         "generated_pk": True,
     },
     "factura_lineas": {
