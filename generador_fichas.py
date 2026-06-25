@@ -12,8 +12,13 @@ import unicodedata
 from pathlib import Path
 from difflib import SequenceMatcher
 from urllib.parse import urlsplit, urlunsplit
+from datetime import datetime, timedelta
 from openai import OpenAI
 from supabase import create_client, Client
+try:
+    import extra_streamlit_components as stx
+except Exception:
+    stx = None
 from calculos_jerarquia import (
     calcular_coste_factura,
     calcular_coste_menu,
@@ -50,6 +55,70 @@ if supabase_disponible:
 
 BASE_DIR = Path(__file__).resolve().parent
 LOGO_SAMIRARTE_PATH = BASE_DIR / "assets" / "logo_samirarte.png"
+
+AUTH_REFRESH_COOKIE = "escandallos_refresh_token"
+
+
+@st.cache_resource
+def obtener_cookie_manager():
+    """Devuelve un gestor de cookies del navegador si la dependencia existe."""
+    if stx is None:
+        return None
+    try:
+        return stx.CookieManager(key="escandallos_auth_cookie_manager")
+    except Exception:
+        return None
+
+
+def _leer_cookie_refresh_token():
+    """Lee el refresh_token persistido en cookie del navegador."""
+    try:
+        valor = st.context.cookies.get(AUTH_REFRESH_COOKIE)
+        if valor:
+            return str(valor)
+    except Exception:
+        pass
+
+    try:
+        gestor = obtener_cookie_manager()
+        if gestor is not None:
+            valor = gestor.get(cookie=AUTH_REFRESH_COOKIE)
+            if valor:
+                return str(valor)
+    except Exception:
+        pass
+    return None
+
+
+def _guardar_cookie_refresh_token(refresh_token):
+    """Guarda el refresh_token en cookie persistente del navegador."""
+    token = str(refresh_token or "").strip()
+    if not token:
+        return False
+    try:
+        gestor = obtener_cookie_manager()
+        if gestor is None:
+            return False
+        gestor.set(
+            AUTH_REFRESH_COOKIE,
+            token,
+            expires_at=datetime.now() + timedelta(days=30),
+            key="set_refresh_token_cookie",
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _borrar_cookie_refresh_token():
+    """Elimina la cookie de sesión persistente."""
+    try:
+        gestor = obtener_cookie_manager()
+        if gestor is not None:
+            gestor.delete(AUTH_REFRESH_COOKIE, key="delete_refresh_token_cookie")
+    except Exception:
+        pass
+
 
 
 def logo_samirarte_existe():
@@ -244,6 +313,7 @@ def obtener_usuario_actual():
 
 
 def _limpiar_sesion_autenticacion():
+    _borrar_cookie_refresh_token()
     st.session_state["user_id"] = None
     st.session_state["user_email"] = None
     st.session_state["access_token"] = None
@@ -265,28 +335,36 @@ def _guardar_sesion_supabase(usuario, sesion):
         st.session_state["user_email"] = str(user_email or "")
         st.session_state["access_token"] = access_token
         st.session_state["refresh_token"] = refresh_token
+        if refresh_token:
+            _guardar_cookie_refresh_token(refresh_token)
 
 
 def restaurar_sesion_supabase():
     """
-    Refresca la sesión usando exclusivamente los tokens aislados en
-    st.session_state. Nunca persiste tokens en el sistema de archivos.
+    Restaura la sesión tras F5 usando refresh_token de session_state o cookie.
+    No guarda tokens en disco; solo usa cookie del navegador.
     """
     if obtener_usuario_actual():
         return True
     if not supabase_disponible or supabase is None:
         return False
 
-    refresh_token = st.session_state.get("refresh_token")
+    refresh_token = st.session_state.get("refresh_token") or _leer_cookie_refresh_token()
     if not refresh_token:
         return False
 
     try:
-        respuesta = supabase.auth.refresh_session(refresh_token=refresh_token)
+        try:
+            respuesta = supabase.auth.refresh_session(refresh_token=refresh_token)
+        except TypeError:
+            respuesta = supabase.auth.refresh_session(refresh_token)
+
         usuario = _obtener_campo_auth(respuesta, "user")
         sesion = _obtener_campo_auth(respuesta, "session")
+
         if not usuario or not sesion:
             return False
+
         _guardar_sesion_supabase(usuario, sesion)
         asegurar_usuario_app_supabase()
         return True
@@ -1297,6 +1375,63 @@ MENSAJE_FACTURACION_NO_ACTIVADA = (
     "El módulo de facturación todavía no está activado en Inventario. "
     "Ejecuta primero el SQL de facturación."
 )
+
+
+def preparar_factura_compatibilidad(factura):
+    """Normaliza un documento de public.facturas para la UI heredada."""
+    datos = dict(factura or {})
+    tipo = str(datos.get("tipo_documento") or "factura").strip().lower() or "factura"
+    datos["tipo_documento"] = tipo
+    datos["_origen_almacen"] = "facturas"
+    datos["presupuesto_id"] = datos.get("id") if tipo == "presupuesto" else datos.get("presupuesto_id")
+    datos["coste_total"] = numero_seguro(datos.get("coste_total"), 0.0)
+    if datos.get("total") is None:
+        datos["total"] = 0.0
+    return datos
+
+
+def preparar_facturas_df_compatibilidad(df):
+    """Asegura columnas de UI sin exigir que existan en Supabase."""
+    columnas_salida = FACTURAS_COLUMNAS_JERARQUIA + ["_origen_almacen"]
+    if df is None or df.empty:
+        return pd.DataFrame(columns=columnas_salida)
+    df = df.copy()
+    for col in FACTURAS_COLUMNAS:
+        if col not in df.columns:
+            df[col] = None
+    if "tipo_documento" not in df.columns:
+        df["tipo_documento"] = "factura"
+    df["tipo_documento"] = df["tipo_documento"].fillna("factura").astype(str).str.strip().str.lower()
+    df["_origen_almacen"] = "facturas"
+    if "presupuesto_id" not in df.columns:
+        df["presupuesto_id"] = None
+    df.loc[df["tipo_documento"].eq("presupuesto"), "presupuesto_id"] = df.loc[
+        df["tipo_documento"].eq("presupuesto"), "id"
+    ]
+    if "coste_total" not in df.columns:
+        df["coste_total"] = 0.0
+    df["coste_total"] = pd.to_numeric(df["coste_total"], errors="coerce").fillna(0.0)
+    for col in columnas_salida:
+        if col not in df.columns:
+            df[col] = None
+    return df.reindex(columns=columnas_salida).copy()
+
+
+def datos_factura_para_supabase(factura, totales, user_id_actual):
+    """Construye payload compatible con el esquema real de public.facturas."""
+    campos_escritura = [
+        col for col in FACTURAS_COLUMNAS
+        if col not in {"id", "created_at", "updated_at"}
+    ]
+    datos = {col: factura.get(col) for col in campos_escritura if col in factura}
+    datos["user_id"] = user_id_actual
+    datos["tipo_documento"] = str(datos.get("tipo_documento") or "factura").strip().lower() or "factura"
+    datos["base_imponible"] = totales["base_imponible"]
+    datos["iva_importe"] = totales["iva_importe"]
+    datos["retencion_importe"] = totales["retencion_importe"]
+    datos["total"] = totales["total"]
+    return datos
+
 
 
 def numero_seguro(valor, defecto=0.0):
@@ -2706,86 +2841,28 @@ def guardar_relaciones_factura_supabase(factura_id, lineas):
 
 def cargar_facturas_supabase():
     if not supabase_disponible or supabase is None:
-        return False, "El inventario no está conectado correctamente.", pd.DataFrame(columns=FACTURAS_COLUMNAS)
+        return False, "El inventario no está conectado correctamente.", preparar_facturas_df_compatibilidad(pd.DataFrame())
 
     user_id_actual = obtener_user_id_actual()
     if not user_id_actual:
-        return False, "Inicia sesión para guardar clientes en tu cuenta", pd.DataFrame(columns=FACTURAS_COLUMNAS)
+        return False, "Inicia sesión para cargar documentos.", preparar_facturas_df_compatibilidad(pd.DataFrame())
 
     try:
-        try:
-            respuesta = (
-                supabase
-                .table("facturas")
-                .select(",".join(FACTURAS_COLUMNAS_JERARQUIA))
-                .eq("user_id", user_id_actual)
-                .order("created_at", desc=True)
-                .limit(25)
-                .execute()
-            )
-        except Exception:
-            respuesta = (
-                supabase
-                .table("facturas")
-                .select(",".join(FACTURAS_COLUMNAS))
-                .eq("user_id", user_id_actual)
-                .order("created_at", desc=True)
-                .limit(25)
-                .execute()
-            )
-        df = pd.DataFrame(respuesta.data or [])
-        if not df.empty:
-            df["_origen_almacen"] = "facturas"
-        for col in FACTURAS_COLUMNAS:
-            if col not in df.columns:
-                df[col] = None
-        columnas_salida = FACTURAS_COLUMNAS_JERARQUIA + ["_origen_almacen"]
-        if "_origen_almacen" not in df.columns:
-            df["_origen_almacen"] = None
-
-        try:
-            respuesta_presupuestos = (
-                supabase
-                .table("presupuestos")
-                .select(",".join(PRESUPUESTOS_COLUMNAS))
-                .eq("user_id", user_id_actual)
-                .order("created_at", desc=True)
-                .limit(25)
-                .execute()
-            )
-            presupuestos_df = pd.DataFrame(respuesta_presupuestos.data or [])
-            if not presupuestos_df.empty:
-                presupuestos_df = presupuestos_df.rename(columns={
-                    "numero_presupuesto": "numero_factura",
-                    "precio_total": "total",
-                })
-                presupuestos_df["tipo_documento"] = "presupuesto"
-                presupuestos_df["base_imponible"] = presupuestos_df["total"]
-                presupuestos_df["iva_pct"] = 0.0
-                presupuestos_df["iva_importe"] = 0.0
-                presupuestos_df["retencion_pct"] = 0.0
-                presupuestos_df["retencion_importe"] = 0.0
-                presupuestos_df["metodo_pago"] = None
-                presupuestos_df["estado_cobro"] = None
-                presupuestos_df["_origen_almacen"] = "presupuestos"
-                for col in columnas_salida:
-                    if col not in presupuestos_df.columns:
-                        presupuestos_df[col] = None
-                df = pd.concat(
-                    [df[columnas_salida], presupuestos_df[columnas_salida]],
-                    ignore_index=True,
-                )
-        except Exception:
-            pass
-
-        if df.empty:
-            return True, "", pd.DataFrame(columns=columnas_salida)
-        df = df.sort_values("created_at", ascending=False, na_position="last")
-        return True, "", df[columnas_salida].copy()
+        respuesta = (
+            supabase
+            .table("facturas")
+            .select(",".join(FACTURAS_COLUMNAS))
+            .eq("user_id", user_id_actual)
+            .order("created_at", desc=True)
+            .limit(50)
+            .execute()
+        )
+        df = preparar_facturas_df_compatibilidad(pd.DataFrame(respuesta.data or []))
+        return True, "", df
     except Exception as e:
         if error_tabla_facturacion_no_activada(e):
-            return False, MENSAJE_FACTURACION_NO_ACTIVADA, pd.DataFrame(columns=FACTURAS_COLUMNAS)
-        return False, f"Error al cargar documentos: {e}", pd.DataFrame(columns=FACTURAS_COLUMNAS)
+            return False, MENSAJE_FACTURACION_NO_ACTIVADA, preparar_facturas_df_compatibilidad(pd.DataFrame())
+        return False, f"Error al cargar documentos: {e}", preparar_facturas_df_compatibilidad(pd.DataFrame())
 
 
 def cargar_factura_detalle_supabase(factura_id):
@@ -2801,96 +2878,19 @@ def cargar_factura_detalle_supabase(factura_id):
         return False, "Inicia sesión para cargar documentos.", None, pd.DataFrame(columns=FACTURA_LINEAS_COLUMNAS)
 
     try:
-        try:
-            respuesta_factura = (
-                supabase
-                .table("facturas")
-                .select(",".join(FACTURAS_COLUMNAS_JERARQUIA))
-                .eq("id", factura_id_limpio)
-                .limit(1)
-                .execute()
-            )
-        except Exception:
-            respuesta_factura = (
-                supabase
-                .table("facturas")
-                .select(",".join(FACTURAS_COLUMNAS))
-                .eq("id", factura_id_limpio)
-                .limit(1)
-                .execute()
-            )
+        respuesta_factura = (
+            supabase
+            .table("facturas")
+            .select(",".join(FACTURAS_COLUMNAS))
+            .eq("id", factura_id_limpio)
+            .limit(1)
+            .execute()
+        )
         factura = (respuesta_factura.data or [None])[0]
         if not factura:
-            try:
-                respuesta_presupuesto = (
-                    supabase
-                    .table("presupuestos")
-                    .select(",".join(PRESUPUESTOS_COLUMNAS))
-                    .eq("id", factura_id_limpio)
-                    .limit(1)
-                    .execute()
-                )
-                presupuesto = (respuesta_presupuesto.data or [None])[0]
-            except Exception:
-                presupuesto = None
-            if not presupuesto:
-                return False, "No se encontró el documento seleccionado.", None, pd.DataFrame(columns=FACTURA_LINEAS_COLUMNAS)
+            return False, "No se encontró el documento seleccionado.", None, pd.DataFrame(columns=FACTURA_LINEAS_COLUMNAS)
 
-            presupuesto_user_id = str(presupuesto.get("user_id") or "").strip()
-            if presupuesto_user_id and presupuesto_user_id != user_id_actual:
-                return False, "No puedes editar documentos de otro usuario.", None, pd.DataFrame(columns=FACTURA_LINEAS_COLUMNAS)
-            respuesta_menus = (
-                supabase
-                .table("presupuesto_menus")
-                .select(",".join(PRESUPUESTO_MENUS_COLUMNAS))
-                .eq("presupuesto_id", factura_id_limpio)
-                .order("orden")
-                .execute()
-            )
-            lineas = []
-            for relacion in respuesta_menus.data or []:
-                lineas.append(calcular_linea_factura({
-                    "descripcion": f"Menú: {relacion.get('menu_nombre_snapshot') or relacion.get('menu_id')}",
-                    "cantidad": relacion.get("cantidad_menu", 1),
-                    "cantidad_menu": relacion.get("cantidad_menu", 1),
-                    "unidad": "menú",
-                    "precio_unitario": relacion.get("precio_total_menu", 0),
-                    "iva_pct": 0,
-                    "origen_tipo": "menu",
-                    "origen_id": relacion.get("menu_id"),
-                    "menu_origen_id": relacion.get("menu_id"),
-                    "menu_nombre_snapshot": relacion.get("menu_nombre_snapshot"),
-                    "coste_total_menu": relacion.get("coste_total_menu", 0),
-                    "coste_linea_menu_documento": relacion.get(
-                        "coste_linea_menu_presupuesto",
-                        0,
-                    ),
-                    "precio_total_menu": relacion.get("precio_total_menu", 0),
-                    "precio_linea_menu_documento": relacion.get(
-                        "precio_linea_menu_presupuesto",
-                        0,
-                    ),
-                    "observaciones": relacion.get("observaciones"),
-                }))
-            presupuesto = dict(presupuesto)
-            presupuesto.update({
-                "numero_factura": presupuesto.get("numero_presupuesto"),
-                "tipo_documento": "presupuesto",
-                "base_imponible": presupuesto.get("precio_total", 0),
-                "iva_pct": 0,
-                "iva_importe": 0,
-                "retencion_pct": 0,
-                "retencion_importe": 0,
-                "total": presupuesto.get("precio_total", 0),
-                "_origen_almacen": "presupuestos",
-            })
-            return (
-                True,
-                "Presupuesto cargado correctamente.",
-                presupuesto,
-                pd.DataFrame(lineas),
-            )
-
+        factura = preparar_factura_compatibilidad(factura)
         factura_user_id = str(factura.get("user_id") or "").strip()
         if factura_user_id and factura_user_id != user_id_actual:
             return False, "No puedes editar documentos de otro usuario.", None, pd.DataFrame(columns=FACTURA_LINEAS_COLUMNAS)
@@ -2904,6 +2904,10 @@ def cargar_factura_detalle_supabase(factura_id):
             .execute()
         )
         lineas_df = pd.DataFrame(respuesta_lineas.data or [])
+        for col in FACTURA_LINEAS_COLUMNAS:
+            if col not in lineas_df.columns:
+                lineas_df[col] = None
+
         try:
             respuesta_menus_factura = (
                 supabase
@@ -2916,6 +2920,7 @@ def cargar_factura_detalle_supabase(factura_id):
             relaciones_factura = respuesta_menus_factura.data or []
         except Exception:
             relaciones_factura = []
+
         if relaciones_factura and not lineas_df.empty:
             relaciones_por_menu = {
                 str(relacion.get("menu_id")): relacion
@@ -2939,38 +2944,7 @@ def cargar_factura_detalle_supabase(factura_id):
                     0,
                 )
                 lineas_df.at[indice, "observaciones"] = relacion.get("observaciones")
-        elif relaciones_factura:
-            lineas_df = pd.DataFrame([
-                calcular_linea_factura({
-                    "descripcion": f"Menú: {relacion.get('menu_nombre_snapshot') or relacion.get('menu_id')}",
-                    "cantidad": relacion.get("cantidad_menu", 1),
-                    "cantidad_menu": relacion.get("cantidad_menu", 1),
-                    "unidad": "menú",
-                    "precio_unitario": relacion.get("precio_total_menu", 0),
-                    "iva_pct": 21,
-                    "origen_tipo": "menu",
-                    "origen_id": relacion.get("menu_id"),
-                    "menu_origen_id": relacion.get("menu_id"),
-                    "menu_nombre_snapshot": relacion.get("menu_nombre_snapshot"),
-                    "coste_total_menu": relacion.get("coste_total_menu", 0),
-                    "coste_linea_menu_documento": relacion.get(
-                        "coste_linea_menu_factura",
-                        0,
-                    ),
-                    "precio_total_menu": relacion.get("precio_total_menu", 0),
-                    "precio_linea_menu_documento": relacion.get(
-                        "precio_linea_menu_factura",
-                        0,
-                    ),
-                    "observaciones": relacion.get("observaciones"),
-                })
-                for relacion in relaciones_factura
-            ])
-        if lineas_df.empty:
-            lineas_df = pd.DataFrame(columns=FACTURA_LINEAS_COLUMNAS)
-        for col in FACTURA_LINEAS_COLUMNAS:
-            if col not in lineas_df.columns:
-                lineas_df[col] = None
+
         mensaje = "Documento cargado correctamente."
         if not factura_user_id:
             mensaje = (
@@ -2990,17 +2964,10 @@ def guardar_factura_supabase(factura, lineas):
 
     user_id_actual = obtener_user_id_actual()
     if not user_id_actual:
-        return False, "Inicia sesión para guardar clientes en tu cuenta", None
+        return False, "Inicia sesión para guardar documentos en tu cuenta.", None
     documento_valido, mensaje_validacion = validar_documento_con_menus(factura, lineas)
     if not documento_valido:
         return False, mensaje_validacion, None
-
-    if str(factura.get("tipo_documento") or "") == "presupuesto":
-        try:
-            return guardar_presupuesto_supabase(factura, lineas)
-        except Exception as error_presupuestos:
-            if not error_tabla_facturacion_no_activada(error_presupuestos):
-                return False, f"Error al guardar presupuesto: {error_presupuestos}", None
 
     lineas_validas = [
         calcular_linea_factura(linea)
@@ -3015,47 +2982,15 @@ def guardar_factura_supabase(factura, lineas):
         factura.get("iva_pct", 21),
         factura.get("retencion_pct", 0)
     )
-    columnas_factura_escritura = [
-        columna
-        for columna in FACTURAS_COLUMNAS_JERARQUIA
-        if columna not in {"id", "created_at", "updated_at"}
-    ]
-    datos_factura = {
-        columna: factura.get(columna)
-        for columna in columnas_factura_escritura
-        if columna in factura
-    }
-    datos_factura["user_id"] = user_id_actual
-    datos_factura["base_imponible"] = totales["base_imponible"]
-    datos_factura["iva_importe"] = totales["iva_importe"]
-    datos_factura["retencion_importe"] = totales["retencion_importe"]
-    datos_factura["total"] = totales["total"]
-    datos_factura["coste_total"] = calcular_coste_factura(
-        extraer_lineas_menu_documento(lineas_validas)
-    )
+    datos_factura = datos_factura_para_supabase(factura, totales, user_id_actual)
 
     try:
-        try:
-            respuesta_factura = (
-                supabase
-                .table("facturas")
-                .insert(datos_factura)
-                .execute()
-            )
-        except Exception as error_columnas_jerarquia:
-            if not any(
-                campo in str(error_columnas_jerarquia).lower()
-                for campo in ("presupuesto_id", "coste_total", "schema cache", "pgrst204")
-            ):
-                raise
-            datos_factura.pop("presupuesto_id", None)
-            datos_factura.pop("coste_total", None)
-            respuesta_factura = (
-                supabase
-                .table("facturas")
-                .insert(datos_factura)
-                .execute()
-            )
+        respuesta_factura = (
+            supabase
+            .table("facturas")
+            .insert(datos_factura)
+            .execute()
+        )
         factura_guardada = (respuesta_factura.data or [{}])[0]
         factura_id = factura_guardada.get("id")
         if not factura_id:
@@ -3079,17 +3014,18 @@ def guardar_factura_supabase(factura, lineas):
                 "orden": orden
             })
 
-        (
-            supabase
-            .table("factura_lineas")
-            .insert(lineas_guardar)
-            .execute()
-        )
+        if lineas_guardar:
+            (
+                supabase
+                .table("factura_lineas")
+                .insert(lineas_guardar)
+                .execute()
+            )
         try:
             guardar_relaciones_factura_supabase(factura_id, lineas_validas)
         except Exception:
             pass
-        return True, "Documento guardado correctamente.", factura_guardada
+        return True, "Documento guardado correctamente.", preparar_factura_compatibilidad(factura_guardada)
     except Exception as e:
         if error_tabla_facturacion_no_activada(e):
             return False, MENSAJE_FACTURACION_NO_ACTIVADA, None
@@ -3160,11 +3096,6 @@ def actualizar_factura_supabase(factura_id, factura, lineas):
         return False, "Este documento antiguo debe duplicarse antes de guardarse en tu cuenta.", None
     if factura_user_id != user_id_actual:
         return False, "No puedes editar documentos de otro usuario.", None
-    if (factura_existente or {}).get("_origen_almacen") == "presupuestos":
-        try:
-            return actualizar_presupuesto_supabase(factura_id, factura, lineas)
-        except Exception as exc:
-            return False, f"Error al actualizar presupuesto: {exc}", None
 
     documento_valido, mensaje_validacion = validar_documento_con_menus(factura, lineas)
     if not documento_valido:
@@ -3183,51 +3114,17 @@ def actualizar_factura_supabase(factura_id, factura, lineas):
         factura.get("iva_pct", 21),
         factura.get("retencion_pct", 0)
     )
-    columnas_factura_escritura = [
-        columna
-        for columna in FACTURAS_COLUMNAS_JERARQUIA
-        if columna not in {"id", "created_at", "updated_at"}
-    ]
-    datos_factura = {
-        columna: factura.get(columna)
-        for columna in columnas_factura_escritura
-        if columna in factura
-    }
-    datos_factura["user_id"] = user_id_actual
-    datos_factura["base_imponible"] = totales["base_imponible"]
-    datos_factura["iva_importe"] = totales["iva_importe"]
-    datos_factura["retencion_importe"] = totales["retencion_importe"]
-    datos_factura["total"] = totales["total"]
-    datos_factura["coste_total"] = calcular_coste_factura(
-        extraer_lineas_menu_documento(lineas_validas)
-    )
+    datos_factura = datos_factura_para_supabase(factura, totales, user_id_actual)
 
     try:
-        try:
-            respuesta_factura = (
-                supabase
-                .table("facturas")
-                .update(datos_factura)
-                .eq("id", factura_id)
-                .eq("user_id", user_id_actual)
-                .execute()
-            )
-        except Exception as error_columnas_jerarquia:
-            if not any(
-                campo in str(error_columnas_jerarquia).lower()
-                for campo in ("presupuesto_id", "coste_total", "schema cache", "pgrst204")
-            ):
-                raise
-            datos_factura.pop("presupuesto_id", None)
-            datos_factura.pop("coste_total", None)
-            respuesta_factura = (
-                supabase
-                .table("facturas")
-                .update(datos_factura)
-                .eq("id", factura_id)
-                .eq("user_id", user_id_actual)
-                .execute()
-            )
+        respuesta_factura = (
+            supabase
+            .table("facturas")
+            .update(datos_factura)
+            .eq("id", factura_id)
+            .eq("user_id", user_id_actual)
+            .execute()
+        )
         factura_actualizada = (respuesta_factura.data or [{}])[0]
 
         (
@@ -3256,12 +3153,13 @@ def actualizar_factura_supabase(factura_id, factura, lineas):
                 "orden": orden
             })
 
-        (
-            supabase
-            .table("factura_lineas")
-            .insert(lineas_guardar)
-            .execute()
-        )
+        if lineas_guardar:
+            (
+                supabase
+                .table("factura_lineas")
+                .insert(lineas_guardar)
+                .execute()
+            )
         try:
             supabase.table("factura_menus").delete().eq(
                 "factura_id",
@@ -3270,7 +3168,7 @@ def actualizar_factura_supabase(factura_id, factura, lineas):
             guardar_relaciones_factura_supabase(factura_id, lineas_validas)
         except Exception:
             pass
-        return True, "Documento actualizado correctamente.", factura_actualizada
+        return True, "Documento actualizado correctamente.", preparar_factura_compatibilidad(factura_actualizada)
     except Exception as e:
         if error_tabla_facturacion_no_activada(e):
             return False, MENSAJE_FACTURACION_NO_ACTIVADA, None
