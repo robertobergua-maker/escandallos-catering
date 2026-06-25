@@ -7,12 +7,11 @@ import io
 import base64
 import html
 import json
-import copy
 import re
 import unicodedata
 from pathlib import Path
 from difflib import SequenceMatcher
-from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 from openai import OpenAI
 from supabase import create_client, Client
 from calculos_jerarquia import (
@@ -74,46 +73,6 @@ def _obtener_campo_auth(objeto, campo, valor_por_defecto=None):
     return getattr(objeto, campo, valor_por_defecto)
 
 
-def _secreto_texto(nombre):
-    try:
-        return str(st.secrets.get(nombre, "") or "").strip()
-    except Exception:
-        return ""
-
-
-def _normalizar_url_base(url):
-    url = str(url or "").strip()
-    if not url:
-        return None
-    partes = urlsplit(url)
-    if partes.scheme not in {"http", "https"} or not partes.netloc:
-        return None
-    host = (partes.hostname or "").lower()
-    es_local = host in {"localhost", "127.0.0.1", "::1"}
-    if partes.scheme != "https" and not es_local:
-        return None
-    ruta = partes.path.rstrip("/")
-    return urlunsplit((partes.scheme, partes.netloc, ruta, "", ""))
-
-
-def obtener_base_url_publica_app():
-    """
-    Resuelve la URL estable de la aplicación sin query ni fragmento.
-
-    APP_BASE_URL tiene prioridad. st.context.url solo se usa como fallback,
-    principalmente para desarrollo local.
-    """
-    for nombre_secreto in ("APP_BASE_URL", "PASSWORD_RECOVERY_REDIRECT_URL"):
-        url = _normalizar_url_base(_secreto_texto(nombre_secreto))
-        if url:
-            return url
-
-    try:
-        return _normalizar_url_base(st.context.url)
-    except Exception:
-        return None
-
-
 def obtener_url_recuperacion_password():
     """
     Devuelve la URL pública a la que Supabase debe volver tras verificar el
@@ -123,18 +82,25 @@ def obtener_url_recuperacion_password():
     secrets. Si no existe, se usa la URL actual de Streamlit sin query ni
     fragmento para evitar depender de localhost:3000.
     """
-    base_url = obtener_base_url_publica_app()
-    if not base_url:
+    url_configurada = str(
+        st.secrets.get("PASSWORD_RECOVERY_REDIRECT_URL", "") or ""
+    ).strip()
+    url_candidata = url_configurada
+
+    if not url_candidata:
+        try:
+            url_candidata = str(st.context.url or "").strip()
+        except Exception:
+            url_candidata = ""
+
+    if not url_candidata:
         return None
-    return f"{base_url}?{urlencode({'auth_action': 'reset_password'})}"
 
+    partes = urlsplit(url_candidata)
+    if partes.scheme not in {"http", "https"} or not partes.netloc:
+        return None
 
-def url_es_local(url):
-    try:
-        host = (urlsplit(str(url or "")).hostname or "").lower()
-        return host in {"localhost", "127.0.0.1", "::1"}
-    except Exception:
-        return False
+    return urlunsplit((partes.scheme, partes.netloc, partes.path or "/", "", ""))
 
 
 def login_supabase(email, password):
@@ -246,245 +212,6 @@ def enviar_recuperacion_password(email):
         return True, "Correo de recuperación enviado. Revisa también la carpeta de spam."
     except Exception as e:
         return False, f"No se pudo enviar el correo de recuperación: {e}"
-
-
-def _valor_query_param(nombre):
-    try:
-        valor = st.query_params.get(nombre)
-    except Exception:
-        return ""
-    if isinstance(valor, list):
-        valor = valor[0] if valor else ""
-    return str(valor or "").strip()
-
-
-def es_flujo_recuperacion_password():
-    accion = _valor_query_param("auth_action")
-    tipo = _valor_query_param("type").lower()
-    return bool(
-        accion == "reset_password"
-        or (tipo == "recovery" and _valor_query_param("token_hash"))
-    )
-
-
-def _activar_sesion_recuperacion_en_cliente():
-    """
-    Restaura en el cliente Auth recién creado la sesión conservada únicamente
-    en st.session_state. Es necesario después de cada rerun de Streamlit.
-    """
-    access_token = st.session_state.get("access_token")
-    refresh_token = st.session_state.get("refresh_token")
-    if not access_token or not refresh_token:
-        return False
-    try:
-        respuesta = supabase.auth.set_session(access_token, refresh_token)
-        sesion = _obtener_campo_auth(respuesta, "session")
-        usuario = _obtener_campo_auth(respuesta, "user")
-        if sesion and usuario:
-            _guardar_sesion_supabase(usuario, sesion)
-        return bool(supabase.auth.get_session())
-    except Exception:
-        return False
-
-
-def _limpiar_estado_recuperacion_password():
-    for clave in (
-        "reset_password_verified",
-        "reset_password_token_hash",
-        "reset_password_error",
-        "password_recovery_ready",
-    ):
-        st.session_state.pop(clave, None)
-
-
-def preparar_sesion_recuperacion_password():
-    """
-    Verifica una sola vez token_hash o code y establece la sesión temporal
-    necesaria para update_user. Nunca muestra ni persiste esos valores.
-    """
-    if not supabase_disponible or supabase is None:
-        return False, "Supabase no está conectado."
-
-    token_hash = _valor_query_param("token_hash")
-    tipo = _valor_query_param("type").lower()
-    codigo = _valor_query_param("code")
-    token_verificado = st.session_state.get("reset_password_token_hash")
-
-    if token_hash and token_verificado and token_hash != token_verificado:
-        _limpiar_estado_recuperacion_password()
-
-    if st.session_state.get("reset_password_verified"):
-        if _activar_sesion_recuperacion_en_cliente():
-            return True, ""
-        st.session_state["reset_password_error"] = (
-            "La sesión de recuperación ha caducado. Solicita un nuevo enlace."
-        )
-        st.session_state["reset_password_verified"] = False
-        return False, st.session_state["reset_password_error"]
-
-    error_previo = st.session_state.get("reset_password_error")
-    if error_previo and token_hash == token_verificado:
-        return False, error_previo
-
-    try:
-        respuesta = None
-        if token_hash and tipo == "recovery":
-            respuesta = supabase.auth.verify_otp({
-                "token_hash": token_hash,
-                "type": "recovery",
-            })
-        elif codigo:
-            respuesta = supabase.auth.exchange_code_for_session({
-                "auth_code": codigo,
-            })
-        else:
-            # El flujo implícito entrega tokens en el fragmento (#...), que el
-            # servidor de Streamlit no puede leer. En ese caso solo funcionará
-            # si el cliente Auth ya restauró la sesión.
-            try:
-                respuesta = supabase.auth.get_session()
-            except Exception:
-                respuesta = None
-
-        sesion = _obtener_campo_auth(respuesta, "session")
-        usuario = _obtener_campo_auth(respuesta, "user")
-        access_token = _obtener_campo_auth(sesion, "access_token")
-        refresh_token = _obtener_campo_auth(sesion, "refresh_token")
-        if not sesion:
-            access_token = _obtener_campo_auth(respuesta, "access_token")
-            refresh_token = _obtener_campo_auth(respuesta, "refresh_token")
-        if access_token and refresh_token:
-            respuesta_sesion = supabase.auth.set_session(
-                access_token,
-                refresh_token,
-            )
-            sesion = _obtener_campo_auth(respuesta_sesion, "session") or sesion
-            usuario = _obtener_campo_auth(respuesta_sesion, "user") or usuario
-        if sesion and usuario:
-            _guardar_sesion_supabase(usuario, sesion)
-
-        if (sesion or obtener_usuario_actual()) and supabase.auth.get_session():
-            st.session_state["reset_password_verified"] = True
-            st.session_state["reset_password_token_hash"] = token_hash
-            st.session_state["reset_password_error"] = None
-            st.session_state["password_recovery_ready"] = True
-            return True, ""
-        mensaje = (
-            "El enlace no contiene una sesión de recuperación utilizable. "
-            "Solicita un enlace nuevo o configura la plantilla con token_hash."
-        )
-        st.session_state["reset_password_token_hash"] = token_hash
-        st.session_state["reset_password_error"] = mensaje
-        return False, mensaje
-    except Exception:
-        mensaje = "No se pudo verificar el enlace. Solicita un nuevo enlace."
-        st.session_state["reset_password_token_hash"] = token_hash
-        st.session_state["reset_password_error"] = mensaje
-        st.session_state["reset_password_verified"] = False
-        return False, mensaje
-
-
-def limpiar_parametros_recuperacion():
-    for clave in ("auth_action", "token_hash", "type", "code"):
-        try:
-            if clave in st.query_params:
-                del st.query_params[clave]
-        except Exception:
-            pass
-
-
-def render_reset_password_screen():
-    st.title("Cambiar contraseña")
-    st.caption("Introduce una contraseña nueva para tu cuenta.")
-
-    if st.session_state.get("password_recovery_completed"):
-        st.success("Contraseña actualizada correctamente.")
-        if st.button("Cerrar sesión y volver al acceso", type="primary"):
-            try:
-                supabase.auth.sign_out()
-            except Exception:
-                pass
-            _limpiar_sesion_autenticacion()
-            _limpiar_estado_recuperacion_password()
-            st.session_state["password_recovery_completed"] = False
-            limpiar_parametros_recuperacion()
-            st.rerun()
-        return
-
-    listo, mensaje = preparar_sesion_recuperacion_password()
-    if not listo:
-        st.error(mensaje)
-        st.info(
-            "Si Streamlit no procesa el enlace estándar, usa en Supabase la "
-            "plantilla con token_hash indicada en Administración > Sistema."
-        )
-        if st.button("Volver al inicio"):
-            limpiar_parametros_recuperacion()
-            st.rerun()
-        return
-
-    with st.form("form_cambiar_password"):
-        nueva_password = st.text_input("Nueva contraseña", type="password")
-        repetir_password = st.text_input("Repetir contraseña", type="password")
-        guardar_password = st.form_submit_button(
-            "Guardar nueva contraseña",
-            type="primary",
-            use_container_width=True,
-            disabled=not (
-                listo
-                and st.session_state.get("reset_password_verified", False)
-            ),
-        )
-
-    password_actualizada = False
-    if guardar_password:
-        if len(nueva_password) < 6:
-            st.error("La contraseña debe tener al menos 6 caracteres.")
-        elif nueva_password != repetir_password:
-            st.error("Las contraseñas no coinciden.")
-        elif not st.session_state.get("reset_password_verified"):
-            st.error(
-                "No se pudo actualizar la contraseña. Solicita un nuevo enlace."
-            )
-        elif not _activar_sesion_recuperacion_en_cliente():
-            st.error(
-                "No se pudo actualizar la contraseña. Solicita un nuevo enlace."
-            )
-        else:
-            try:
-                if not supabase.auth.get_session():
-                    raise RuntimeError("missing recovery session")
-                supabase.auth.update_user({"password": nueva_password})
-                _limpiar_estado_recuperacion_password()
-                st.session_state["password_recovery_completed"] = True
-                limpiar_parametros_recuperacion()
-                password_actualizada = True
-                st.success("Contraseña actualizada correctamente.")
-            except Exception:
-                st.session_state["reset_password_error"] = (
-                    "No se pudo actualizar la contraseña. Solicita un nuevo enlace."
-                )
-                st.error(st.session_state["reset_password_error"])
-
-    if password_actualizada:
-        if st.button(
-            "Cerrar sesión y volver al acceso",
-            type="primary",
-            key="volver_login_password_actualizada",
-        ):
-            try:
-                supabase.auth.sign_out()
-            except Exception:
-                pass
-            _limpiar_sesion_autenticacion()
-            st.session_state["password_recovery_completed"] = False
-            st.rerun()
-        return
-
-    if st.button("Volver al inicio", key="volver_inicio_password"):
-        _limpiar_estado_recuperacion_password()
-        limpiar_parametros_recuperacion()
-        st.rerun()
 
 
 def logout_supabase():
@@ -834,10 +561,6 @@ if 'usuario_app_user_id' not in st.session_state:
 # Restaurar sesión guardada antes de renderizar la UI.
 restaurar_sesion_supabase()
 
-if es_flujo_recuperacion_password():
-    render_reset_password_screen()
-    st.stop()
-
 if 'nombre_plato' not in st.session_state:
     st.session_state['nombre_plato'] = st.session_state['receta_nombre']
 
@@ -851,7 +574,7 @@ if 'receta_tipo_plato' not in st.session_state:
     st.session_state['receta_tipo_plato'] = ""
 
 if 'input_receta_tipo_plato' not in st.session_state:
-    st.session_state['input_receta_tipo_plato'] = st.session_state['receta_tipo_plato'] 
+    st.session_state['input_receta_tipo_plato'] = st.session_state['receta_tipo_plato']
 
 if 'receta_observaciones' not in st.session_state:
     st.session_state['receta_observaciones'] = ""
@@ -1545,6 +1268,55 @@ FACTURAS_COLUMNAS_JERARQUIA = FACTURAS_COLUMNAS + [
     "presupuesto_id", "coste_total"
 ]
 
+
+def asegurar_columnas_dataframe(df, defaults):
+    """Añade columnas ausentes en memoria para evitar errores de selección."""
+    if df is None:
+        df = pd.DataFrame()
+    for col, default in defaults.items():
+        if col not in df.columns:
+            df[col] = default
+    return df
+
+
+def normalizar_documentos_facturacion_df(df, origen="facturas"):
+    """Compatibiliza la tabla real `facturas` con el código de documentos.
+
+    El esquema actual guarda presupuestos y facturas en `public.facturas`,
+    diferenciados por `tipo_documento`. No existen `presupuesto_id` ni
+    `coste_total` en esa tabla; se crean solo en memoria para que la UI
+    antigua no falle.
+    """
+    columnas_defaults = {col: None for col in FACTURAS_COLUMNAS}
+    columnas_defaults.update({
+        "presupuesto_id": None,
+        "coste_total": 0.0,
+        "_origen_almacen": origen,
+    })
+    df = asegurar_columnas_dataframe(df, columnas_defaults)
+    if not df.empty:
+        df["_origen_almacen"] = df["_origen_almacen"].fillna(origen)
+        df["presupuesto_id"] = df["presupuesto_id"].where(
+            df["presupuesto_id"].notna(),
+            df["id"],
+        )
+        df["coste_total"] = pd.to_numeric(df["coste_total"], errors="coerce").fillna(0.0)
+        df["total"] = pd.to_numeric(df["total"], errors="coerce").fillna(0.0)
+    return df
+
+
+def normalizar_documento_facturacion_dict(documento, origen="facturas"):
+    if not documento:
+        return documento
+    documento = dict(documento)
+    for col in FACTURAS_COLUMNAS:
+        documento.setdefault(col, None)
+    documento.setdefault("_origen_almacen", origen)
+    documento["presupuesto_id"] = documento.get("presupuesto_id") or documento.get("id")
+    documento["coste_total"] = numero_seguro(documento.get("coste_total", 0.0), 0.0)
+    documento["total"] = numero_seguro(documento.get("total", 0.0), 0.0)
+    return documento
+
 PRESUPUESTOS_COLUMNAS = [
     "id", "user_id", "cliente_id", "numero_presupuesto", "estado",
     "fecha_emision", "fecha_vencimiento", "concepto", "coste_total",
@@ -1857,16 +1629,16 @@ def guardar_receta_nueva_supabase(datos_receta, ingredientes):
     Guarda una receta nueva y sus lineas de escandallo en el inventario.
     """
     if not supabase_disponible or supabase is None:
-        return False, "El inventario no está conectado correctamente.", None, None, None
+        return False, "El inventario no está conectado correctamente.", None
     datos_receta, ingredientes = preparar_receta_para_una_racion(
         datos_receta,
         ingredientes,
     )
     if datos_receta is None:
-        return False, "La base de raciones debe ser mayor que 0.", None, None, None
+        return False, "La base de raciones debe ser mayor que 0.", None
     receta_valida, mensaje_validacion = validar_receta_para_guardar(ingredientes, 1.0)
     if not receta_valida:
-        return False, mensaje_validacion, None, None, None
+        return False, mensaje_validacion, None
 
     try:
         user_id_actual = obtener_user_id_actual()
@@ -1881,13 +1653,7 @@ def guardar_receta_nueva_supabase(datos_receta, ingredientes):
         receta_guardada = (respuesta_receta.data or [{}])[0]
         receta_id = receta_guardada.get("id")
         if not receta_id:
-            return (
-                False,
-                "No se pudo obtener el identificador de la receta guardada.",
-                None,
-                None,
-                None,
-            )
+            return False, "No se pudo obtener el identificador de la receta guardada.", None
 
         lineas = []
         for orden, ing in enumerate(ingredientes, start=1):
@@ -1906,28 +1672,10 @@ def guardar_receta_nueva_supabase(datos_receta, ingredientes):
         limpiar_cache_recetas_guardadas()
 
         if user_id_actual:
-            return (
-                True,
-                "Receta guardada en tu cuenta",
-                receta_guardada,
-                datos_guardar,
-                ingredientes,
-            )
-        return (
-            True,
-            "Receta guardada correctamente. Inicia sesión para guardar recetas en tu cuenta",
-            receta_guardada,
-            datos_guardar,
-            ingredientes,
-        )
+            return True, "Receta guardada en tu cuenta", receta_guardada
+        return True, "Receta guardada correctamente. Inicia sesión para guardar recetas en tu cuenta", receta_guardada
     except Exception as e:
-        return (
-            False,
-            f"Error al guardar la receta en el inventario: {e}",
-            None,
-            None,
-            None,
-        )
+        return False, f"Error al guardar la receta en el inventario: {e}", None
 
 
 def actualizar_receta_supabase(receta_id, datos_receta, ingredientes):
@@ -1935,30 +1683,25 @@ def actualizar_receta_supabase(receta_id, datos_receta, ingredientes):
     Actualiza una receta existente y reemplaza solo sus lineas de escandallo.
     """
     if not receta_id:
-        return False, "No hay una receta cargada para actualizar.", None, None
+        return False, "No hay una receta cargada para actualizar."
     if not supabase_disponible or supabase is None:
-        return False, "El inventario no está conectado correctamente.", None, None
+        return False, "El inventario no está conectado correctamente."
     datos_receta, ingredientes = preparar_receta_para_una_racion(
         datos_receta,
         ingredientes,
     )
     if datos_receta is None:
-        return False, "La base de raciones debe ser mayor que 0.", None, None
+        return False, "La base de raciones debe ser mayor que 0."
     receta_valida, mensaje_validacion = validar_receta_para_guardar(ingredientes, 1.0)
     if not receta_valida:
-        return False, mensaje_validacion, None, None
+        return False, mensaje_validacion
 
     try:
         cabecera_actual, _ = cargar_receta_detalle_supabase(receta_id)
         if not cabecera_actual:
-            return (
-                False,
-                "No se pudo comprobar la receta antes de actualizarla.",
-                None,
-                None,
-            )
+            return False, "No se pudo comprobar la receta antes de actualizarla."
         if not receta_es_modificable(cabecera_actual):
-            return False, mensaje_receta_no_modificable(), None, None
+            return False, mensaje_receta_no_modificable()
 
         datos_actualizar = dict(datos_receta)
         datos_actualizar["user_id"] = valor_user_id_receta(cabecera_actual)
@@ -1994,20 +1737,9 @@ def actualizar_receta_supabase(receta_id, datos_receta, ingredientes):
 
         limpiar_cache_recetas_guardadas()
 
-        datos_actualizar["id"] = str(receta_id)
-        return (
-            True,
-            "Receta actualizada correctamente.",
-            datos_actualizar,
-            ingredientes,
-        )
+        return True, "Receta actualizada correctamente."
     except Exception as e:
-        return (
-            False,
-            f"Error al actualizar la receta en el inventario: {e}",
-            None,
-            None,
-        )
+        return False, f"Error al actualizar la receta en el inventario: {e}"
 
 
 def duplicar_receta_supabase(datos_receta, ingredientes):
@@ -2015,9 +1747,9 @@ def duplicar_receta_supabase(datos_receta, ingredientes):
     Duplica una receta cargada como una receta nueva con codigo y nombre nuevos.
     """
     if not supabase_disponible or supabase is None:
-        return False, "El inventario no está conectado correctamente.", None, None, None
+        return False, "El inventario no está conectado correctamente.", None
     if not ingredientes:
-        return False, "No hay ingredientes para duplicar.", None, None, None
+        return False, "No hay ingredientes para duplicar.", None
 
     datos_copia = dict(datos_receta)
     datos_copia["user_id"] = obtener_user_id_actual()
@@ -2139,14 +1871,8 @@ def crear_copia_receta_normalizada_supabase(datos_receta, ingredientes, raciones
         "activa": True
     })
 
-    (
-        ok,
-        mensaje,
-        receta_guardada,
-        _,
-        ingredientes_guardados,
-    ) = guardar_receta_nueva_supabase(datos_copia, ingredientes_normalizados)
-    return ok, mensaje, receta_guardada, ingredientes_guardados
+    ok, mensaje, receta_guardada = guardar_receta_nueva_supabase(datos_copia, ingredientes_normalizados)
+    return ok, mensaje, receta_guardada, ingredientes_normalizados
 
 
 def eliminar_receta_supabase(receta_id):
@@ -3029,87 +2755,33 @@ def guardar_relaciones_factura_supabase(factura_id, lineas):
 
 def cargar_facturas_supabase():
     if not supabase_disponible or supabase is None:
-        return False, "El inventario no está conectado correctamente.", pd.DataFrame(columns=FACTURAS_COLUMNAS)
+        return False, "El inventario no está conectado correctamente.", pd.DataFrame(columns=FACTURAS_COLUMNAS_JERARQUIA)
 
     user_id_actual = obtener_user_id_actual()
     if not user_id_actual:
-        return False, "Inicia sesión para guardar clientes en tu cuenta", pd.DataFrame(columns=FACTURAS_COLUMNAS)
+        return False, "Inicia sesión para guardar clientes en tu cuenta", pd.DataFrame(columns=FACTURAS_COLUMNAS_JERARQUIA)
 
+    columnas_salida = FACTURAS_COLUMNAS_JERARQUIA + ["_origen_almacen"]
     try:
-        try:
-            respuesta = (
-                supabase
-                .table("facturas")
-                .select(",".join(FACTURAS_COLUMNAS_JERARQUIA))
-                .eq("user_id", user_id_actual)
-                .order("created_at", desc=True)
-                .limit(25)
-                .execute()
-            )
-        except Exception:
-            respuesta = (
-                supabase
-                .table("facturas")
-                .select(",".join(FACTURAS_COLUMNAS))
-                .eq("user_id", user_id_actual)
-                .order("created_at", desc=True)
-                .limit(25)
-                .execute()
-            )
+        respuesta = (
+            supabase
+            .table("facturas")
+            .select(",".join(FACTURAS_COLUMNAS))
+            .eq("user_id", user_id_actual)
+            .order("created_at", desc=True)
+            .limit(100)
+            .execute()
+        )
         df = pd.DataFrame(respuesta.data or [])
-        if not df.empty:
-            df["_origen_almacen"] = "facturas"
-        for col in FACTURAS_COLUMNAS:
-            if col not in df.columns:
-                df[col] = None
-        columnas_salida = FACTURAS_COLUMNAS_JERARQUIA + ["_origen_almacen"]
-        if "_origen_almacen" not in df.columns:
-            df["_origen_almacen"] = None
-
-        try:
-            respuesta_presupuestos = (
-                supabase
-                .table("presupuestos")
-                .select(",".join(PRESUPUESTOS_COLUMNAS))
-                .eq("user_id", user_id_actual)
-                .order("created_at", desc=True)
-                .limit(25)
-                .execute()
-            )
-            presupuestos_df = pd.DataFrame(respuesta_presupuestos.data or [])
-            if not presupuestos_df.empty:
-                presupuestos_df = presupuestos_df.rename(columns={
-                    "numero_presupuesto": "numero_factura",
-                    "precio_total": "total",
-                })
-                presupuestos_df["tipo_documento"] = "presupuesto"
-                presupuestos_df["base_imponible"] = presupuestos_df["total"]
-                presupuestos_df["iva_pct"] = 0.0
-                presupuestos_df["iva_importe"] = 0.0
-                presupuestos_df["retencion_pct"] = 0.0
-                presupuestos_df["retencion_importe"] = 0.0
-                presupuestos_df["metodo_pago"] = None
-                presupuestos_df["estado_cobro"] = None
-                presupuestos_df["_origen_almacen"] = "presupuestos"
-                for col in columnas_salida:
-                    if col not in presupuestos_df.columns:
-                        presupuestos_df[col] = None
-                df = pd.concat(
-                    [df[columnas_salida], presupuestos_df[columnas_salida]],
-                    ignore_index=True,
-                )
-        except Exception:
-            pass
-
+        df = normalizar_documentos_facturacion_df(df, origen="facturas")
         if df.empty:
             return True, "", pd.DataFrame(columns=columnas_salida)
         df = df.sort_values("created_at", ascending=False, na_position="last")
         return True, "", df[columnas_salida].copy()
     except Exception as e:
         if error_tabla_facturacion_no_activada(e):
-            return False, MENSAJE_FACTURACION_NO_ACTIVADA, pd.DataFrame(columns=FACTURAS_COLUMNAS)
-        return False, f"Error al cargar documentos: {e}", pd.DataFrame(columns=FACTURAS_COLUMNAS)
-
+            return False, MENSAJE_FACTURACION_NO_ACTIVADA, pd.DataFrame(columns=columnas_salida)
+        return False, f"Error al cargar documentos: {e}", pd.DataFrame(columns=columnas_salida)
 
 def cargar_factura_detalle_supabase(factura_id):
     if not supabase_disponible or supabase is None:
@@ -3124,25 +2796,15 @@ def cargar_factura_detalle_supabase(factura_id):
         return False, "Inicia sesión para cargar documentos.", None, pd.DataFrame(columns=FACTURA_LINEAS_COLUMNAS)
 
     try:
-        try:
-            respuesta_factura = (
-                supabase
-                .table("facturas")
-                .select(",".join(FACTURAS_COLUMNAS_JERARQUIA))
-                .eq("id", factura_id_limpio)
-                .limit(1)
-                .execute()
-            )
-        except Exception:
-            respuesta_factura = (
-                supabase
-                .table("facturas")
-                .select(",".join(FACTURAS_COLUMNAS))
-                .eq("id", factura_id_limpio)
-                .limit(1)
-                .execute()
-            )
-        factura = (respuesta_factura.data or [None])[0]
+        respuesta_factura = (
+            supabase
+            .table("facturas")
+            .select(",".join(FACTURAS_COLUMNAS))
+            .eq("id", factura_id_limpio)
+            .limit(1)
+            .execute()
+        )
+        factura = normalizar_documento_facturacion_dict((respuesta_factura.data or [None])[0])
         if not factura:
             try:
                 respuesta_presupuesto = (
@@ -4217,13 +3879,13 @@ def sincronizar_receta_guardada_en_sesion(receta_guardada=None, datos_receta=Non
         or ""
     )
 
-    st.session_state["ingredientes"] = copy.deepcopy(ingredientes_limpios)
-    st.session_state["ingredientes_snapshot_cargados"] = copy.deepcopy(
-        ingredientes_limpios
-    )
-    st.session_state["ingredientes_base_raciones"] = copy.deepcopy(
-        ingredientes_limpios
-    )
+    st.session_state["ingredientes"] = [dict(ing) for ing in ingredientes_limpios]
+    st.session_state["ingredientes_snapshot_cargados"] = [
+        dict(ing) for ing in ingredientes_limpios
+    ]
+    st.session_state["ingredientes_base_raciones"] = [
+        dict(ing) for ing in ingredientes_limpios
+    ]
 
     st.session_state["factor_raciones"] = 1.0
     st.session_state["raciones_base"] = 1.0
@@ -4241,6 +3903,7 @@ def sincronizar_receta_guardada_en_sesion(receta_guardada=None, datos_receta=Non
     st.session_state.pop("receta_carga_pendiente_id", None)
     limpiar_alta_ingrediente()
     limpiar_ficha_ingrediente()
+    st.session_state["ingrediente_tabla_revision"] += 1
     if receta_id:
         st.session_state["selector_receta_guardada_pendiente"] = receta_id
 
@@ -5506,272 +5169,7 @@ ADMIN_NUMERIC_COLUMNS = {
 }
 
 ADMIN_BOOLEAN_COLUMNS = {"activa", "es_temporal", "activo"}
-ADMIN_READONLY_COLUMNS = {
-    "id", "created_at", "updated_at", "user_id", "receta_id", "menu_id",
-    "cliente_id", "factura_id", "presupuesto_id", "origen_id",
-}
-
-ADMIN_GRUPOS_TABLAS = {
-    "Operativa principal": [
-        "inventario", "recetas", "receta_ingredientes", "menus", "menu_recetas",
-    ],
-    "Clientes y documentos": [
-        "clientes", "presupuestos", "presupuesto_menus", "facturas",
-        "factura_lineas", "factura_menus",
-    ],
-    "Sistema": ["usuarios_app"],
-}
-ADMIN_TABLAS_INSERTABLES = {
-    "inventario", "receta_ingredientes", "menu_recetas",
-    "presupuesto_menus", "factura_menus", "factura_lineas",
-}
-
-ADMIN_COLUMNAS_TECNICAS = {
-    "id", "user_id", "receta_id", "menu_id", "cliente_id",
-    "presupuesto_id", "factura_id", "origen_id", "created_at", "updated_at",
-}
-
-ADMIN_REFERENCIAS_UI = {
-    "user_id": ("propietario", "usuarios"),
-    "receta_id": ("receta", "recetas"),
-    "menu_id": ("menu", "menus"),
-    "cliente_id": ("cliente", "clientes"),
-    "presupuesto_id": ("presupuesto", "presupuestos"),
-    "factura_id": ("factura", "facturas"),
-}
-
-ADMIN_COLUMNAS_CALCULADAS = {
-    "cantidad_neta", "coste_total", "precio_venta_sin_iva",
-    "precio_venta_con_iva", "base_imponible", "iva_importe",
-    "retencion_importe", "total", "base_linea", "iva_linea",
-    "total_linea", "coste_linea_menu_presupuesto",
-    "precio_linea_menu_presupuesto", "coste_linea_menu_factura",
-    "precio_linea_menu_factura",
-}
-
-
-def admin_formatear_opcion_receta(row):
-    codigo = str(row.get("codigo_receta", "") or "").strip()
-    nombre = str(row.get("nombre", "") or "Receta sin nombre").strip()
-    return " · ".join(parte for parte in (codigo, nombre) if parte)
-
-
-def admin_formatear_opcion_menu(row):
-    nombre = str(row.get("nombre", "") or "Menú sin nombre").strip()
-    tipo = str(row.get("tipo_menu", "") or "").strip()
-    pax = numero_seguro(
-        row.get("numero_comensales", row.get("pax_referencia_menu", 0)),
-        0,
-    )
-    partes = [nombre]
-    if tipo:
-        partes.append(tipo)
-    if pax > 0:
-        partes.append(f"{pax:g} comensales")
-    return " · ".join(partes)
-
-
-def admin_formatear_opcion_usuario(row):
-    email = str(row.get("email", "") or "").strip()
-    nombre = str(row.get("nombre", "") or "").strip()
-    rol = normalizar_rol_usuario(row.get("rol"))
-    return " · ".join(parte for parte in (email, nombre, rol) if parte)
-
-
-def admin_formatear_opcion_cliente(row):
-    nombre = str(row.get("nombre", "") or "Cliente sin nombre").strip()
-    nif = str(row.get("nif_cif", "") or "").strip()
-    email = str(row.get("email", "") or "").strip()
-    return " · ".join(parte for parte in (nombre, nif, email) if parte)
-
-
-def _admin_formatear_documento(row, numero_columna):
-    numero = str(row.get(numero_columna, "") or "").strip()
-    concepto = str(row.get("concepto", "") or "").strip()
-    return " · ".join(parte for parte in (numero, concepto) if parte) or "Sin referencia"
-
-
-def _admin_catalogo_desde_df(df, id_columna, formateador):
-    por_id = {}
-    por_etiqueta = {}
-    for row in df.to_dict("records"):
-        id_valor = str(row.get(id_columna, "") or "").strip()
-        if not id_valor:
-            continue
-        etiqueta_base = formateador(row) or id_valor
-        etiqueta = etiqueta_base
-        if etiqueta in por_etiqueta and por_etiqueta[etiqueta] != id_valor:
-            etiqueta = f"{etiqueta_base} · {id_valor[:8]}"
-        por_id[id_valor] = etiqueta
-        por_etiqueta[etiqueta] = id_valor
-    return {
-        "por_id": por_id,
-        "por_etiqueta": por_etiqueta,
-        "opciones": sorted(por_etiqueta),
-    }
-
-
-def admin_obtener_catalogos_referencia(limite=2000):
-    """
-    Construye catálogos humanos para la UI. Una tabla ausente produce un
-    catálogo vacío y no impide administrar el resto.
-    """
-    definiciones = {
-        "recetas": ("recetas", "id", admin_formatear_opcion_receta),
-        "menus": ("menus", "id", admin_formatear_opcion_menu),
-        "usuarios": ("usuarios_app", "user_id", admin_formatear_opcion_usuario),
-        "clientes": ("clientes", "id", admin_formatear_opcion_cliente),
-        "presupuestos": (
-            "presupuestos", "id",
-            lambda row: _admin_formatear_documento(row, "numero_presupuesto"),
-        ),
-        "facturas": (
-            "facturas", "id",
-            lambda row: _admin_formatear_documento(row, "numero_factura"),
-        ),
-        "inventario": (
-            "inventario", "codigo",
-            lambda row: " · ".join(
-                parte for parte in (
-                    str(row.get("codigo", "") or "").strip(),
-                    str(row.get("descripcion", "") or "").strip(),
-                ) if parte
-            ),
-        ),
-    }
-    catalogos = {}
-    avisos = []
-    for nombre, (tabla, id_columna, formateador) in definiciones.items():
-        ok, mensaje, df = admin_cargar_tabla(tabla, limite=limite)
-        if ok:
-            catalogos[nombre] = _admin_catalogo_desde_df(
-                df,
-                id_columna,
-                formateador,
-            )
-        else:
-            catalogos[nombre] = {
-                "por_id": {},
-                "por_etiqueta": {},
-                "opciones": [],
-            }
-            avisos.append(f"{tabla}: {mensaje}")
-    return catalogos, avisos
-
-
-def _admin_etiqueta_referencia(catalogo, id_valor, vacio="sin referencia"):
-    id_limpio = str(id_valor or "").strip()
-    if not id_limpio:
-        return vacio
-    return catalogo.get("por_id", {}).get(
-        id_limpio,
-        f"referencia desconocida: {id_limpio[:8]}",
-    )
-
-
-def admin_enriquecer_tabla_para_ui(nombre_tabla, df, catalogos):
-    df_ui = df.copy()
-    for columna_id, (columna_ui, catalogo_nombre) in ADMIN_REFERENCIAS_UI.items():
-        if nombre_tabla == "usuarios_app" and columna_id == "user_id":
-            continue
-        if columna_id not in df_ui.columns:
-            continue
-        vacio = "sin propietario" if columna_id == "user_id" else "sin referencia"
-        catalogo = catalogos.get(catalogo_nombre, {})
-        posicion = df_ui.columns.get_loc(columna_id) + 1
-        def resolver_referencia(valor):
-            id_limpio = str(valor or "").strip()
-            if columna_id == "user_id" and id_limpio:
-                return catalogo.get("por_id", {}).get(
-                    id_limpio,
-                    f"usuario desconocido: {id_limpio[:8]}",
-                )
-            return _admin_etiqueta_referencia(
-                catalogo,
-                valor,
-                vacio=vacio,
-            )
-        df_ui.insert(
-            posicion,
-            columna_ui,
-            df_ui[columna_id].apply(resolver_referencia),
-        )
-
-    if nombre_tabla == "receta_ingredientes":
-        inventario = catalogos.get("inventario", {})
-        etiquetas = []
-        for row in df_ui.to_dict("records"):
-            codigo = str(row.get("codigo_ingrediente", "") or "").strip()
-            descripcion = str(row.get("descripcion_ingrediente", "") or "").strip()
-            etiqueta = inventario.get("por_id", {}).get(codigo)
-            etiquetas.append(
-                etiqueta
-                or " · ".join(parte for parte in (codigo, descripcion) if parte)
-                or "ingrediente temporal"
-            )
-        posicion = (
-            df_ui.columns.get_loc("codigo_ingrediente") + 1
-            if "codigo_ingrediente" in df_ui.columns
-            else len(df_ui.columns)
-        )
-        df_ui.insert(posicion, "ingrediente", etiquetas)
-
-    if nombre_tabla == "factura_lineas" and "origen_id" in df_ui.columns:
-        origenes = []
-        for row in df_ui.to_dict("records"):
-            origen_id = row.get("origen_id")
-            origen_tipo = str(row.get("origen_tipo", "") or "").lower()
-            catalogo = (
-                catalogos.get("menus", {})
-                if "menu" in origen_tipo
-                else catalogos.get("recetas", {})
-                if "receta" in origen_tipo
-                else {}
-            )
-            origenes.append(
-                _admin_etiqueta_referencia(catalogo, origen_id)
-            )
-        df_ui.insert(
-            df_ui.columns.get_loc("origen_id") + 1,
-            "origen",
-            origenes,
-        )
-    return df_ui
-
-
-def admin_preparar_payload_desde_ui(nombre_tabla, fila_ui, catalogos):
-    """
-    Convierte etiquetas humanas a las claves reales. Las columnas auxiliares
-    nunca forman parte del payload que se envía a Supabase.
-    """
-    fila = dict(fila_ui or {})
-    for columna_id, (columna_ui, catalogo_nombre) in ADMIN_REFERENCIAS_UI.items():
-        if columna_ui not in fila:
-            continue
-        etiqueta = str(fila.get(columna_ui, "") or "").strip()
-        catalogo = catalogos.get(catalogo_nombre, {})
-        if etiqueta in {"", "sin propietario", "sin referencia"}:
-            fila[columna_id] = None
-        elif etiqueta in catalogo.get("por_etiqueta", {}):
-            fila[columna_id] = catalogo["por_etiqueta"][etiqueta]
-
-    if nombre_tabla == "receta_ingredientes" and "ingrediente" in fila:
-        etiqueta = str(fila.get("ingrediente", "") or "").strip()
-        inventario = catalogos.get("inventario", {})
-        codigo = inventario.get("por_etiqueta", {}).get(etiqueta)
-        if codigo:
-            fila["codigo_ingrediente"] = codigo
-            descripcion = inventario.get("por_id", {}).get(codigo, "")
-            if " · " in descripcion:
-                fila["descripcion_ingrediente"] = descripcion.split(" · ", 1)[1]
-            fila["es_temporal"] = False
-
-    columnas_reales = set(ADMIN_TABLAS_BBDD[nombre_tabla]["columns"])
-    return {
-        columna: valor
-        for columna, valor in fila.items()
-        if columna in columnas_reales
-    }
+ADMIN_READONLY_COLUMNS = {"id", "created_at", "updated_at"}
 
 
 def normalizar_valor_admin(valor, columna):
@@ -5795,48 +5193,7 @@ def normalizar_valor_admin(valor, columna):
     return texto or None
 
 
-def admin_columnas_editables(nombre_tabla):
-    config = ADMIN_TABLAS_BBDD[nombre_tabla]
-    bloqueadas = set(ADMIN_READONLY_COLUMNS)
-    if config.get("generated_pk"):
-        bloqueadas.add(config["pk"])
-    if nombre_tabla == "usuarios_app":
-        bloqueadas.add("user_id")
-        bloqueadas.add("email")
-    bloqueadas.update(ADMIN_COLUMNAS_CALCULADAS)
-    return [
-        columna for columna in config["columns"]
-        if columna not in bloqueadas
-    ]
-
-
-def admin_columnas_guardables(nombre_tabla):
-    columnas = set(admin_columnas_editables(nombre_tabla))
-    columnas_tabla = set(ADMIN_TABLAS_BBDD[nombre_tabla]["columns"])
-    columnas.update(
-        columna_id for columna_id in ADMIN_REFERENCIAS_UI
-        if columna_id in columnas_tabla
-    )
-    return columnas
-
-
-def admin_columnas_ui_editables(nombre_tabla):
-    columnas_reales = set(ADMIN_TABLAS_BBDD[nombre_tabla]["columns"])
-    columnas = [
-        columna for columna in admin_columnas_editables(nombre_tabla)
-        if columna not in ADMIN_REFERENCIAS_UI
-    ]
-    for columna_id, (columna_ui, _) in ADMIN_REFERENCIAS_UI.items():
-        if columna_id in columnas_reales:
-            columnas.insert(0, columna_ui)
-    if nombre_tabla == "receta_ingredientes":
-        posicion = 1 if "receta" in columnas else 0
-        columnas.insert(posicion, "ingrediente")
-    return list(dict.fromkeys(columnas))
-
-
-def admin_limpiar_payload_fila(nombre_tabla, fila, incluir_pk=True):
-    config = ADMIN_TABLAS_BBDD[nombre_tabla]
+def fila_admin_para_guardar(fila, config, incluir_pk=True):
     datos = {}
     pk = config["pk"]
     for columna in config["columns"]:
@@ -5852,592 +5209,190 @@ def admin_limpiar_payload_fila(nombre_tabla, fila, incluir_pk=True):
     return datos
 
 
-def _admin_autorizado():
-    return bool(
-        supabase_disponible
-        and supabase is not None
-        and usuario_actual_es_admin()
-    )
-
-
-def admin_cargar_tabla(nombre_tabla, columnas=None, limite=500):
+def cargar_tabla_admin(nombre_tabla, limite=500):
     if not supabase_disponible or supabase is None:
         return False, "El inventario no está conectado correctamente.", pd.DataFrame()
     if not usuario_actual_es_admin():
         return False, "Solo los administradores pueden consultar BBDD.", pd.DataFrame()
 
     config = ADMIN_TABLAS_BBDD[nombre_tabla]
-    columnas = list(columnas or config["columns"])
+    columnas = config["columns"]
     try:
-        try:
-            consulta = (
-                supabase.table(nombre_tabla)
-                .select(",".join(columnas))
-                .limit(int(limite))
-            )
-            if config.get("order") in columnas:
-                consulta = consulta.order(config["order"])
-            respuesta = consulta.execute()
-        except Exception:
-            respuesta = (
-                supabase.table(nombre_tabla)
-                .select("*")
-                .limit(int(limite))
-                .execute()
-            )
+        consulta = supabase.table(nombre_tabla).select(",".join(columnas)).limit(int(limite))
+        if config.get("order"):
+            consulta = consulta.order(config["order"])
+        respuesta = consulta.execute()
         df = pd.DataFrame(respuesta.data or [])
         if df.empty:
             return True, "No hay registros.", pd.DataFrame(columns=columnas)
-        disponibles = [col for col in columnas if col in df.columns]
-        extras = [col for col in df.columns if col not in disponibles]
-        faltantes = [col for col in columnas if col not in df.columns]
-        mensaje = "Tabla cargada."
-        if faltantes:
-            mensaje += " Columnas no disponibles: " + ", ".join(faltantes)
-        return True, mensaje, df[disponibles + extras].copy()
+        for col in columnas:
+            if col not in df.columns:
+                df[col] = None
+        return True, "Tabla cargada.", df[columnas].copy()
     except Exception as e:
         return False, f"No se pudo cargar {nombre_tabla}: {e}", pd.DataFrame(columns=columnas)
 
 
-def admin_contar_registros(nombre_tabla):
-    if not _admin_autorizado():
-        return False, None, "Sin permisos de administración."
-    try:
-        pk = ADMIN_TABLAS_BBDD[nombre_tabla]["pk"]
-        respuesta = (
-            supabase.table(nombre_tabla)
-            .select(pk, count="exact")
-            .limit(1)
-            .execute()
-        )
-        total = getattr(respuesta, "count", None)
-        return True, int(total if total is not None else len(respuesta.data or [])), ""
-    except Exception as exc:
-        return False, None, str(exc)
-
-
-def admin_actualizar_fila(nombre_tabla, id_columna, id_valor, datos):
-    if not _admin_autorizado():
-        return False, "Sin permisos de administración."
-    try:
-        payload = {
-            k: v for k, v in datos.items()
-            if k in admin_columnas_guardables(nombre_tabla)
-        }
-        if not payload:
-            return True, "No había cambios editables."
-        supabase.table(nombre_tabla).update(payload).eq(id_columna, id_valor).execute()
-        return True, "Fila actualizada."
-    except Exception as exc:
-        return False, f"No se pudo actualizar la fila: {exc}"
-
-
-def admin_insertar_fila(nombre_tabla, datos):
-    if not _admin_autorizado():
-        return False, "Sin permisos de administración."
-    try:
-        config = ADMIN_TABLAS_BBDD[nombre_tabla]
-        payload = admin_limpiar_payload_fila(
-            nombre_tabla,
-            datos,
-            incluir_pk=not config.get("generated_pk"),
-        )
-        payload = {k: v for k, v in payload.items() if v is not None}
-        if not payload:
-            return False, "La fila nueva está vacía."
-        supabase.table(nombre_tabla).insert(payload).execute()
-        return True, "Fila insertada."
-    except Exception as exc:
-        return False, f"No se pudo insertar la fila: {exc}"
-
-
-def admin_eliminar_filas(nombre_tabla, id_columna, ids):
-    if not _admin_autorizado():
-        return False, "Sin permisos de administración.", 0
-    ids_limpios = [valor for valor in ids if valor not in (None, "")]
-    if not ids_limpios:
-        return False, "Selecciona al menos una fila.", 0
-    eliminadas = 0
-    try:
-        for id_valor in ids_limpios:
-            supabase.table(nombre_tabla).delete().eq(id_columna, id_valor).execute()
-            eliminadas += 1
-        return True, "Filas eliminadas.", eliminadas
-    except Exception as exc:
-        return False, f"No se pudieron eliminar todas las filas: {exc}", eliminadas
-
-
-def admin_invalidar_cache(nombre_tabla):
-    if nombre_tabla == "inventario":
-        st.session_state["db_trigger"] += 1
-        try:
-            cargar_inventario_supabase.clear()
-        except Exception:
-            pass
-    elif nombre_tabla in {"recetas", "receta_ingredientes"}:
-        limpiar_cache_recetas_guardadas()
-    elif nombre_tabla in {"menus", "menu_recetas"}:
-        try:
-            cargar_menus_supabase.clear()
-        except Exception:
-            pass
-
-
-def _admin_column_config(columnas, catalogos=None, valores_actuales=None):
-    catalogos = catalogos or {}
-    valores_actuales = valores_actuales or {}
-    config = {}
-    for columna in columnas:
-        if columna == "_seleccionar":
-            config[columna] = st.column_config.CheckboxColumn("Seleccionar")
-        elif columna in {
-            "receta", "menu", "propietario", "cliente",
-            "presupuesto", "factura",
-        }:
-            catalogo_nombre = {
-                "receta": "recetas",
-                "menu": "menus",
-                "propietario": "usuarios",
-                "cliente": "clientes",
-                "presupuesto": "presupuestos",
-                "factura": "facturas",
-            }[columna]
-            opciones = list(catalogos.get(catalogo_nombre, {}).get("opciones", []))
-            opciones.extend(
-                valor for valor in valores_actuales.get(columna, [])
-                if valor and valor not in opciones
-            )
-            if columna == "propietario" and "sin propietario" not in opciones:
-                opciones.insert(0, "sin propietario")
-            elif columna != "propietario" and "sin referencia" not in opciones:
-                opciones.insert(0, "sin referencia")
-            config[columna] = st.column_config.SelectboxColumn(
-                columna.capitalize(),
-                options=opciones,
-            )
-        elif columna == "ingrediente":
-            opciones = list(catalogos.get("inventario", {}).get("opciones", []))
-            if "" not in opciones:
-                opciones.insert(0, "")
-            opciones.extend(
-                valor for valor in valores_actuales.get(columna, [])
-                if valor and valor not in opciones
-            )
-            config[columna] = st.column_config.SelectboxColumn(
-                "Ingrediente",
-                options=opciones,
-            )
-        elif columna in ADMIN_BOOLEAN_COLUMNS:
-            config[columna] = st.column_config.CheckboxColumn(columna)
-        elif columna == "rol":
-            config[columna] = st.column_config.SelectboxColumn(
-                columna, options=["usuario", "admin"]
-            )
-        elif columna in ADMIN_NUMERIC_COLUMNS:
-            config[columna] = st.column_config.NumberColumn(columna)
-        else:
-            config[columna] = st.column_config.TextColumn(columna)
-    return config
-
-
-def _admin_guardar_editor(nombre_tabla, original, editado, catalogos):
+def guardar_cambios_tabla_admin(nombre_tabla, df_original, editor_state):
     config = ADMIN_TABLAS_BBDD[nombre_tabla]
     pk = config["pk"]
-    filas_originales = original.to_dict("records")
-    actualizadas = insertadas = 0
-    errores = []
-    filas_editadas = editado.drop(
-        columns=["_seleccionar"], errors="ignore"
-    ).to_dict("records")
-    for indice, fila in enumerate(filas_editadas):
-        if indice < len(filas_originales):
-            anterior = filas_originales[indice]
-            pk_valor = anterior.get(pk)
-            if pk_valor in (None, ""):
-                errores.append(f"La fila {indice + 1} no tiene clave primaria.")
-                continue
-            fila_convertida = admin_preparar_payload_desde_ui(
-                nombre_tabla,
-                fila,
-                catalogos,
-            )
-            cambios = {}
-            for columna in admin_columnas_guardables(nombre_tabla):
-                if columna not in fila_convertida:
-                    continue
-                nuevo = normalizar_valor_admin(
-                    fila_convertida.get(columna),
-                    columna,
-                )
-                previo = normalizar_valor_admin(anterior.get(columna), columna)
-                if nuevo != previo:
-                    cambios[columna] = nuevo
-            if cambios:
-                ok, mensaje = admin_actualizar_fila(nombre_tabla, pk, pk_valor, cambios)
-                if ok:
-                    actualizadas += 1
-                else:
-                    errores.append(mensaje)
-        elif any(valor not in (None, "", False) for valor in fila.values()):
-            fila_convertida = admin_preparar_payload_desde_ui(
-                nombre_tabla,
-                fila,
-                catalogos,
-            )
-            ok, mensaje = admin_insertar_fila(nombre_tabla, fila_convertida)
-            if ok:
-                insertadas += 1
-            else:
-                errores.append(mensaje)
-    return actualizadas, insertadas, errores
+    editados = editor_state.get("edited_rows", {}) if editor_state else {}
+    anadidos = editor_state.get("added_rows", []) if editor_state else []
+    borrados = editor_state.get("deleted_rows", []) if editor_state else []
+    cambios = 0
+
+    for row_idx_str, edits in editados.items():
+        row_idx = int(row_idx_str)
+        fila_original = df_original.iloc[row_idx].to_dict()
+        pk_valor = normalizar_valor_admin(fila_original.get(pk), pk)
+        if not pk_valor:
+            continue
+        fila_actualizada = dict(fila_original)
+        fila_actualizada.update(edits)
+        datos_actualizados = fila_admin_para_guardar(fila_actualizada, config, incluir_pk=False)
+        datos_actualizados.pop(pk, None)
+        if datos_actualizados:
+            supabase.table(nombre_tabla).update(datos_actualizados).eq(pk, pk_valor).execute()
+            cambios += 1
+
+    for nueva_fila in anadidos:
+        datos_nuevos = fila_admin_para_guardar(nueva_fila, config, incluir_pk=not config.get("generated_pk"))
+        datos_nuevos = {k: v for k, v in datos_nuevos.items() if v is not None}
+        if datos_nuevos:
+            supabase.table(nombre_tabla).insert(datos_nuevos).execute()
+            cambios += 1
+
+    for row_idx in borrados:
+        fila_original = df_original.iloc[int(row_idx)].to_dict()
+        pk_valor = normalizar_valor_admin(fila_original.get(pk), pk)
+        if pk_valor:
+            supabase.table(nombre_tabla).delete().eq(pk, pk_valor).execute()
+            cambios += 1
+
+    return cambios
 
 
-def render_admin_panel_tab():
-    perfil = obtener_perfil_usuario_app() or {}
-    usuario = obtener_usuario_actual() or {}
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Usuario", perfil.get("nombre") or usuario.get("email") or "-")
-    c2.metric("Rol", perfil.get("rol", "usuario"))
-    c3.metric("Supabase", "Conectado" if supabase_disponible else "Desconectado")
-    c4.metric("IA", "Conectada" if api_key else "Desconectada")
+def render_pagina_administracion():
+    st.subheader("Administración del entorno")
+    st.caption("Gestión restringida de inventario, usuarios internos y estado de configuración.")
 
-    st.markdown("#### Registros por módulo")
-    columnas = st.columns(3)
-    for indice, tabla in enumerate(ADMIN_TABLAS_BBDD):
-        ok, total, error = admin_contar_registros(tabla)
-        with columnas[indice % 3]:
-            if ok:
-                st.metric(ADMIN_TABLAS_BBDD[tabla]["label"], total)
-            else:
-                st.warning(f"{tabla}: no disponible")
-                if error:
-                    st.caption(error)
-
-
-def render_admin_bbdd_tab():
-    grupo = st.selectbox("Grupo", list(ADMIN_GRUPOS_TABLAS))
-    tabla = st.selectbox(
-        "Tabla",
-        ADMIN_GRUPOS_TABLAS[grupo],
-        format_func=lambda item: ADMIN_TABLAS_BBDD[item]["label"],
-    )
-    filtro_col, limite_col = st.columns([3, 1])
-    with filtro_col:
-        filtro = st.text_input("Filtrar por texto", key=f"admin_filtro_{tabla}")
-    with limite_col:
-        limite = st.number_input(
-            "Límite", min_value=50, max_value=2000, value=500, step=50,
-            key=f"admin_limite_{tabla}",
-        )
-    mostrar_tecnicas = st.checkbox(
-        "Mostrar columnas técnicas",
-        value=False,
-        key=f"admin_mostrar_tecnicas_{tabla}",
-    )
-    if mostrar_tecnicas:
-        st.warning(
-            "Columnas técnicas: se muestran solo como referencia. "
-            "No editar salvo que sepas lo que haces."
-        )
-
-    ok, mensaje, df = admin_cargar_tabla(tabla, limite=int(limite))
-    if not ok:
-        st.warning(mensaje)
-        return
-    if "Columnas no disponibles" in mensaje:
-        st.warning(mensaje)
-
-    catalogos, avisos_catalogos = admin_obtener_catalogos_referencia()
-    if avisos_catalogos:
-        st.caption(
-            "Algunas referencias no pudieron resolverse: "
-            + " | ".join(avisos_catalogos)
-        )
-    df_ui = admin_enriquecer_tabla_para_ui(tabla, df, catalogos)
-    if filtro:
-        mascara = df_ui.astype(str).apply(
-            lambda col: col.str.contains(filtro, case=False, na=False)
-        ).any(axis=1)
-        df = df[mascara].reset_index(drop=True)
-        df_ui = df_ui[mascara].reset_index(drop=True)
-    else:
-        df = df.reset_index(drop=True)
-        df_ui = df_ui.reset_index(drop=True)
-
-    columnas_ocultas = set()
-    if not mostrar_tecnicas:
-        columnas_ocultas.update(ADMIN_COLUMNAS_TECNICAS)
-    columnas_visibles = [
-        columna for columna in df_ui.columns
-        if columna not in columnas_ocultas
-    ]
-    df_visible = df_ui[columnas_visibles].copy()
-
-    csv = df_visible.to_csv(index=False).encode("utf-8-sig")
-    st.download_button(
-        "Descargar CSV", csv, f"{tabla}.csv", "text/csv",
-        use_container_width=False,
-    )
-    if tabla == "usuarios_app":
-        st.dataframe(df_visible, hide_index=True, use_container_width=True)
-        st.info(
-            "La edición y eliminación de perfiles se realiza en la pestaña "
-            "Usuarios, donde se aplican las protecciones del administrador actual."
-        )
-        return
-
-    editable = df_visible.copy()
-    editable.insert(0, "_seleccionar", False)
-    columnas_ui_editables = set(admin_columnas_ui_editables(tabla))
-    bloqueadas = [
-        columna for columna in editable.columns
-        if columna != "_seleccionar"
-        and columna not in columnas_ui_editables
-    ]
-    valores_actuales = {
-        columna: editable[columna].dropna().astype(str).tolist()
-        for columna in editable.columns
-    }
-    editor = st.data_editor(
-        editable,
-        num_rows="fixed",
-        hide_index=True,
-        use_container_width=True,
-        height=520,
-        disabled=bloqueadas,
-        column_config=_admin_column_config(
-            editable.columns,
-            catalogos,
-            valores_actuales,
-        ),
-        key=f"admin_editor_seguro_{tabla}",
-    )
-    if tabla in ADMIN_TABLAS_INSERTABLES:
-        with st.expander("Insertar nueva fila", expanded=False):
-            columnas_nuevas = admin_columnas_ui_editables(tabla)
-            fila_vacia = {
-                columna: False if columna in ADMIN_BOOLEAN_COLUMNS else None
-                for columna in columnas_nuevas
-            }
-            nueva_fila_df = st.data_editor(
-                pd.DataFrame([fila_vacia]),
-                num_rows="fixed",
-                hide_index=True,
-                use_container_width=True,
-                column_config=_admin_column_config(
-                    columnas_nuevas,
-                    catalogos,
-                ),
-                key=f"admin_nueva_fila_{tabla}",
-            )
-            if st.button("Insertar fila", key=f"admin_insertar_{tabla}"):
-                payload_nuevo = admin_preparar_payload_desde_ui(
-                    tabla,
-                    nueva_fila_df.iloc[0].to_dict(),
-                    catalogos,
-                )
-                ok_insertar, mensaje_insertar = admin_insertar_fila(
-                    tabla,
-                    payload_nuevo,
-                )
-                if ok_insertar:
-                    admin_invalidar_cache(tabla)
-                    st.success(mensaje_insertar)
-                    st.rerun()
-                else:
-                    st.error(mensaje_insertar)
-    else:
-        st.caption(
-            "En esta tabla solo se editan filas existentes; las altas relacionadas "
-            "requieren claves foráneas y se realizan desde la aplicación."
-        )
-
-    if st.button("Guardar cambios", type="primary", key=f"admin_guardar_{tabla}"):
-        actualizadas, insertadas, errores = _admin_guardar_editor(
-            tabla,
-            df,
-            editor,
-            catalogos,
-        )
-        if errores:
-            st.error(" | ".join(errores))
-        if actualizadas or insertadas:
-            admin_invalidar_cache(tabla)
-            st.success(f"Actualizadas: {actualizadas}. Insertadas: {insertadas}.")
-            st.rerun()
-        elif not errores:
-            st.info("No había cambios para guardar.")
-
-    seleccionadas = editor[editor["_seleccionar"].fillna(False)]
-    st.markdown("#### Eliminación")
-    st.warning("La eliminación es irreversible y no se ejecuta al guardar cambios.")
-    confirmar = st.checkbox(
-        "Confirmo que quiero eliminar las filas seleccionadas",
-        key=f"admin_confirmar_borrado_{tabla}",
-    )
-    if st.button(
-        "Eliminar seleccionadas",
-        disabled=seleccionadas.empty or not confirmar,
-        key=f"admin_eliminar_{tabla}",
-    ):
-        pk = ADMIN_TABLAS_BBDD[tabla]["pk"]
-        indices = seleccionadas.index.tolist()
-        ids = df.loc[indices, pk].tolist() if pk in df.columns else []
-        ok, texto, total = admin_eliminar_filas(tabla, pk, ids)
-        if ok:
-            admin_invalidar_cache(tabla)
-            st.success(f"{texto} Total: {total}.")
-            st.rerun()
-        else:
-            st.error(texto)
-
-
-def render_admin_usuarios_tab():
-    ok, mensaje, df = admin_cargar_tabla("usuarios_app")
-    if not ok:
-        st.warning(mensaje)
-        return
-    actual_id = obtener_user_id_actual()
-    editable = df.copy()
-    editable.insert(0, "_seleccionar", False)
-    editor = st.data_editor(
-        editable,
-        hide_index=True,
-        use_container_width=True,
-        disabled=["user_id", "email", "created_at", "updated_at"],
-        column_config=_admin_column_config(editable.columns),
-        key="admin_editor_usuarios",
-    )
-    if st.button("Guardar usuarios", type="primary"):
-        fila_propia = editor[editor["user_id"].astype(str) == str(actual_id)]
-        if not fila_propia.empty and not bool(fila_propia.iloc[0].get("activo", True)):
-            st.error("No puedes desactivar tu propio usuario administrador.")
-        else:
-            actualizadas, _, errores = _admin_guardar_editor(
-                "usuarios_app",
-                df,
-                editor,
-                {},
-            )
-            if errores:
-                st.error(" | ".join(errores))
-            elif actualizadas:
-                cambio_rol_propio = (
-                    not fila_propia.empty
-                    and fila_propia.iloc[0].get("rol")
-                    != df[df["user_id"].astype(str) == str(actual_id)].iloc[0].get("rol")
-                )
-                asegurar_usuario_app_supabase()
-                st.success(f"Usuarios actualizados: {actualizadas}.")
-                if cambio_rol_propio:
-                    st.session_state["auth_feedback"] = (
-                        "warning",
-                        "Has cambiado tu propio rol. Recarga o vuelve a iniciar sesión.",
-                    )
-                st.rerun()
-            else:
-                st.info("No había cambios.")
-
-    seleccionadas = editor[editor["_seleccionar"].fillna(False)]
-    ids = seleccionadas.get("user_id", pd.Series(dtype=object)).astype(str).tolist()
-    if str(actual_id) in ids:
-        st.warning("Tu propio usuario se excluirá del borrado.")
-        ids = [valor for valor in ids if valor != str(actual_id)]
-    confirmar = st.checkbox(
-        "Confirmo el borrado de los perfiles seleccionados",
-        key="admin_confirmar_borrado_usuarios",
-    )
-    if st.button("Borrar perfiles seleccionados", disabled=not ids or not confirmar):
-        ok, texto, total = admin_eliminar_filas("usuarios_app", "user_id", ids)
-        if ok:
-            st.success(f"{texto} Total: {total}.")
-            st.rerun()
-        else:
-            st.error(texto)
-
-
-def render_admin_sistema_tab():
-    st.subheader("Recuperación de contraseña")
-    app_base_configurada = bool(_secreto_texto("APP_BASE_URL"))
-    redirect_configurada = bool(_secreto_texto("PASSWORD_RECOVERY_REDIRECT_URL"))
-    url_final = obtener_url_recuperacion_password()
-    st.write(f"**APP_BASE_URL configurada:** {'sí' if app_base_configurada else 'no'}")
-    st.write(
-        "**PASSWORD_RECOVERY_REDIRECT_URL configurada:** "
-        f"{'sí' if redirect_configurada else 'no'}"
-    )
-    st.write(f"**URL final calculada:** {url_final or 'No disponible'}")
-    if not url_final:
-        st.error(
-            "No se pudo calcular una URL válida. En producción configura "
-            "APP_BASE_URL con HTTPS."
-        )
-    elif url_es_local(url_final):
-        st.warning("La URL apunta a localhost; úsala solo en desarrollo local.")
-    elif url_final and urlsplit(url_final).scheme != "https":
-        st.warning("En producción la URL de recuperación debe usar HTTPS.")
-    st.markdown(
-        "1. Supabase Dashboard → Authentication → URL Configuration.\n"
-        "2. Configura Site URL con la URL pública real.\n"
-        "3. Añade la URL final anterior a Redirect URLs.\n"
-        "4. Revisa Authentication → Email Templates → Reset Password.\n"
-        "5. Si Streamlit falla con fragmentos, usa token_hash."
-    )
-    base_url = obtener_base_url_publica_app() or "APP_BASE_URL"
-    st.code(
-        f"{base_url}?auth_action=reset_password"
-        "&token_hash={{{{ .TokenHash }}}}&type=recovery",
-        language="text",
-    )
-    st.caption("No se muestran claves, sesiones ni tokens recibidos.")
-
-    st.markdown("#### Migraciones necesarias")
-    st.code(
-        "sql/017_usuarios_app_entorno.sql\n"
-        "sql/018_admin_rls_todas_bbdd.sql\n"
-        "sql/019_jerarquia_recetas_menus_presupuestos_facturas.sql",
-        language="text",
-    )
-
-
-def render_admin_panel():
     if not usuario_actual_es_admin():
-        st.session_state["pagina_principal"] = "App"
-        st.error("Acceso restringido a administradores.")
+        st.warning("Esta página solo está disponible para usuarios administradores.")
+        error_perfil = st.session_state.get("usuario_app_error")
+        if error_perfil:
+            st.caption(error_perfil)
         return
-    st.subheader("🛠️ Administración")
-    panel, bbdd, usuarios, sistema = st.tabs(
-        ["Panel", "BBDD / Contenido", "Usuarios", "Sistema"]
-    )
-    with panel:
-        render_admin_panel_tab()
-    with bbdd:
-        render_admin_bbdd_tab()
-    with usuarios:
-        render_admin_usuarios_tab()
-    with sistema:
-        render_admin_sistema_tab()
+
+    admin_tab_bbdd, admin_tab_estado = st.tabs(["BBDD", "Configuración"])
+
+    with admin_tab_bbdd:
+        tabla_opciones = list(ADMIN_TABLAS_BBDD.keys())
+        tabla_seleccionada = st.selectbox(
+            "Tabla",
+            tabla_opciones,
+            format_func=lambda tabla: ADMIN_TABLAS_BBDD[tabla]["label"],
+            key="admin_tabla_bbdd"
+        )
+        limite_registros = st.number_input(
+            "Registros a cargar",
+            min_value=50,
+            max_value=2000,
+            value=500,
+            step=50,
+            key="admin_limite_bbdd"
+        )
+        config_tabla = ADMIN_TABLAS_BBDD[tabla_seleccionada]
+        ok_tabla, mensaje_tabla, tabla_df = cargar_tabla_admin(tabla_seleccionada, limite_registros)
+
+        if not ok_tabla:
+            st.warning(mensaje_tabla)
+        else:
+            st.caption(f"{len(tabla_df)} registros cargados de public.{tabla_seleccionada}")
+            column_config = {}
+            for columna in config_tabla["columns"]:
+                if columna in ADMIN_BOOLEAN_COLUMNS:
+                    column_config[columna] = st.column_config.CheckboxColumn(columna)
+                elif columna == "rol":
+                    column_config[columna] = st.column_config.SelectboxColumn(columna, options=["usuario", "admin"])
+                elif columna in ADMIN_NUMERIC_COLUMNS:
+                    column_config[columna] = st.column_config.NumberColumn(columna)
+                else:
+                    column_config[columna] = st.column_config.TextColumn(columna)
+
+            columnas_bloqueadas = [
+                col for col in config_tabla["columns"]
+                if col in ADMIN_READONLY_COLUMNS
+                or (col == config_tabla["pk"] and config_tabla.get("fixed_rows"))
+            ]
+            editor_key = f"admin_editor_{tabla_seleccionada}"
+            st.data_editor(
+                tabla_df,
+                num_rows="fixed" if config_tabla.get("fixed_rows") else "dynamic",
+                use_container_width=True,
+                height=520,
+                column_config=column_config,
+                disabled=columnas_bloqueadas,
+                key=editor_key
+            )
+
+            acciones_col1, acciones_col2 = st.columns([1, 3])
+            with acciones_col1:
+                if st.button("Guardar cambios", type="primary", use_container_width=True, key=f"guardar_{tabla_seleccionada}"):
+                    editor_state = st.session_state.get(editor_key)
+                    try:
+                        cambios = guardar_cambios_tabla_admin(tabla_seleccionada, tabla_df, editor_state)
+                        if tabla_seleccionada == "usuarios_app":
+                            asegurar_usuario_app_supabase()
+                        if tabla_seleccionada == "inventario":
+                            st.session_state["db_trigger"] += 1
+                        st.success(f"Cambios guardados: {cambios}")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"No se pudieron guardar los cambios en {tabla_seleccionada}: {e}")
+            with acciones_col2:
+                st.caption("Las altas en tablas relacionadas necesitan claves foráneas válidas. Los borrados se aplican directamente al guardar.")
+
+    with admin_tab_estado:
+        st.subheader("Configuración y estado")
+        estado_col1, estado_col2, estado_col3 = st.columns(3)
+        with estado_col1:
+            st.metric("Inventario", "Conectado" if supabase_disponible else "Desconectado")
+        with estado_col2:
+            st.metric("CIA", "Activa" if api_key else "Desconectada")
+        with estado_col3:
+            st.metric("Ingredientes en BBDD", len(inventario_df) if not inventario_df.empty else 0)
+
+        perfil = obtener_perfil_usuario_app()
+        if perfil:
+            st.write(f"**Usuario actual:** {perfil.get('email', '')}")
+            st.write(f"**Rol:** {perfil.get('rol', 'usuario')}")
+            st.write(f"**Activo:** {'sí' if perfil.get('activo', True) else 'no'}")
+
+        st.markdown("#### Migraciones necesarias")
+        st.code(
+            "sql/017_usuarios_app_entorno.sql\n"
+            "sql/018_admin_rls_todas_bbdd.sql\n"
+            "sql/019_jerarquia_recetas_menus_presupuestos_facturas.sql",
+            language="text",
+        )
+        st.caption(
+            "La migración 019 añade la jerarquía de presupuestos y facturas. "
+            "Revísala y ejecútala manualmente en Supabase."
+        )
 
 pagina_actual = "App"
-es_admin_actual = usuario_actual_es_admin()
-if es_admin_actual:
+if usuario_actual_es_admin():
     with st.sidebar:
         st.divider()
         pagina_actual = st.radio(
-            "🛠️ Administración",
+            "Navegación",
             ["App", "Administración"],
             horizontal=False,
             key="pagina_principal"
         )
-else:
-    st.session_state["pagina_principal"] = "App"
 
 if pagina_actual == "Administración":
-    if not es_admin_actual:
-        st.session_state["pagina_principal"] = "App"
-        st.error("Acceso restringido a administradores.")
-        st.stop()
-    render_admin_panel()
+    render_pagina_administracion()
     st.stop()
 
 main_tab_recetas, main_tab_menus, main_tab_clientes, main_tab_facturas = st.tabs([
@@ -7609,14 +6564,8 @@ with main_tab_recetas:
 
                 receta_id_a_cargar = None
                 if cargar_receta_btn:
-                    tiene_cambios = bool(
-                        st.session_state.get(
-                            "receta_tiene_cambios_pendientes",
-                            False,
-                        )
-                        or detectar_cambios_receta()
-                    )
-                    if tiene_cambios:
+                    tiene_cambios = st.session_state.get('receta_tiene_cambios_pendientes', False)
+                    if tiene_cambios and st.session_state.get('ingredientes', []):
                         st.session_state["receta_carga_pendiente_id"] = str(
                             receta_id_seleccionada
                         )
@@ -7759,19 +6708,22 @@ with main_tab_recetas:
                     "activa": True
                 }
                 if actualizar_existente:
-                    (
-                        ok,
-                        mensaje,
-                        datos_guardados,
-                        ingredientes_guardados,
-                    ) = actualizar_receta_supabase(
+                    ok, mensaje = actualizar_receta_supabase(
                         receta_id_cargada,
                         datos_receta,
                         st.session_state["ingredientes"]
                     )
                     if ok:
+                        datos_guardados, ingredientes_guardados = preparar_receta_para_una_racion(
+                            datos_receta,
+                            st.session_state["ingredientes"],
+                        )
+                        if datos_guardados is None:
+                            st.error("La receta se actualizó, pero no se pudo sincronizar la vista. Recarga la receta.")
+                            st.stop()
+                        datos_guardados["id"] = receta_id_cargada
                         sincronizar_receta_guardada_en_sesion(
-                            receta_guardada=datos_guardados,
+                            receta_guardada={"id": receta_id_cargada, "codigo_receta": codigo_receta, "nombre": nombre_limpio},
                             datos_receta=datos_guardados,
                             ingredientes_guardados=ingredientes_guardados,
                         )
@@ -7784,18 +6736,19 @@ with main_tab_recetas:
                     else:
                         st.error(mensaje)
                 elif duplicar_existente:
-                    (
-                        ok,
-                        mensaje,
-                        receta_guardada,
-                        datos_guardados,
-                        ingredientes_guardados,
-                    ) = duplicar_receta_supabase(
+                    ok, mensaje, receta_guardada = duplicar_receta_supabase(
                         datos_receta,
                         st.session_state["ingredientes"]
                     )
                     if ok:
                         nuevo_codigo = receta_guardada.get("codigo_receta", "")
+                        datos_guardados, ingredientes_guardados = preparar_receta_para_una_racion(
+                            datos_receta,
+                            st.session_state["ingredientes"],
+                        )
+                        if datos_guardados is None:
+                            st.error("La receta se duplicó, pero no se pudo sincronizar la vista. Recarga la receta.")
+                            st.stop()
                         sincronizar_receta_guardada_en_sesion(
                             receta_guardada=receta_guardada,
                             datos_receta=datos_guardados,
@@ -7811,18 +6764,19 @@ with main_tab_recetas:
                     else:
                         st.error(mensaje)
                 else:
-                    (
-                        ok,
-                        mensaje,
-                        receta_guardada,
-                        datos_guardados,
-                        ingredientes_guardados,
-                    ) = guardar_receta_nueva_supabase(
+                    ok, mensaje, receta_guardada = guardar_receta_nueva_supabase(
                         datos_receta,
                         st.session_state["ingredientes"]
                     )
                     if ok:
                         codigo_mostrado = receta_guardada.get("codigo_receta", codigo_receta)
+                        datos_guardados, ingredientes_guardados = preparar_receta_para_una_racion(
+                            datos_receta,
+                            st.session_state["ingredientes"],
+                        )
+                        if datos_guardados is None:
+                            st.error("La receta se guardó, pero no se pudo sincronizar la vista. Recarga la receta.")
+                            st.stop()
                         sincronizar_receta_guardada_en_sesion(
                             receta_guardada=receta_guardada,
                             datos_receta=datos_guardados,
@@ -8317,3 +7271,4 @@ with main_tab_menus:
             st.session_state["menu_id"] = None
             st.success("Menú actual limpiado.")
             st.rerun()
+
