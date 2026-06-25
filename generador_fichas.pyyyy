@@ -59,6 +59,7 @@ LOGO_SAMIRARTE_PATH = BASE_DIR / "assets" / "logo_samirarte.png"
 AUTH_REFRESH_COOKIE = "escandallos_refresh_token"
 
 
+@st.cache_resource
 def obtener_cookie_manager():
     """Devuelve un gestor de cookies del navegador si la dependencia existe."""
     if stx is None:
