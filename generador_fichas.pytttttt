@@ -1,5 +1,4 @@
 import streamlit as st
-import streamlit.components.v1 as components
 import pandas as pd
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill
@@ -72,7 +71,6 @@ def obtener_cookie_manager():
 
 def _leer_cookie_refresh_token():
     """Lee el refresh_token persistido en cookie del navegador."""
-    # 1) Streamlit expone las cookies de la petición actual de forma síncrona.
     try:
         valor = st.context.cookies.get(AUTH_REFRESH_COOKIE)
         if valor:
@@ -80,19 +78,9 @@ def _leer_cookie_refresh_token():
     except Exception:
         pass
 
-    # 2) Fallback: CookieManager puede tardar una ejecución en hidratarse,
-    # pero cuando está disponible permite leer cookies del navegador.
     try:
         gestor = obtener_cookie_manager()
         if gestor is not None:
-            try:
-                cookies = gestor.get_all()
-            except Exception:
-                cookies = None
-            if isinstance(cookies, dict):
-                valor = cookies.get(AUTH_REFRESH_COOKIE)
-                if valor:
-                    return str(valor)
             valor = gestor.get(cookie=AUTH_REFRESH_COOKIE)
             if valor:
                 return str(valor)
@@ -101,55 +89,24 @@ def _leer_cookie_refresh_token():
     return None
 
 
-def _inyectar_cookie_refresh_token(refresh_token):
-    """Escribe la cookie desde el navegador como respaldo del CookieManager."""
-    token = str(refresh_token or "").strip()
-    if not token:
-        return
-    try:
-        nombre_js = json.dumps(AUTH_REFRESH_COOKIE)
-        token_js = json.dumps(token)
-        components.html(
-            f"""
-            <script>
-            (function() {{
-              const name = {nombre_js};
-              const value = encodeURIComponent({token_js});
-              const secure = window.location.protocol === "https:" ? "; Secure" : "";
-              document.cookie = name + "=" + value + "; Max-Age=2592000; Path=/; SameSite=Lax" + secure;
-            }})();
-            </script>
-            """,
-            height=0,
-        )
-    except Exception:
-        pass
-
-
 def _guardar_cookie_refresh_token(refresh_token):
     """Guarda el refresh_token en cookie persistente del navegador."""
     token = str(refresh_token or "").strip()
     if not token:
         return False
-
-    guardado = False
     try:
         gestor = obtener_cookie_manager()
-        if gestor is not None:
-            gestor.set(
-                AUTH_REFRESH_COOKIE,
-                token,
-                expires_at=datetime.now() + timedelta(days=30),
-                key="set_refresh_token_cookie",
-            )
-            guardado = True
+        if gestor is None:
+            return False
+        gestor.set(
+            AUTH_REFRESH_COOKIE,
+            token,
+            expires_at=datetime.now() + timedelta(days=30),
+            key="set_refresh_token_cookie",
+        )
+        return True
     except Exception:
-        pass
-
-    # Respaldo: escribe la cookie mediante JS. En el siguiente F5,
-    # st.context.cookies debería recibirla de forma síncrona.
-    _inyectar_cookie_refresh_token(token)
-    return True or guardado
+        return False
 
 
 def _borrar_cookie_refresh_token():
@@ -160,22 +117,7 @@ def _borrar_cookie_refresh_token():
             gestor.delete(AUTH_REFRESH_COOKIE, key="delete_refresh_token_cookie")
     except Exception:
         pass
-    try:
-        nombre_js = json.dumps(AUTH_REFRESH_COOKIE)
-        components.html(
-            f"""
-            <script>
-            (function() {{
-              const name = {nombre_js};
-              const secure = window.location.protocol === "https:" ? "; Secure" : "";
-              document.cookie = name + "=; Max-Age=0; Path=/; SameSite=Lax" + secure;
-            }})();
-            </script>
-            """,
-            height=0,
-        )
-    except Exception:
-        pass
+
 
 
 def logo_samirarte_existe():
@@ -407,21 +349,6 @@ def restaurar_sesion_supabase():
         return False
 
     refresh_token = st.session_state.get("refresh_token") or _leer_cookie_refresh_token()
-
-    # En algunos navegadores el componente de cookies necesita una primera
-    # ejecución para hidratarse. Si no vemos cookie en la petición actual,
-    # montamos el gestor y hacemos un único rerun controlado antes de mostrar login.
-    if not refresh_token and stx is not None and not st.session_state.get("_auth_cookie_retry_done"):
-        st.session_state["_auth_cookie_retry_done"] = True
-        try:
-            obtener_cookie_manager()
-        except Exception:
-            pass
-        try:
-            st.rerun()
-        except Exception:
-            return False
-
     if not refresh_token:
         return False
 
@@ -438,7 +365,6 @@ def restaurar_sesion_supabase():
             return False
 
         _guardar_sesion_supabase(usuario, sesion)
-        st.session_state["_auth_cookie_retry_done"] = False
         asegurar_usuario_app_supabase()
         return True
     except Exception:
