@@ -1268,55 +1268,6 @@ FACTURAS_COLUMNAS_JERARQUIA = FACTURAS_COLUMNAS + [
     "presupuesto_id", "coste_total"
 ]
 
-
-def asegurar_columnas_dataframe(df, defaults):
-    """Añade columnas ausentes en memoria para evitar errores de selección."""
-    if df is None:
-        df = pd.DataFrame()
-    for col, default in defaults.items():
-        if col not in df.columns:
-            df[col] = default
-    return df
-
-
-def normalizar_documentos_facturacion_df(df, origen="facturas"):
-    """Compatibiliza la tabla real `facturas` con el código de documentos.
-
-    El esquema actual guarda presupuestos y facturas en `public.facturas`,
-    diferenciados por `tipo_documento`. No existen `presupuesto_id` ni
-    `coste_total` en esa tabla; se crean solo en memoria para que la UI
-    antigua no falle.
-    """
-    columnas_defaults = {col: None for col in FACTURAS_COLUMNAS}
-    columnas_defaults.update({
-        "presupuesto_id": None,
-        "coste_total": 0.0,
-        "_origen_almacen": origen,
-    })
-    df = asegurar_columnas_dataframe(df, columnas_defaults)
-    if not df.empty:
-        df["_origen_almacen"] = df["_origen_almacen"].fillna(origen)
-        df["presupuesto_id"] = df["presupuesto_id"].where(
-            df["presupuesto_id"].notna(),
-            df["id"],
-        )
-        df["coste_total"] = pd.to_numeric(df["coste_total"], errors="coerce").fillna(0.0)
-        df["total"] = pd.to_numeric(df["total"], errors="coerce").fillna(0.0)
-    return df
-
-
-def normalizar_documento_facturacion_dict(documento, origen="facturas"):
-    if not documento:
-        return documento
-    documento = dict(documento)
-    for col in FACTURAS_COLUMNAS:
-        documento.setdefault(col, None)
-    documento.setdefault("_origen_almacen", origen)
-    documento["presupuesto_id"] = documento.get("presupuesto_id") or documento.get("id")
-    documento["coste_total"] = numero_seguro(documento.get("coste_total", 0.0), 0.0)
-    documento["total"] = numero_seguro(documento.get("total", 0.0), 0.0)
-    return documento
-
 PRESUPUESTOS_COLUMNAS = [
     "id", "user_id", "cliente_id", "numero_presupuesto", "estado",
     "fecha_emision", "fecha_vencimiento", "concepto", "coste_total",
@@ -2755,33 +2706,87 @@ def guardar_relaciones_factura_supabase(factura_id, lineas):
 
 def cargar_facturas_supabase():
     if not supabase_disponible or supabase is None:
-        return False, "El inventario no está conectado correctamente.", pd.DataFrame(columns=FACTURAS_COLUMNAS_JERARQUIA)
+        return False, "El inventario no está conectado correctamente.", pd.DataFrame(columns=FACTURAS_COLUMNAS)
 
     user_id_actual = obtener_user_id_actual()
     if not user_id_actual:
-        return False, "Inicia sesión para guardar clientes en tu cuenta", pd.DataFrame(columns=FACTURAS_COLUMNAS_JERARQUIA)
+        return False, "Inicia sesión para guardar clientes en tu cuenta", pd.DataFrame(columns=FACTURAS_COLUMNAS)
 
-    columnas_salida = FACTURAS_COLUMNAS_JERARQUIA + ["_origen_almacen"]
     try:
-        respuesta = (
-            supabase
-            .table("facturas")
-            .select(",".join(FACTURAS_COLUMNAS))
-            .eq("user_id", user_id_actual)
-            .order("created_at", desc=True)
-            .limit(100)
-            .execute()
-        )
+        try:
+            respuesta = (
+                supabase
+                .table("facturas")
+                .select(",".join(FACTURAS_COLUMNAS_JERARQUIA))
+                .eq("user_id", user_id_actual)
+                .order("created_at", desc=True)
+                .limit(25)
+                .execute()
+            )
+        except Exception:
+            respuesta = (
+                supabase
+                .table("facturas")
+                .select(",".join(FACTURAS_COLUMNAS))
+                .eq("user_id", user_id_actual)
+                .order("created_at", desc=True)
+                .limit(25)
+                .execute()
+            )
         df = pd.DataFrame(respuesta.data or [])
-        df = normalizar_documentos_facturacion_df(df, origen="facturas")
+        if not df.empty:
+            df["_origen_almacen"] = "facturas"
+        for col in FACTURAS_COLUMNAS:
+            if col not in df.columns:
+                df[col] = None
+        columnas_salida = FACTURAS_COLUMNAS_JERARQUIA + ["_origen_almacen"]
+        if "_origen_almacen" not in df.columns:
+            df["_origen_almacen"] = None
+
+        try:
+            respuesta_presupuestos = (
+                supabase
+                .table("presupuestos")
+                .select(",".join(PRESUPUESTOS_COLUMNAS))
+                .eq("user_id", user_id_actual)
+                .order("created_at", desc=True)
+                .limit(25)
+                .execute()
+            )
+            presupuestos_df = pd.DataFrame(respuesta_presupuestos.data or [])
+            if not presupuestos_df.empty:
+                presupuestos_df = presupuestos_df.rename(columns={
+                    "numero_presupuesto": "numero_factura",
+                    "precio_total": "total",
+                })
+                presupuestos_df["tipo_documento"] = "presupuesto"
+                presupuestos_df["base_imponible"] = presupuestos_df["total"]
+                presupuestos_df["iva_pct"] = 0.0
+                presupuestos_df["iva_importe"] = 0.0
+                presupuestos_df["retencion_pct"] = 0.0
+                presupuestos_df["retencion_importe"] = 0.0
+                presupuestos_df["metodo_pago"] = None
+                presupuestos_df["estado_cobro"] = None
+                presupuestos_df["_origen_almacen"] = "presupuestos"
+                for col in columnas_salida:
+                    if col not in presupuestos_df.columns:
+                        presupuestos_df[col] = None
+                df = pd.concat(
+                    [df[columnas_salida], presupuestos_df[columnas_salida]],
+                    ignore_index=True,
+                )
+        except Exception:
+            pass
+
         if df.empty:
             return True, "", pd.DataFrame(columns=columnas_salida)
         df = df.sort_values("created_at", ascending=False, na_position="last")
         return True, "", df[columnas_salida].copy()
     except Exception as e:
         if error_tabla_facturacion_no_activada(e):
-            return False, MENSAJE_FACTURACION_NO_ACTIVADA, pd.DataFrame(columns=columnas_salida)
-        return False, f"Error al cargar documentos: {e}", pd.DataFrame(columns=columnas_salida)
+            return False, MENSAJE_FACTURACION_NO_ACTIVADA, pd.DataFrame(columns=FACTURAS_COLUMNAS)
+        return False, f"Error al cargar documentos: {e}", pd.DataFrame(columns=FACTURAS_COLUMNAS)
+
 
 def cargar_factura_detalle_supabase(factura_id):
     if not supabase_disponible or supabase is None:
@@ -2796,15 +2801,25 @@ def cargar_factura_detalle_supabase(factura_id):
         return False, "Inicia sesión para cargar documentos.", None, pd.DataFrame(columns=FACTURA_LINEAS_COLUMNAS)
 
     try:
-        respuesta_factura = (
-            supabase
-            .table("facturas")
-            .select(",".join(FACTURAS_COLUMNAS))
-            .eq("id", factura_id_limpio)
-            .limit(1)
-            .execute()
-        )
-        factura = normalizar_documento_facturacion_dict((respuesta_factura.data or [None])[0])
+        try:
+            respuesta_factura = (
+                supabase
+                .table("facturas")
+                .select(",".join(FACTURAS_COLUMNAS_JERARQUIA))
+                .eq("id", factura_id_limpio)
+                .limit(1)
+                .execute()
+            )
+        except Exception:
+            respuesta_factura = (
+                supabase
+                .table("facturas")
+                .select(",".join(FACTURAS_COLUMNAS))
+                .eq("id", factura_id_limpio)
+                .limit(1)
+                .execute()
+            )
+        factura = (respuesta_factura.data or [None])[0]
         if not factura:
             try:
                 respuesta_presupuesto = (
