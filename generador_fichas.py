@@ -4059,47 +4059,147 @@ def cargar_fichas_tecnicas_menu(menu_id):
     return cabecera, cargar_fichas_tecnicas_menu_desde_lineas(lineas)
 
 
+def _nombre_hoja_excel_seguro(nombre, usados=None):
+    """Devuelve un nombre de hoja Excel válido, único y legible."""
+    usados = usados if usados is not None else set()
+    base = str(nombre or "Receta").strip() or "Receta"
+    base = re.sub(r"[\\/*?:\[\]]+", " ", base)
+    base = re.sub(r"\s+", " ", base).strip() or "Receta"
+    base = base[:31]
+    candidato = base
+    contador = 2
+    while candidato in usados:
+        sufijo = f" {contador}"
+        candidato = f"{base[:31-len(sufijo)]}{sufijo}"
+        contador += 1
+    usados.add(candidato)
+    return candidato
+
+
+def _aplicar_estilo_caja(ws, rango, color="F3E8DD"):
+    fill = PatternFill("solid", fgColor=color)
+    for row in ws[rango]:
+        for cell in row:
+            cell.fill = fill
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+
 def generar_excel_fichas_tecnicas_menu(nombre_menu, fichas):
+    """
+    Genera un Excel de fichas técnicas con una hoja por receta.
+
+    Cada hoja contiene una tabla limpia de ingredientes ajustados y bloques
+    independientes para alérgenos, elaboración y observaciones. Se evitan
+    columnas repetitivas como menú, receta, elaboración u observaciones porque
+    la propia hoja ya identifica la receta.
+    """
     output = io.BytesIO()
     wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Fichas menú"
-    headers = [
-        "Menú", "Receta", "Raciones menú", "Código ingrediente", "Ingrediente",
-        "Cantidad ajustada", "Unidad", "Merma %", "Precio unidad", "Coste ajustado",
-        "Alérgenos ingrediente", "Elaboración", "Observaciones", "Alérgenos receta"
-    ]
-    ws.append(headers)
-    for cell in ws[1]:
-        cell.font = Font(bold=True)
-        cell.fill = PatternFill("solid", fgColor="F3E8DD")
-        cell.alignment = Alignment(horizontal="center")
-    for ficha in fichas or []:
-        ingredientes = ficha.get("ingredientes", []) or [{}]
-        for ing in ingredientes:
-            ws.append([
-                nombre_menu,
-                ficha.get("nombre_receta", ""),
-                ficha.get("raciones_menu", 0.0),
+    hoja_inicial = wb.active
+    wb.remove(hoja_inicial)
+
+    fichas = list(fichas or [])
+    if not fichas:
+        ws = wb.create_sheet("Sin fichas")
+        ws["A1"] = "No hay fichas técnicas disponibles."
+        wb.save(output)
+        output.seek(0)
+        return output.getvalue()
+
+    hojas_usadas = set()
+    for indice, ficha in enumerate(fichas, start=1):
+        nombre_receta = str(ficha.get("nombre_receta", "Receta") or "Receta").strip()
+        ws = wb.create_sheet(_nombre_hoja_excel_seguro(nombre_receta, hojas_usadas))
+
+        # Cabecera
+        ws.merge_cells("A1:G1")
+        ws["A1"] = f"Ficha técnica · {nombre_receta}"
+        ws["A1"].font = Font(bold=True, size=16)
+        ws["A1"].fill = PatternFill("solid", fgColor="6B3F2A")
+        ws["A1"].alignment = Alignment(horizontal="center")
+
+        ws["A3"] = "Raciones del menú"
+        ws["A3"].font = Font(bold=True)
+        ws["B3"] = numero_seguro(ficha.get("raciones_menu", 0.0), 0.0)
+        ws["D3"] = "Menú"
+        ws["D3"].font = Font(bold=True)
+        ws["E3"] = str(nombre_menu or "")
+
+        # Cuadro de alérgenos común a toda la receta
+        ws.merge_cells("A5:G6")
+        ws["A5"] = f"ALÉRGENOS DE LA RECETA: {ficha.get('alergenos_texto') or 'Sin alérgenos declarados'}"
+        ws["A5"].font = Font(bold=True)
+        ws["A5"].alignment = Alignment(wrap_text=True, vertical="center")
+        _aplicar_estilo_caja(ws, "A5:G6", color="FFF2CC")
+
+        # Tabla de ingredientes ajustados
+        fila_inicio = 8
+        headers = [
+            "Código", "Ingrediente", "Cantidad ajustada", "Unidad",
+            "Merma %", "Precio unidad", "Coste ajustado"
+        ]
+        for col_idx, header in enumerate(headers, start=1):
+            cell = ws.cell(row=fila_inicio, column=col_idx, value=header)
+            cell.font = Font(bold=True)
+            cell.fill = PatternFill("solid", fgColor="F3E8DD")
+            cell.alignment = Alignment(horizontal="center", wrap_text=True)
+
+        fila = fila_inicio + 1
+        for ing in ficha.get("ingredientes", []) or []:
+            valores = [
                 ing.get("codigo", ""),
                 ing.get("ingrediente", ""),
-                ing.get("cantidad_ajustada", 0.0),
+                numero_seguro(ing.get("cantidad_ajustada", 0.0), 0.0),
                 ing.get("unidad", ""),
-                ing.get("merma_pct", 0.0),
-                ing.get("precio_unidad", 0.0),
-                ing.get("coste_ajustado", 0.0),
-                ing.get("alergenos", ""),
-                ficha.get("elaboracion", ""),
-                ficha.get("observaciones", ""),
-                ficha.get("alergenos_texto", ""),
-            ])
-    for col_idx, column_cells in enumerate(ws.columns, start=1):
-        max_len = max(len(str(cell.value or "")) for cell in column_cells)
-        ws.column_dimensions[get_column_letter(col_idx)].width = min(max(max_len + 2, 12), 55)
+                numero_seguro(ing.get("merma_pct", 0.0), 0.0),
+                numero_seguro(ing.get("precio_unidad", 0.0), 0.0),
+                numero_seguro(ing.get("coste_ajustado", 0.0), 0.0),
+            ]
+            for col_idx, valor in enumerate(valores, start=1):
+                ws.cell(row=fila, column=col_idx, value=valor)
+            fila += 1
+
+        # Bloques de texto fuera de la tabla, no como columnas repetidas.
+        fila += 2
+        ws.merge_cells(start_row=fila, start_column=1, end_row=fila, end_column=7)
+        ws.cell(row=fila, column=1, value="PROCESO DE ELABORACIÓN").font = Font(bold=True)
+        ws.cell(row=fila, column=1).fill = PatternFill("solid", fgColor="EAD7C2")
+        fila += 1
+        ws.merge_cells(start_row=fila, start_column=1, end_row=fila + 3, end_column=7)
+        ws.cell(row=fila, column=1, value=ficha.get("elaboracion") or "Sin proceso de elaboración registrado.")
+        _aplicar_estilo_caja(ws, f"A{fila}:G{fila+3}", color="FAF7F2")
+        fila += 5
+
+        ws.merge_cells(start_row=fila, start_column=1, end_row=fila, end_column=7)
+        ws.cell(row=fila, column=1, value="OBSERVACIONES").font = Font(bold=True)
+        ws.cell(row=fila, column=1).fill = PatternFill("solid", fgColor="EAD7C2")
+        fila += 1
+        ws.merge_cells(start_row=fila, start_column=1, end_row=fila + 2, end_column=7)
+        ws.cell(row=fila, column=1, value=ficha.get("observaciones") or "Sin observaciones registradas.")
+        _aplicar_estilo_caja(ws, f"A{fila}:G{fila+2}", color="FAF7F2")
+
+        # Formatos y anchos
+        widths = {
+            "A": 14, "B": 38, "C": 18, "D": 12,
+            "E": 12, "F": 15, "G": 15,
+        }
+        for col, width in widths.items():
+            ws.column_dimensions[col].width = width
+        for row in ws.iter_rows():
+            for cell in row:
+                cell.alignment = Alignment(
+                    wrap_text=True,
+                    vertical="top",
+                    horizontal=cell.alignment.horizontal or "left",
+                )
+        for numeric_col in [3, 5, 6, 7]:
+            for row in range(fila_inicio + 1, fila):
+                ws.cell(row=row, column=numeric_col).number_format = "0.000" if numeric_col == 3 else "0.00"
+        ws.freeze_panes = "A9"
+
     wb.save(output)
     output.seek(0)
     return output.getvalue()
-
 
 def preparar_ingredientes_receta_para_sesion(ingredientes_df):
     """
@@ -7600,7 +7700,7 @@ with main_tab_menus:
                     st.dataframe(
                         ingredientes_ficha_df[[
                             "codigo", "ingrediente", "cantidad_ajustada", "unidad",
-                            "merma_pct", "precio_unidad", "coste_ajustado", "alergenos"
+                            "merma_pct", "precio_unidad", "coste_ajustado"
                         ]].rename(columns={
                             "codigo": "Código",
                             "ingrediente": "Ingrediente",
@@ -7609,7 +7709,6 @@ with main_tab_menus:
                             "merma_pct": "Merma %",
                             "precio_unidad": "Precio unidad",
                             "coste_ajustado": "Coste",
-                            "alergenos": "Alérgenos",
                         }),
                         hide_index=True,
                         use_container_width=True,
@@ -7618,8 +7717,8 @@ with main_tab_menus:
                 st.write(ficha.get("elaboracion") or "Sin proceso de elaboración registrado.")
                 st.markdown("**Observaciones**")
                 st.write(ficha.get("observaciones") or "Sin observaciones registradas.")
-                st.markdown("**Alérgenos**")
-                st.warning(ficha.get("alergenos_texto") or "Sin alérgenos declarados")
+                st.markdown("**Alérgenos de la receta**")
+                st.warning(ficha.get("alergenos_texto") or "Sin alérgenos declarados", icon="⚠️")
     else:
         st.info("Añade recetas al menú para generar sus fichas técnicas.")
 
