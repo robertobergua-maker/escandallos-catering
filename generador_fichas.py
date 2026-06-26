@@ -5662,7 +5662,7 @@ ADMIN_NUMERIC_COLUMNS = {
 
 ADMIN_BOOLEAN_COLUMNS = {"activa", "es_temporal", "activo"}
 ADMIN_READONLY_COLUMNS = {"id", "created_at", "updated_at"}
-ADMIN_DELETE_COLUMN = "__eliminar__"
+ADMIN_SELECT_COLUMN = "__seleccionar__"
 
 
 def columna_admin_es_id(columna):
@@ -6099,10 +6099,10 @@ def filtrar_tabla_admin(df, texto_busqueda):
         return df
     columnas_busqueda = [
         col for col in df.columns
-        if col != ADMIN_DELETE_COLUMN and not columna_admin_es_id(col)
+        if col != ADMIN_SELECT_COLUMN and not columna_admin_es_id(col)
     ]
     if not columnas_busqueda:
-        columnas_busqueda = [col for col in df.columns if col != ADMIN_DELETE_COLUMN]
+        columnas_busqueda = [col for col in df.columns if col != ADMIN_SELECT_COLUMN]
     serie = df[columnas_busqueda].fillna("").astype(str).agg(" ".join, axis=1)
     mascara = serie.apply(lambda valor: texto in normalizar_texto_busqueda(valor))
     return df.loc[mascara].copy()
@@ -6116,29 +6116,11 @@ def guardar_cambios_tabla_admin(nombre_tabla, df_original, editor_state, lookups
     anadidos = editor_state.get("added_rows", []) if editor_state else []
     borrados = editor_state.get("deleted_rows", []) if editor_state else []
     cambios = 0
-    filas_eliminadas_por_checkbox = set()
-
-    # Eliminación explícita: se muestra una columna "Eliminar" porque Streamlit
-    # no siempre hace evidente el borrado nativo de filas en data_editor.
-    for row_idx_str, edits in editados.items():
-        if not isinstance(edits, dict) or not bool(edits.get(ADMIN_DELETE_COLUMN)):
-            continue
-        row_idx = int(row_idx_str)
-        if row_idx < 0 or row_idx >= len(df_original):
-            continue
-        fila_original = df_original.iloc[row_idx].to_dict()
-        pk_valor = normalizar_valor_admin(fila_original.get(pk), pk)
-        if pk_valor:
-            supabase.table(nombre_tabla).delete().eq(pk, pk_valor).execute()
-            cambios += 1
-            filas_eliminadas_por_checkbox.add(row_idx)
 
     for row_idx_str, edits in editados.items():
         row_idx = int(row_idx_str)
-        if row_idx in filas_eliminadas_por_checkbox:
-            continue
         edits = dict(edits or {})
-        edits.pop(ADMIN_DELETE_COLUMN, None)
+        edits.pop(ADMIN_SELECT_COLUMN, None)
         if not edits:
             continue
         fila_original = df_original.iloc[row_idx].to_dict()
@@ -6150,14 +6132,14 @@ def guardar_cambios_tabla_admin(nombre_tabla, df_original, editor_state, lookups
         fila_actualizada = aplicar_campos_intuitivos_admin(nombre_tabla, fila_actualizada, lookups)
         datos_actualizados = fila_admin_para_guardar(fila_actualizada, config, incluir_pk=False)
         datos_actualizados.pop(pk, None)
-        datos_actualizados.pop(ADMIN_DELETE_COLUMN, None)
+        datos_actualizados.pop(ADMIN_SELECT_COLUMN, None)
         if datos_actualizados:
             supabase.table(nombre_tabla).update(datos_actualizados).eq(pk, pk_valor).execute()
             cambios += 1
 
     for nueva_fila in anadidos:
         nueva_fila = dict(nueva_fila or {})
-        nueva_fila.pop(ADMIN_DELETE_COLUMN, None)
+        nueva_fila.pop(ADMIN_SELECT_COLUMN, None)
         nueva_fila = aplicar_campos_intuitivos_admin(nombre_tabla, nueva_fila, lookups)
         datos_nuevos = fila_admin_para_guardar(nueva_fila, config, incluir_pk=not config.get("generated_pk"))
         datos_nuevos = {k: v for k, v in datos_nuevos.items() if v is not None}
@@ -6218,21 +6200,21 @@ def render_pagina_administracion():
             )
             tabla_editor_df, admin_lookups = preparar_tabla_admin_intuitiva(tabla_seleccionada, tabla_df)
             if not config_tabla.get("fixed_rows"):
-                tabla_editor_df[ADMIN_DELETE_COLUMN] = False
+                tabla_editor_df[ADMIN_SELECT_COLUMN] = False
             tabla_editor_df = filtrar_tabla_admin(tabla_editor_df, texto_busqueda_admin)
             if texto_busqueda_admin:
                 st.caption(f"{len(tabla_editor_df)} registros encontrados con el filtro actual.")
 
             columnas_visibles = columnas_editor_admin(tabla_seleccionada, config_tabla)
             if not config_tabla.get("fixed_rows"):
-                columnas_visibles = [ADMIN_DELETE_COLUMN] + columnas_visibles
+                columnas_visibles = [ADMIN_SELECT_COLUMN] + columnas_visibles
             column_config = {}
             for columna in tabla_editor_df.columns:
                 etiqueta = ADMIN_ETIQUETAS_COLUMNAS.get(columna, columna)
-                if columna == ADMIN_DELETE_COLUMN:
+                if columna == ADMIN_SELECT_COLUMN:
                     column_config[columna] = st.column_config.CheckboxColumn(
-                        "Eliminar",
-                        help="Marca esta casilla y pulsa Guardar cambios para borrar el registro.",
+                        "Seleccionar",
+                        help="Marca una o varias filas para eliminarlas con el botón inferior.",
                         width="small",
                     )
                 elif columna not in columnas_visibles:
@@ -6250,14 +6232,14 @@ def render_pagina_administracion():
 
             columnas_bloqueadas = [
                 col for col in tabla_editor_df.columns
-                if col != ADMIN_DELETE_COLUMN and (
+                if col != ADMIN_SELECT_COLUMN and (
                     col in ADMIN_READONLY_COLUMNS
                     or columna_admin_es_id(col)
                     or (col == config_tabla["pk"] and config_tabla.get("fixed_rows"))
                 )
             ]
             editor_key = f"admin_editor_{tabla_seleccionada}_{normalizar_texto_busqueda(texto_busqueda_admin)[:20]}"
-            st.data_editor(
+            tabla_editada_admin = st.data_editor(
                 tabla_editor_df,
                 num_rows="fixed" if config_tabla.get("fixed_rows") else "dynamic",
                 use_container_width=True,
@@ -6268,7 +6250,7 @@ def render_pagina_administracion():
                 key=editor_key
             )
 
-            acciones_col1, acciones_col2 = st.columns([1, 3])
+            acciones_col1, acciones_col2, acciones_col3 = st.columns([1, 1, 3])
             with acciones_col1:
                 if st.button("Guardar cambios", type="primary", use_container_width=True, key=f"guardar_{tabla_seleccionada}"):
                     editor_state = st.session_state.get(editor_key)
@@ -6285,7 +6267,37 @@ def render_pagina_administracion():
                     except Exception as e:
                         st.error(f"No se pudieron guardar los cambios en {tabla_seleccionada}: {e}")
             with acciones_col2:
-                st.caption("Puedes añadir, editar y eliminar registros. En tablas relacionadas se muestran nombres legibles; los IDs técnicos quedan ocultos.")
+                seleccionados_admin = pd.DataFrame(tabla_editada_admin)
+                if ADMIN_SELECT_COLUMN in seleccionados_admin.columns:
+                    seleccionados_admin = seleccionados_admin[seleccionados_admin[ADMIN_SELECT_COLUMN].fillna(False).astype(bool)]
+                else:
+                    seleccionados_admin = pd.DataFrame()
+                boton_eliminar_deshabilitado = config_tabla.get("fixed_rows") or seleccionados_admin.empty
+                if st.button(
+                    f"Eliminar seleccionados ({len(seleccionados_admin)})",
+                    type="secondary",
+                    use_container_width=True,
+                    disabled=boton_eliminar_deshabilitado,
+                    key=f"eliminar_seleccionados_{tabla_seleccionada}",
+                ):
+                    try:
+                        eliminados = 0
+                        pk = config_tabla["pk"]
+                        for _, fila_sel in seleccionados_admin.iterrows():
+                            pk_valor = normalizar_valor_admin(fila_sel.get(pk), pk)
+                            if pk_valor:
+                                supabase.table(tabla_seleccionada).delete().eq(pk, pk_valor).execute()
+                                eliminados += 1
+                        if tabla_seleccionada in {"inventario", "alergenos", "ingrediente_alergenos", "receta_ingredientes", "menu_recetas"}:
+                            st.session_state["db_trigger"] += 1
+                        if tabla_seleccionada in {"alergenos", "ingrediente_alergenos"}:
+                            limpiar_cache_alergenos()
+                        st.success(f"Registros eliminados: {eliminados}")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"No se pudieron eliminar los registros seleccionados: {e}")
+            with acciones_col3:
+                st.caption("Marca una fila para seleccionarla; edita directamente las celdas visibles; usa Guardar cambios para conservar ediciones o Eliminar seleccionados para borrar.")
 
     with admin_tab_estado:
         st.subheader("Configuración y estado")
