@@ -2730,42 +2730,39 @@ def obtener_menu_id_desde_lineas_factura(lineas):
 
 
 def extraer_lineas_menu_documento(lineas):
-    lineas_menu = []
+    """Extrae un único menú por documento, aunque las líneas estén desglosadas por recetas."""
+    menus = {}
     for indice, linea in enumerate(lineas or [], start=1):
-        menu_id = str(
-            linea.get("menu_origen_id", linea.get("origen_id", "")) or ""
-        ).strip()
+        menu_id = str(linea.get("menu_origen_id", linea.get("origen_id", "")) or "").strip()
         if str(linea.get("origen_tipo", "") or "").strip() != "menu" or not menu_id:
             continue
-        cantidad_menu = numero_seguro(
-            linea.get("cantidad_menu", linea.get("cantidad", 0.0)),
-            0.0,
-        )
+        if menu_id in menus:
+            continue
         coste_total_menu = numero_seguro(linea.get("coste_total_menu", 0.0), 0.0)
-        if cantidad_menu <= 0:
-            raise ValueError(f"La cantidad del menú {indice} debe ser mayor que 0.")
         if coste_total_menu < 0:
             raise ValueError(f"El coste del menú {indice} no puede ser negativo.")
         precio_total_menu = linea.get("precio_total_menu")
         if precio_total_menu is None:
-            precio_total_menu = linea.get("precio_unitario")
+            precio_total_menu = sum(
+                numero_seguro(otra.get("base_linea", 0.0), 0.0)
+                for otra in (lineas or [])
+                if str(otra.get("menu_origen_id", otra.get("origen_id", "")) or "").strip() == menu_id
+            )
         precio_total_menu = numero_seguro(precio_total_menu, 0.0)
         if precio_total_menu < 0:
             raise ValueError(f"El precio del menú {indice} no puede ser negativo.")
-        lineas_menu.append({
+        menus[menu_id] = {
             "menu_id": menu_id,
-            "menu_nombre_snapshot": str(
-                linea.get("menu_nombre_snapshot", linea.get("descripcion", "")) or ""
-            ).strip(),
-            "cantidad_menu": cantidad_menu,
+            "menu_nombre_snapshot": str(linea.get("menu_nombre_snapshot", "") or "").strip(),
+            "cantidad_menu": 1.0,
             "coste_total_menu": coste_total_menu,
-            "coste_linea_menu_documento": coste_total_menu * cantidad_menu,
+            "coste_linea_menu_documento": coste_total_menu,
             "precio_total_menu": precio_total_menu,
-            "precio_linea_menu_documento": precio_total_menu * cantidad_menu,
+            "precio_linea_menu_documento": precio_total_menu,
             "observaciones": str(linea.get("observaciones", "") or "").strip() or None,
-            "orden": indice,
-        })
-    return lineas_menu
+            "orden": len(menus) + 1,
+        }
+    return list(menus.values())
 
 
 def validar_documento_con_menus(factura, lineas):
@@ -2820,6 +2817,42 @@ def calcular_totales_factura(lineas, iva_pct=21, retencion_pct=0):
 def formatear_importe_euros(valor):
     importe = numero_seguro(valor, 0.0)
     return f"{importe:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def iva_documento_actual():
+    """IVA aplicable a presupuestos/facturas desde Parámetros avanzados."""
+    return numero_seguro(st.session_state.get("iva_pct", 21.0), 21.0)
+
+
+def obtener_datos_fiscales_emisor():
+    """Datos mínimos del emisor para documentos con validez fiscal."""
+    return {
+        "nombre": str(st.secrets.get("EMISOR_NOMBRE_FISCAL", "Samirarte") or "Samirarte").strip(),
+        "nif": str(st.secrets.get("EMISOR_NIF", "") or "").strip(),
+        "direccion": str(st.secrets.get("EMISOR_DIRECCION", "") or "").strip(),
+        "cp_ciudad": str(st.secrets.get("EMISOR_CP_CIUDAD", "") or "").strip(),
+        "provincia": str(st.secrets.get("EMISOR_PROVINCIA", "") or "").strip(),
+        "pais": str(st.secrets.get("EMISOR_PAIS", "España") or "España").strip(),
+    }
+
+
+def validar_factura_normativa_basica(factura, cliente, lineas):
+    """Validaciones mínimas para emitir factura ordinaria en España."""
+    tipo = str(factura.get("tipo_documento") or "").strip().lower()
+    if tipo != "factura":
+        return True, ""
+    emisor = obtener_datos_fiscales_emisor()
+    if not emisor.get("nif"):
+        return False, "Configura EMISOR_NIF en los secrets antes de emitir facturas."
+    if not emisor.get("direccion"):
+        return False, "Configura EMISOR_DIRECCION en los secrets antes de emitir facturas."
+    if not str(cliente.get("nif_cif") or "").strip():
+        return False, "El cliente debe tener NIF/CIF para emitir factura."
+    if not re.match(r"^FAC-\d{4}-\d{4}-\d{4,}$", str(factura.get("numero_factura") or "")):
+        return False, "La factura debe usar numeración FAC-AAAA-MMDD-000X."
+    if not lineas:
+        return False, "La factura debe incluir el desglose de recetas del menú."
+    return True, ""
 
 
 def generar_pdf_factura(factura, lineas, cliente):
@@ -2877,9 +2910,12 @@ def generar_pdf_factura(factura, lineas, cliente):
         elementos = []
         if logo_samirarte_existe():
             elementos.extend([Image(str(LOGO_SAMIRARTE_PATH), width=120, height=60), Spacer(1, 8)])
+        emisor = obtener_datos_fiscales_emisor()
         elementos.extend([
-            Paragraph("Samirarte", estilos["Title"]),
+            Paragraph(html.escape(emisor.get("nombre") or "Samirarte"), estilos["Title"]),
             Paragraph(f"{tipo_visible} {html.escape(numero)}", estilos["Heading2"]),
+            Paragraph(f"NIF/CIF emisor: {html.escape(emisor.get('nif') or '')}", estilos["Normal"]),
+            Paragraph(f"Domicilio fiscal: {html.escape(emisor.get('direccion') or '')}", estilos["Normal"]),
             Paragraph(f"Fecha emisión: {factura.get('fecha_emision') or ''}", estilos["Normal"]),
             Paragraph(f"Fecha vencimiento: {factura.get('fecha_vencimiento') or ''}", estilos["Normal"]),
             Spacer(1, 12),
@@ -2955,6 +2991,7 @@ def generar_pdf_factura(factura, lineas, cliente):
         for linea in lineas_validas
     )
     cliente_html = "".join(f"<div>{escapar(dato)}</div>" for dato in datos_cliente)
+    emisor = obtener_datos_fiscales_emisor()
     logo_b64 = logo_samirarte_base64()
     logo_html = ""
     if logo_b64:
@@ -3001,7 +3038,9 @@ def generar_pdf_factura(factura, lineas, cliente):
 <body>
   <header>
     {logo_html}
-    <h1>Samirarte</h1>
+    <h1>{escapar(emisor.get('nombre') or 'Samirarte')}</h1>
+    <div>NIF/CIF: {escapar(emisor.get('nif'))}</div>
+    <div>Domicilio fiscal: {escapar(emisor.get('direccion'))} {escapar(emisor.get('cp_ciudad'))}</div>
     <h2>{escapar(tipo_visible)} {escapar(numero)}</h2>
   </header>
   <section class="grid">
@@ -3057,36 +3096,33 @@ def generar_numero_factura(tipo_documento):
         "factura": "FAC",
         "factura_rectificativa": "REC"
     }
-    prefijo = prefijos.get(str(tipo_documento or "").strip(), "DOC")
-    anio = pd.Timestamp.today().year
+    tipo_limpio = str(tipo_documento or "").strip().lower()
+    prefijo = prefijos.get(tipo_limpio, "DOC")
+    hoy = pd.Timestamp.today()
+    fecha_codigo = hoy.strftime("%Y-%m%d")
+    patron = f"{prefijo}-{fecha_codigo}-%"
     if not supabase_disponible or supabase is None or not obtener_user_id_actual():
-        return f"{prefijo}-{anio}-0001"
+        return f"{prefijo}-{fecha_codigo}-0001"
 
     try:
-        (
-            supabase
-            .table("factura_lineas")
-            .select("id")
-            .limit(1)
-            .execute()
-        )
         respuesta = (
             supabase
             .table("facturas")
             .select("numero_factura")
             .eq("user_id", obtener_user_id_actual())
-            .ilike("numero_factura", f"{prefijo}-{anio}-%")
+            .ilike("numero_factura", patron)
             .execute()
         )
         ultimo = 0
+        regex = re.compile(rf"^{re.escape(prefijo)}-{re.escape(fecha_codigo)}-(\d{{4,}})$")
         for fila in respuesta.data or []:
-            numero = str(fila.get("numero_factura", "") or "")
-            coincidencia = re.search(r"(\d+)$", numero)
+            numero = str(fila.get("numero_factura", "") or "").strip()
+            coincidencia = regex.match(numero)
             if coincidencia:
                 ultimo = max(ultimo, int(coincidencia.group(1)))
-        return f"{prefijo}-{anio}-{ultimo + 1:04d}"
+        return f"{prefijo}-{fecha_codigo}-{ultimo + 1:04d}"
     except Exception:
-        return f"{prefijo}-{anio}-0001"
+        return f"{prefijo}-{fecha_codigo}-0001"
 
 
 def preparar_relaciones_menu_documento(lineas, tipo_documento, documento_id):
@@ -3603,8 +3639,9 @@ def calcular_totales_menu(lineas_menu):
 def crear_lineas_factura_desde_menu(
     cabecera_menu,
     lineas_menu_df,
-    desglosar=False,
+    desglosar=True,
     cantidad_menu=1.0,
+    iva_pct=None,
 ):
     """
     Convierte un menu guardado en lineas editables de documento de facturacion.
@@ -3623,6 +3660,7 @@ def crear_lineas_factura_desde_menu(
         totales_menu["coste_total"],
     )
     aviso_precio = False
+    iva_aplicable = iva_documento_actual() if iva_pct is None else numero_seguro(iva_pct, iva_documento_actual())
 
     if not desglosar:
         precio_total = cabecera_menu.get("precio_total", None)
@@ -3643,7 +3681,7 @@ def crear_lineas_factura_desde_menu(
                 "unidad": "menú",
                 "precio_unitario": precio_unitario,
                 "descuento_pct": 0.0,
-                "iva_pct": 21.0,
+                "iva_pct": iva_aplicable,
                 "origen_tipo": "menu",
                 "origen_id": menu_id,
                 "menu_origen_id": menu_id,
@@ -3677,7 +3715,13 @@ def crear_lineas_factura_desde_menu(
             "origen_id": menu_id,
             "origen_receta_tipo": "menu_receta",
             "origen_receta_id": linea.get("receta_id"),
-            "menu_origen_id": menu_id
+            "menu_origen_id": menu_id,
+            "menu_nombre_snapshot": nombre_menu,
+            "cantidad_menu": 1.0,
+            "coste_total_menu": coste_total_menu,
+            "coste_linea_menu_documento": coste_total_menu,
+            "precio_total_menu": numero_seguro(cabecera_menu.get("precio_total", totales_menu.get("precio_total", 0.0)), 0.0),
+            "precio_linea_menu_documento": numero_seguro(cabecera_menu.get("precio_total", totales_menu.get("precio_total", 0.0)), 0.0),
         }))
 
     return lineas_factura, aviso_precio
@@ -4687,7 +4731,7 @@ def normalizar_raciones_desde_campo_receta():
     """
     raciones = numero_seguro(st.session_state.get("input_raciones_base_receta", 1.0), 1.0)
     if raciones <= 0:
-        st.session_state["input_raciones_base_receta"] = 1.0
+        st.session_state["input_raciones_base_receta_pendiente"] = 1.0
         return
 
     if abs(raciones - 1.0) > 1e-9 and st.session_state.get("ingredientes"):
@@ -4709,7 +4753,9 @@ def normalizar_raciones_desde_campo_receta():
     st.session_state["receta_raciones_deseadas"] = 1.0
     st.session_state["raciones_base_aplicadas"] = 1.0
     st.session_state["raciones_deseadas_aplicadas"] = 1.0
-    st.session_state["input_raciones_base_receta"] = 1.0
+    # No se puede modificar directamente el estado de un widget ya renderizado.
+    # Dejamos el nuevo valor pendiente para aplicarlo al inicio del siguiente rerun.
+    st.session_state["input_raciones_base_receta_pendiente"] = 1.0
 
 
 def sincronizar_inputs_raciones():
@@ -6442,7 +6488,7 @@ with main_tab_recetas:
                     st.rerun()
             with cancelar_col:
                 if st.button("Cancelar", use_container_width=True, key="cancelar_ajuste_raciones_base"):
-                    st.session_state["input_raciones_base_receta"] = float(raciones_actuales_guardadas)
+                    st.session_state["input_raciones_base_receta_pendiente"] = float(raciones_actuales_guardadas)
                     st.rerun()
         elif cambio_raciones_pendiente:
             st.session_state["receta_raciones_base"] = raciones_base_input
@@ -7087,7 +7133,7 @@ with main_tab_facturas:
 
                 if st.session_state.get("factura_cliente_id") not in opciones_clientes_factura:
                     st.session_state["factura_cliente_id"] = opciones_clientes_factura[0]
-                opciones_tipo_documento = ["presupuesto", "factura", "factura_rectificativa"]
+                opciones_tipo_documento = ["presupuesto", "factura"]
                 opciones_estado_documento = ["borrador", "emitida", "cobrada", "anulada"]
                 opciones_estado_cobro = ["pendiente", "parcial", "cobrado"]
                 if st.session_state.get("factura_tipo_documento") not in opciones_tipo_documento:
@@ -7118,10 +7164,13 @@ with main_tab_facturas:
                     )
                     numero_sugerido = generar_numero_factura(tipo_documento)
                     numero_factura = st.text_input(
-                        "Número de factura/documento",
+                        "Número de documento",
                         value=numero_sugerido,
-                        key=f"factura_numero_actual_{tipo_documento}"
+                        key=f"factura_numero_actual_{tipo_documento}",
+                        disabled=True,
+                        help="Numeración automática: PRE/FAC-AAAA-MMDD-000X"
                     )
+                    st.caption("Numeración automática conforme a serie y fecha de emisión.")
                 with doc_col2:
                     fecha_emision = st.date_input("Fecha de emisión", key="factura_fecha_emision")
                     fecha_vencimiento = st.date_input("Fecha de vencimiento", key="factura_fecha_vencimiento")
@@ -7173,7 +7222,7 @@ with main_tab_facturas:
                             if row.get("id")
                         }
                         opciones_menus_factura = list(menus_factura_por_id.keys())
-                        menu_doc_col1, menu_doc_col2, menu_doc_col3 = st.columns([2, 1, 1])
+                        menu_doc_col1, menu_doc_col2 = st.columns([3, 1])
                         with menu_doc_col1:
                             menu_factura_id = st.selectbox(
                                 "Menú guardado",
@@ -7182,21 +7231,14 @@ with main_tab_facturas:
                                 key="selector_menu_facturacion"
                             )
                         with menu_doc_col2:
-                            cantidad_menu_documento = st.number_input(
-                                "Cantidad del menú",
-                                min_value=0.001,
-                                value=1.0,
-                                step=1.0,
-                                key="factura_cantidad_menu",
-                            )
-                        with menu_doc_col3:
                             anadir_menu_documento = st.button(
-                                "Añadir menú",
+                                "Usar este menú",
                                 type="primary",
                                 use_container_width=True,
                             )
 
-                        st.caption("Puedes añadir varios menús; cada uno conserva cantidad, coste y precio.")
+                        st.caption("Cada presupuesto o factura corresponde siempre a un único menú. El documento se desglosa por recetas y raciones.")
+                        cantidad_menu_documento = 1.0
 
                         if anadir_menu_documento:
                             if not factura_cliente_id:
@@ -7214,34 +7256,28 @@ with main_tab_facturas:
                                 lineas_desde_menu, aviso_precio_menu = crear_lineas_factura_desde_menu(
                                     cabecera_menu,
                                     lineas_menu_df,
-                                    desglosar=False,
-                                    cantidad_menu=cantidad_menu_documento,
+                                    desglosar=True,
+                                    cantidad_menu=1.0,
+                                    iva_pct=iva_documento_actual(),
                                 )
                                 if not lineas_desde_menu:
                                     st.warning("No se pudieron crear líneas desde el menú seleccionado.")
                                 else:
-                                    lineas_existentes = [
-                                        linea
-                                        for linea in st.session_state["factura_lineas_actual"]
-                                        if str(linea.get("descripcion", "") or "").strip()
-                                    ]
-                                    st.session_state["factura_lineas_actual"] = (
-                                        lineas_existentes + lineas_desde_menu
-                                    )
+                                    st.session_state["factura_lineas_actual"] = lineas_desde_menu
                                     st.session_state["factura_menu_feedback"] = (
-                                        "Menú añadido con sus importes congelados.",
+                                        "Menú aplicado y desglosado por recetas.",
                                         aviso_precio_menu
                                     )
                                     st.rerun()
 
                 lineas_accion_col1, lineas_accion_col2 = st.columns(2)
                 with lineas_accion_col1:
-                    if st.button("Quitar último menú", use_container_width=True):
+                    if st.button("Quitar menú", use_container_width=True):
                         if st.session_state["factura_lineas_actual"]:
-                            st.session_state["factura_lineas_actual"].pop()
+                            st.session_state["factura_lineas_actual"] = []
                             st.rerun()
                         else:
-                            st.info("No hay menús para quitar.")
+                            st.info("No hay menú para quitar.")
                 with lineas_accion_col2:
                     if st.button("Limpiar documento", use_container_width=True):
                         st.session_state["factura_lineas_actual"] = []
@@ -7251,7 +7287,6 @@ with main_tab_facturas:
 
                 columnas_editor_factura = [
                     "descripcion", "cantidad", "unidad", "precio_unitario",
-                    "coste_total_menu", "coste_linea_menu_documento",
                     "base_linea", "iva_linea", "total_linea"
                 ]
                 lineas_df = pd.DataFrame([
@@ -7269,18 +7304,15 @@ with main_tab_facturas:
                     hide_index=True,
                     column_config={
                         "descripcion": st.column_config.TextColumn("Descripción", required=True, width="large"),
-                        "cantidad": st.column_config.NumberColumn("Cantidad menú", min_value=0.001, step=1.0, format="%.3f"),
+                        "cantidad": st.column_config.NumberColumn("Raciones", min_value=0.001, step=1.0, format="%.3f"),
                         "unidad": st.column_config.TextColumn("Unidad", width="small"),
                         "precio_unitario": st.column_config.NumberColumn("Precio unitario", min_value=0.0, step=1.0, format="%.4f €"),
-                        "coste_total_menu": st.column_config.NumberColumn("Coste menú", format="%.2f €"),
-                        "coste_linea_menu_documento": st.column_config.NumberColumn("Coste línea", format="%.2f €"),
                         "base_linea": st.column_config.NumberColumn("Base línea", format="%.2f €"),
                         "iva_linea": st.column_config.NumberColumn("IVA línea", format="%.2f €"),
                         "total_linea": st.column_config.NumberColumn("Total línea", format="%.2f €")
                     },
                     disabled=[
-                        "descripcion", "unidad", "coste_total_menu",
-                        "coste_linea_menu_documento", "base_linea",
+                        "descripcion", "unidad", "base_linea",
                         "iva_linea", "total_linea",
                     ],
                     key="editor_factura_lineas"
@@ -7322,8 +7354,14 @@ with main_tab_facturas:
                     st.session_state["factura_lineas_actual"] = lineas_actualizadas
                     st.rerun()
 
+                iva_aplicable_documento = iva_documento_actual()
+                st.session_state["factura_lineas_actual"] = [
+                    {**dict(linea), "iva_pct": iva_aplicable_documento}
+                    for linea in st.session_state["factura_lineas_actual"]
+                ]
                 totales_factura = calcular_totales_factura(
                     st.session_state["factura_lineas_actual"],
+                    iva_pct=iva_aplicable_documento,
                     retencion_pct=retencion_pct
                 )
                 lineas_menu_documento = extraer_lineas_menu_documento(
@@ -7363,7 +7401,7 @@ with main_tab_facturas:
                     "fecha_emision": fecha_emision.isoformat() if fecha_emision else None,
                     "fecha_vencimiento": fecha_vencimiento.isoformat() if fecha_vencimiento else None,
                     "concepto": str(concepto or "").strip() or None,
-                    "iva_pct": 21.0,
+                    "iva_pct": iva_documento_actual(),
                     "retencion_pct": float(retencion_pct),
                     "metodo_pago": str(metodo_pago or "").strip() or None,
                     "estado_cobro": estado_cobro,
@@ -7411,6 +7449,14 @@ with main_tab_facturas:
                     )
 
                 if guardar_documento:
+                    ok_normativa, mensaje_normativa = validar_factura_normativa_basica(
+                        factura_actual,
+                        cliente_actual_factura,
+                        lineas_validas_descarga,
+                    )
+                    if not ok_normativa:
+                        st.error(mensaje_normativa)
+                        st.stop()
                     ok_guardar_doc, mensaje_guardar_doc, factura_guardada = guardar_factura_supabase(
                         factura_actual,
                         st.session_state["factura_lineas_actual"]
