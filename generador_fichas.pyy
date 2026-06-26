@@ -1060,242 +1060,6 @@ def codigo_ingrediente_valido(codigo):
     return codigo and codigo not in ["S/C", "SC", "SIN CODIGO", "SIN CÓDIGO"]
 
 
-@st.cache_data(ttl=600)
-def cargar_alergenos_supabase():
-    """Carga el catálogo normalizado de alérgenos activos."""
-    columnas = ALERGENOS_COLUMNAS
-    if not supabase_disponible or supabase is None:
-        return pd.DataFrame(columns=columnas)
-    try:
-        respuesta = (
-            supabase
-            .table("alergenos")
-            .select(",".join(columnas))
-            .eq("activo", True)
-            .order("nombre")
-            .execute()
-        )
-        df = pd.DataFrame(respuesta.data or [])
-        if df.empty:
-            return pd.DataFrame(columns=columnas)
-        for col in columnas:
-            if col not in df.columns:
-                df[col] = None
-        df["id"] = df["id"].fillna("").astype(str)
-        df["codigo"] = df["codigo"].fillna("").astype(str).str.strip().str.upper()
-        df["nombre"] = df["nombre"].fillna("").astype(str).str.strip()
-        return df[columnas].copy()
-    except Exception:
-        return pd.DataFrame(columns=columnas)
-
-
-@st.cache_data(ttl=600)
-def cargar_ingrediente_alergenos_supabase(trigger=0):
-    """Carga relaciones ingrediente-alérgeno y las enriquece con nombre/código."""
-    columnas = ["codigo_ingrediente", "alergeno_id", "codigo", "nombre"]
-    if not supabase_disponible or supabase is None:
-        return pd.DataFrame(columns=columnas)
-    try:
-        respuesta = (
-            supabase
-            .table("ingrediente_alergenos")
-            .select("codigo_ingrediente,alergeno_id")
-            .execute()
-        )
-        relaciones = pd.DataFrame(respuesta.data or [])
-        if relaciones.empty:
-            return pd.DataFrame(columns=columnas)
-        for col in ["codigo_ingrediente", "alergeno_id"]:
-            if col not in relaciones.columns:
-                relaciones[col] = ""
-        relaciones["codigo_ingrediente"] = relaciones["codigo_ingrediente"].fillna("").astype(str).str.strip().str.upper()
-        relaciones["alergeno_id"] = relaciones["alergeno_id"].fillna("").astype(str)
-
-        catalogo = cargar_alergenos_supabase()
-        if catalogo.empty:
-            relaciones["codigo"] = ""
-            relaciones["nombre"] = ""
-            return relaciones[columnas].copy()
-        catalogo_min = catalogo[["id", "codigo", "nombre"]].rename(columns={"id": "alergeno_id"})
-        df = relaciones.merge(catalogo_min, on="alergeno_id", how="left")
-        for col in columnas:
-            if col not in df.columns:
-                df[col] = ""
-        return df[columnas].copy()
-    except Exception:
-        return pd.DataFrame(columns=columnas)
-
-
-def limpiar_cache_alergenos():
-    for funcion in (cargar_alergenos_supabase, cargar_ingrediente_alergenos_supabase):
-        try:
-            funcion.clear()
-        except Exception:
-            pass
-
-
-def _alergeno_item_desde_fila(fila):
-    return {
-        "id": str(fila.get("alergeno_id", fila.get("id", "")) or ""),
-        "codigo": str(fila.get("codigo", "") or "").strip().upper(),
-        "nombre": str(fila.get("nombre", "") or "").strip(),
-    }
-
-
-def obtener_mapa_alergenos_ingredientes(codigos_ingrediente=None):
-    """Devuelve {CODIGO_INGREDIENTE: [alérgenos...]} para los códigos pedidos."""
-    df = cargar_ingrediente_alergenos_supabase(st.session_state.get("db_trigger", 0))
-    mapa = {}
-    if df.empty:
-        return mapa
-    codigos_filtrar = None
-    if codigos_ingrediente is not None:
-        codigos_filtrar = {str(c or "").strip().upper() for c in codigos_ingrediente if str(c or "").strip()}
-    for _, fila in df.iterrows():
-        codigo_ing = str(fila.get("codigo_ingrediente", "") or "").strip().upper()
-        if not codigo_ing or (codigos_filtrar is not None and codigo_ing not in codigos_filtrar):
-            continue
-        item = _alergeno_item_desde_fila(fila)
-        if not item["id"] and not item["codigo"] and not item["nombre"]:
-            continue
-        mapa.setdefault(codigo_ing, [])
-        if item not in mapa[codigo_ing]:
-            mapa[codigo_ing].append(item)
-    return mapa
-
-
-def cargar_alergenos_ingrediente(codigo_ingrediente):
-    codigo = str(codigo_ingrediente or "").strip().upper()
-    if not codigo:
-        return []
-    return obtener_mapa_alergenos_ingredientes([codigo]).get(codigo, [])
-
-
-def formatear_alergenos(alergenos):
-    if alergenos is None:
-        return "Sin alérgenos declarados"
-    nombres = []
-    for item in alergenos:
-        if isinstance(item, dict):
-            nombre = str(item.get("nombre") or item.get("codigo") or "").strip()
-        else:
-            nombre = str(item or "").strip()
-        if nombre and nombre not in nombres:
-            nombres.append(nombre)
-    return ", ".join(nombres) if nombres else "Sin alérgenos declarados"
-
-
-def texto_alergenos_ingrediente(ingrediente):
-    return formatear_alergenos((ingrediente or {}).get("alergenos", []))
-
-
-def alergeno_ids_desde_nombres(nombres):
-    nombres_set = {str(n or "").strip() for n in nombres or [] if str(n or "").strip()}
-    if not nombres_set:
-        return []
-    catalogo = cargar_alergenos_supabase()
-    if catalogo.empty:
-        return []
-    ids = []
-    for _, fila in catalogo.iterrows():
-        if str(fila.get("nombre", "") or "").strip() in nombres_set:
-            ids.append(str(fila.get("id", "") or ""))
-    return [item for item in ids if item]
-
-
-def enriquecer_ingrediente_con_alergenos(ingrediente):
-    datos = dict(ingrediente or {})
-    codigo = str(datos.get("codigo", datos.get("codigo_ingrediente", "")) or "").strip().upper()
-    alergenos = datos.get("alergenos")
-    if not isinstance(alergenos, list):
-        alergenos = []
-    if not alergenos and codigo_ingrediente_valido(codigo):
-        alergenos = cargar_alergenos_ingrediente(codigo)
-    datos["alergenos"] = alergenos
-    datos["alergeno_ids"] = [str(item.get("id")) for item in alergenos if isinstance(item, dict) and item.get("id")]
-    datos["alergenos_texto"] = formatear_alergenos(alergenos)
-    return datos
-
-
-def enriquecer_inventario_dict_con_alergenos():
-    if not inventario_dict:
-        return
-    mapa = obtener_mapa_alergenos_ingredientes(inventario_dict.keys())
-    for codigo, item in inventario_dict.items():
-        alergenos = mapa.get(str(codigo).strip().upper(), [])
-        item["alergenos"] = alergenos
-        item["alergeno_ids"] = [a.get("id") for a in alergenos if a.get("id")]
-        item["alergenos_texto"] = formatear_alergenos(alergenos)
-
-
-def guardar_alergenos_ingrediente(codigo_ingrediente, alergeno_ids):
-    """Reemplaza las relaciones de alérgenos de un ingrediente."""
-    codigo = str(codigo_ingrediente or "").strip().upper()
-    if not codigo_ingrediente_valido(codigo):
-        return True, ""
-    if not supabase_disponible or supabase is None:
-        return False, "El inventario no está conectado correctamente."
-    ids_limpios = []
-    for alergeno_id in alergeno_ids or []:
-        alergeno_id = str(alergeno_id or "").strip()
-        if alergeno_id and alergeno_id not in ids_limpios:
-            ids_limpios.append(alergeno_id)
-    try:
-        (
-            supabase
-            .table("ingrediente_alergenos")
-            .delete()
-            .eq("codigo_ingrediente", codigo)
-            .execute()
-        )
-        if ids_limpios:
-            filas = [
-                {"codigo_ingrediente": codigo, "alergeno_id": alergeno_id}
-                for alergeno_id in ids_limpios
-            ]
-            supabase.table("ingrediente_alergenos").insert(filas).execute()
-        limpiar_cache_alergenos()
-        st.session_state["db_trigger"] += 1
-        return True, ""
-    except Exception as exc:
-        return False, f"No se pudieron guardar los alérgenos del ingrediente: {exc}"
-
-
-def calcular_alergenos_desde_ingredientes(ingredientes):
-    resultado = []
-    vistos = set()
-    codigos_sin_alergenos = []
-    for ingrediente in ingredientes or []:
-        datos = dict(ingrediente or {})
-        alergenos = datos.get("alergenos") if isinstance(datos.get("alergenos"), list) else []
-        codigo = str(datos.get("codigo", "") or "").strip().upper()
-        if not alergenos and codigo_ingrediente_valido(codigo):
-            codigos_sin_alergenos.append(codigo)
-        for alergeno in alergenos:
-            item = alergeno if isinstance(alergeno, dict) else {"id": "", "codigo": "", "nombre": str(alergeno)}
-            clave = str(item.get("id") or item.get("codigo") or item.get("nombre") or "").strip().upper()
-            if clave and clave not in vistos:
-                vistos.add(clave)
-                resultado.append({
-                    "id": str(item.get("id", "") or ""),
-                    "codigo": str(item.get("codigo", "") or "").strip().upper(),
-                    "nombre": str(item.get("nombre", "") or item.get("codigo", "") or "").strip(),
-                })
-    if codigos_sin_alergenos:
-        mapa = obtener_mapa_alergenos_ingredientes(codigos_sin_alergenos)
-        for codigo in codigos_sin_alergenos:
-            for item in mapa.get(codigo, []):
-                clave = str(item.get("id") or item.get("codigo") or item.get("nombre") or "").strip().upper()
-                if clave and clave not in vistos:
-                    vistos.add(clave)
-                    resultado.append(item)
-    return sorted(resultado, key=lambda item: str(item.get("nombre", "")).lower())
-
-
-# Enriquecer inventario en memoria con los alérgenos normalizados disponibles.
-enriquecer_inventario_dict_con_alergenos()
-
-
 def inferir_unidad_medida(descripcion):
     texto = normalizar_texto_busqueda(descripcion)
     if any(p in texto.split() for p in ["AGUA", "CALDO", "VINO", "ZUMO", "LECHE", "NATA", "ACEITE", "VINAGRE"]):
@@ -1437,7 +1201,7 @@ def opciones_unidad_ingrediente(*unidades_extra):
 
 
 def datos_ficha_ingrediente(ingrediente=None):
-    ingrediente = enriquecer_ingrediente_con_alergenos(dict(ingrediente or {}))
+    ingrediente = dict(ingrediente or {})
     unidad = str(ingrediente.get("unidad_medida", "") or "").strip()
     return {
         "codigo": str(ingrediente.get("codigo", "S/C") or "S/C").strip().upper(),
@@ -1449,9 +1213,6 @@ def datos_ficha_ingrediente(ingrediente=None):
         "cantidad_bruta": numero_seguro(ingrediente.get("cantidad_bruta", 0.0), 0.0),
         "observaciones_precio": str(ingrediente.get("observaciones_precio", "") or "").strip(),
         "inventario_vinculado": bool(ingrediente.get("inventario_vinculado", False)),
-        "alergenos": ingrediente.get("alergenos", []),
-        "alergeno_ids": ingrediente.get("alergeno_ids", []),
-        "alergenos_texto": ingrediente.get("alergenos_texto", "Sin alérgenos declarados"),
     }
 
 
@@ -1516,12 +1277,6 @@ def guardar_ficha_en_inventario(datos):
             )
         else:
             supabase.table("inventario").insert(fila).execute()
-        ok_alergenos, mensaje_alergenos = guardar_alergenos_ingrediente(
-            codigo,
-            datos.get("alergeno_ids", []),
-        )
-        if not ok_alergenos:
-            return False, mensaje_alergenos, None
         st.session_state["db_trigger"] += 1
         accion = "actualizado" if codigo_existente else "guardado"
         return True, f"Ingrediente {codigo} {accion} en inventario.", codigo
@@ -1683,9 +1438,6 @@ FACTURA_MENUS_COLUMNAS = [
     "precio_total_menu", "precio_linea_menu_factura",
     "observaciones", "orden", "created_at"
 ]
-
-ALERGENOS_COLUMNAS = ["id", "codigo", "nombre", "descripcion", "activo", "created_at"]
-INGREDIENTE_ALERGENOS_COLUMNAS = ["id", "codigo_ingrediente", "alergeno_id", "created_at"]
 
 MENSAJE_CLIENTES_NO_ACTIVADO = (
     "El módulo de clientes todavía no está activado en Inventario. "
@@ -3966,141 +3718,6 @@ def actualizar_menu_supabase(menu_id, datos_menu, lineas_menu):
         return False, f"Error al actualizar el menú en el inventario: {e}"
 
 
-def calcular_ingredientes_ajustados_para_menu(ingredientes, raciones_menu, raciones_base):
-    """Ajusta cantidades de una receta para las raciones asignadas en el menú."""
-    raciones_menu = numero_seguro(raciones_menu, 0.0)
-    raciones_base = numero_seguro(raciones_base, 1.0)
-    if raciones_base <= 0:
-        raciones_base = 1.0
-    factor = raciones_menu / raciones_base
-    filas = []
-    for ingrediente in ingredientes or []:
-        ing = enriquecer_ingrediente_con_alergenos(ingrediente)
-        cantidad_base = numero_seguro(ing.get("cantidad_bruta", 0.0), 0.0)
-        precio_unidad = numero_seguro(ing.get("precio_unidad", 0.0), 0.0)
-        cantidad_ajustada = cantidad_base * factor
-        filas.append({
-            "codigo": str(ing.get("codigo", "") or ""),
-            "ingrediente": str(ing.get("descripcion", "") or ""),
-            "cantidad_base": cantidad_base,
-            "cantidad_ajustada": cantidad_ajustada,
-            "unidad": str(ing.get("unidad_medida", "") or ""),
-            "merma_pct": numero_seguro(ing.get("merma", 0.0), 0.0),
-            "precio_unidad": precio_unidad,
-            "coste_ajustado": cantidad_ajustada * precio_unidad,
-            "alergenos": texto_alergenos_ingrediente(ing),
-        })
-    return filas
-
-
-def calcular_alergenos_ficha_receta(ingredientes):
-    return calcular_alergenos_desde_ingredientes(ingredientes)
-
-
-def calcular_alergenos_menu(fichas):
-    vistos = set()
-    resultado = []
-    for ficha in fichas or []:
-        for item in ficha.get("alergenos", []):
-            clave = str(item.get("id") or item.get("codigo") or item.get("nombre") or "").strip().upper()
-            if clave and clave not in vistos:
-                vistos.add(clave)
-                resultado.append(item)
-    return sorted(resultado, key=lambda item: str(item.get("nombre", "")).lower())
-
-
-def construir_ficha_tecnica_receta_menu(receta, ingredientes, raciones_menu):
-    receta = dict(receta or {})
-    ingredientes_lista = list(ingredientes or [])
-    raciones_base = numero_seguro(receta.get("raciones_base", 1.0), 1.0)
-    ingredientes_ajustados = calcular_ingredientes_ajustados_para_menu(
-        ingredientes_lista,
-        raciones_menu,
-        raciones_base,
-    )
-    alergenos = calcular_alergenos_ficha_receta(ingredientes_lista)
-    return {
-        "receta_id": receta.get("id"),
-        "codigo_receta": receta.get("codigo_receta", ""),
-        "nombre_receta": receta.get("nombre", "Receta sin nombre"),
-        "raciones_menu": numero_seguro(raciones_menu, 0.0),
-        "raciones_base": raciones_base,
-        "ingredientes": ingredientes_ajustados,
-        "elaboracion": str(receta.get("elaboracion", "") or "").strip(),
-        "observaciones": str(receta.get("observaciones", "") or "").strip(),
-        "alergenos": alergenos,
-        "alergenos_texto": formatear_alergenos(alergenos),
-    }
-
-
-def cargar_fichas_tecnicas_menu_desde_lineas(lineas_menu):
-    fichas = []
-    for linea in normalizar_lineas_menu(lineas_menu or []):
-        receta_id = str(linea.get("receta_id", "") or "").strip()
-        if not receta_id:
-            continue
-        cabecera, ingredientes_df = cargar_receta_detalle_supabase(receta_id)
-        if not cabecera:
-            continue
-        ingredientes = preparar_ingredientes_receta_para_sesion(ingredientes_df)
-        raciones_menu = numero_seguro(
-            linea.get("raciones_receta_en_menu", linea.get("raciones", 0.0)),
-            0.0,
-        )
-        fichas.append(construir_ficha_tecnica_receta_menu(cabecera, ingredientes, raciones_menu))
-    return fichas
-
-
-def cargar_fichas_tecnicas_menu(menu_id):
-    cabecera, lineas_df = cargar_menu_detalle_supabase(menu_id)
-    if lineas_df is None or lineas_df.empty:
-        return cabecera, []
-    lineas = normalizar_lineas_menu(lineas_df.to_dict(orient="records"))
-    return cabecera, cargar_fichas_tecnicas_menu_desde_lineas(lineas)
-
-
-def generar_excel_fichas_tecnicas_menu(nombre_menu, fichas):
-    output = io.BytesIO()
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Fichas menú"
-    headers = [
-        "Menú", "Receta", "Raciones menú", "Código ingrediente", "Ingrediente",
-        "Cantidad ajustada", "Unidad", "Merma %", "Precio unidad", "Coste ajustado",
-        "Alérgenos ingrediente", "Elaboración", "Observaciones", "Alérgenos receta"
-    ]
-    ws.append(headers)
-    for cell in ws[1]:
-        cell.font = Font(bold=True)
-        cell.fill = PatternFill("solid", fgColor="F3E8DD")
-        cell.alignment = Alignment(horizontal="center")
-    for ficha in fichas or []:
-        ingredientes = ficha.get("ingredientes", []) or [{}]
-        for ing in ingredientes:
-            ws.append([
-                nombre_menu,
-                ficha.get("nombre_receta", ""),
-                ficha.get("raciones_menu", 0.0),
-                ing.get("codigo", ""),
-                ing.get("ingrediente", ""),
-                ing.get("cantidad_ajustada", 0.0),
-                ing.get("unidad", ""),
-                ing.get("merma_pct", 0.0),
-                ing.get("precio_unidad", 0.0),
-                ing.get("coste_ajustado", 0.0),
-                ing.get("alergenos", ""),
-                ficha.get("elaboracion", ""),
-                ficha.get("observaciones", ""),
-                ficha.get("alergenos_texto", ""),
-            ])
-    for col_idx, column_cells in enumerate(ws.columns, start=1):
-        max_len = max(len(str(cell.value or "")) for cell in column_cells)
-        ws.column_dimensions[get_column_letter(col_idx)].width = min(max(max_len + 2, 12), 55)
-    wb.save(output)
-    output.seek(0)
-    return output.getvalue()
-
-
 def preparar_ingredientes_receta_para_sesion(ingredientes_df):
     """
     Adapta public.receta_ingredientes al formato interno de st.session_state.
@@ -4111,7 +3728,7 @@ def preparar_ingredientes_receta_para_sesion(ingredientes_df):
     ingredientes = []
     for _, fila in ingredientes_df.iterrows():
         codigo = str(fila.get("codigo_ingrediente", "") or "").strip().upper()
-        ingredientes.append(enriquecer_ingrediente_con_alergenos({
+        ingredientes.append({
             "codigo": codigo if codigo else "S/C",
             "descripcion": str(fila.get("descripcion_ingrediente", "") or "").strip(),
             "cantidad_bruta": numero_seguro(fila.get("cantidad_bruta", 0.0)),
@@ -4119,7 +3736,7 @@ def preparar_ingredientes_receta_para_sesion(ingredientes_df):
             "merma": numero_seguro(fila.get("merma", 0.0)),
             "precio_unidad": numero_seguro(fila.get("precio_unidad", 0.0)),
             "inventario_vinculado": bool(codigo and codigo in inventario_dict),
-        }))
+        })
     return ingredientes
 
 
@@ -5250,24 +4867,6 @@ with st.sidebar:
                 value=ficha["observaciones_precio"],
                 height=70,
             )
-            catalogo_alergenos_ficha = cargar_alergenos_supabase()
-            opciones_alergenos_ficha = catalogo_alergenos_ficha["nombre"].dropna().astype(str).tolist() if not catalogo_alergenos_ficha.empty else []
-            nombres_alergenos_actuales = [
-                str(item.get("nombre", "") or "").strip()
-                for item in ficha.get("alergenos", [])
-                if isinstance(item, dict) and str(item.get("nombre", "") or "").strip()
-            ]
-            nombres_alergenos_actuales = [
-                nombre for nombre in nombres_alergenos_actuales
-                if nombre in opciones_alergenos_ficha
-            ]
-            nombres_alergenos_ficha = st.multiselect(
-                "Alérgenos",
-                options=opciones_alergenos_ficha,
-                default=nombres_alergenos_actuales,
-                help="Catálogo normalizado desde Supabase. Se guarda en ingrediente_alergenos.",
-            )
-            alergeno_ids_ficha = alergeno_ids_desde_nombres(nombres_alergenos_ficha)
 
             datos_editados_ficha = {
                 "codigo": codigo_ficha,
@@ -5279,12 +4878,6 @@ with st.sidebar:
                 "cantidad_bruta": cantidad_ficha,
                 "observaciones_precio": observaciones_ficha,
                 "inventario_vinculado": ficha.get("inventario_vinculado", False),
-                "alergeno_ids": alergeno_ids_ficha,
-                "alergenos": [
-                    {"id": alergeno_id, "codigo": "", "nombre": nombre}
-                    for alergeno_id, nombre in zip(alergeno_ids_ficha, nombres_alergenos_ficha)
-                ],
-                "alergenos_texto": formatear_alergenos(nombres_alergenos_ficha),
             }
 
             accion_col1, accion_col2 = st.columns(2)
@@ -5423,20 +5016,6 @@ with st.sidebar:
 
 
 ADMIN_TABLAS_BBDD = {
-    "alergenos": {
-        "label": "Alérgenos",
-        "pk": "id",
-        "order": "nombre",
-        "columns": ALERGENOS_COLUMNAS,
-        "generated_pk": True,
-    },
-    "ingrediente_alergenos": {
-        "label": "Alérgenos por ingrediente",
-        "pk": "id",
-        "order": "codigo_ingrediente",
-        "columns": INGREDIENTE_ALERGENOS_COLUMNAS,
-        "generated_pk": True,
-    },
     "inventario": {
         "label": "Inventario",
         "pk": "codigo",
@@ -5936,7 +5515,6 @@ with main_tab_recetas:
             "merma_txt": formatear_numero_usuario(ing.get("merma", 0.0), decimales=2),
             "precio_unidad": float(ing.get("precio_unidad", 0.0) or 0.0),
             "precio_unidad_txt": formatear_numero_usuario(ing.get("precio_unidad", 0.0), decimales=4),
-            "alergenos_texto": texto_alergenos_ingrediente(enriquecer_ingrediente_con_alergenos(ing)),
         })
 
     # Única fila final de alta rápida. Vive separada de las filas reales para
@@ -5952,7 +5530,6 @@ with main_tab_recetas:
         "merma_txt": formatear_numero_usuario(borrador_alta["merma"], decimales=2),
         "precio_unidad": borrador_alta["precio_unidad"],
         "precio_unidad_txt": formatear_numero_usuario(borrador_alta["precio_unidad"], decimales=4),
-        "alergenos_texto": texto_alergenos_ingrediente(borrador_alta),
     })
 
     df_display = pd.DataFrame(datos_filas)
@@ -5966,11 +5543,10 @@ with main_tab_recetas:
     df_display["cantidad_bruta_txt"] = df_display["cantidad_bruta_txt"].fillna("").astype(str)
     df_display["merma_txt"] = df_display["merma_txt"].fillna("").astype(str)
     df_display["precio_unidad_txt"] = df_display["precio_unidad_txt"].fillna("").astype(str)
-    df_display["alergenos_texto"] = df_display["alergenos_texto"].fillna("Sin alérgenos declarados").astype(str)
     df_display["coste_total"] = (df_display["cantidad_bruta"] * df_display["precio_unidad"]).astype(float)
 
     df_display = df_display[
-        ["seleccionar", "descripcion", "cantidad_bruta_txt", "unidad_medida", "merma_txt", "precio_unidad_txt", "coste_total", "alergenos_texto", "codigo"]
+        ["seleccionar", "descripcion", "cantidad_bruta_txt", "unidad_medida", "merma_txt", "precio_unidad_txt", "coste_total", "codigo"]
     ]
     st.caption(
         "Edita las filas activas. La última fila es un borrador pendiente: escribir en ella "
@@ -6001,10 +5577,9 @@ with main_tab_recetas:
             "merma_txt": st.column_config.TextColumn("Merma %"),
             "precio_unidad_txt": st.column_config.TextColumn("Precio unidad"),
             "coste_total": st.column_config.NumberColumn("Coste", format="%.2f €"),
-            "alergenos_texto": st.column_config.TextColumn("Alérgenos", width="medium"),
             "codigo": st.column_config.TextColumn("Código"),
         },
-        disabled=["coste_total", "alergenos_texto"],
+        disabled=["coste_total"],
         key=f"editor_receta_activa_{st.session_state.get('ingrediente_tabla_revision', 0)}",
     )
 
@@ -6042,11 +5617,6 @@ with main_tab_recetas:
                 and codigo_editado in inventario_dict
             ),
         })
-        if codigo_ingrediente_valido(codigo_editado) and codigo_editado in inventario_dict:
-            original = enriquecer_ingrediente_con_alergenos({
-                **inventario_dict.get(codigo_editado, {}),
-                **original,
-            })
         ingredientes_actualizados.append(original)
 
     fila_nueva = tabla_ingredientes.iloc[len(ingredientes_activos)]
@@ -6165,13 +5735,6 @@ with main_tab_recetas:
     if not descripcion_nueva and st.session_state.get("ingrediente_alta_coincidencias"):
         st.session_state["ingrediente_alta_coincidencias"] = []
         st.rerun()
-
-    alergenos_receta_actual = calcular_alergenos_desde_ingredientes(st.session_state.get("ingredientes", []))
-    st.markdown("#### Alérgenos detectados")
-    if alergenos_receta_actual:
-        st.warning(formatear_alergenos(alergenos_receta_actual))
-    else:
-        st.info("Sin alérgenos declarados")
 
     with st.expander("IA: Generar receta con IA", expanded=False):
         texto_tab, imagen_tab = st.tabs(["Texto", "Imagen"])
@@ -7575,53 +7138,6 @@ with main_tab_menus:
             st.metric("Precio total del menú", f"{total_precio_menu:.2f} €")
         else:
             st.metric("Precio total del menú", "Sin datos")
-
-    st.markdown("#### Fichas técnicas del menú")
-    if lineas_menu_actual:
-        fichas_menu_actual = cargar_fichas_tecnicas_menu_desde_lineas(lineas_menu_actual)
-        alergenos_menu_actual = calcular_alergenos_menu(fichas_menu_actual)
-        st.caption(f"Alérgenos del menú: {formatear_alergenos(alergenos_menu_actual)}")
-        nombre_menu_excel = str(nombre_menu or "Menu").strip() or "Menu"
-        st.download_button(
-            "Descargar fichas técnicas del menú",
-            data=generar_excel_fichas_tecnicas_menu(nombre_menu_excel, fichas_menu_actual),
-            file_name=f"fichas_tecnicas_{nombre_menu_excel.replace(' ', '_')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
-        for ficha in fichas_menu_actual:
-            titulo_ficha = (
-                f"Ficha técnica · {ficha.get('nombre_receta', 'Receta sin nombre')} · "
-                f"{ficha.get('raciones_menu', 0.0):.2f} raciones"
-            )
-            with st.expander(titulo_ficha, expanded=False):
-                ingredientes_ficha_df = pd.DataFrame(ficha.get("ingredientes", []))
-                if not ingredientes_ficha_df.empty:
-                    st.dataframe(
-                        ingredientes_ficha_df[[
-                            "codigo", "ingrediente", "cantidad_ajustada", "unidad",
-                            "merma_pct", "precio_unidad", "coste_ajustado", "alergenos"
-                        ]].rename(columns={
-                            "codigo": "Código",
-                            "ingrediente": "Ingrediente",
-                            "cantidad_ajustada": "Cantidad ajustada",
-                            "unidad": "Unidad",
-                            "merma_pct": "Merma %",
-                            "precio_unidad": "Precio unidad",
-                            "coste_ajustado": "Coste",
-                            "alergenos": "Alérgenos",
-                        }),
-                        hide_index=True,
-                        use_container_width=True,
-                    )
-                st.markdown("**Proceso de elaboración**")
-                st.write(ficha.get("elaboracion") or "Sin proceso de elaboración registrado.")
-                st.markdown("**Observaciones**")
-                st.write(ficha.get("observaciones") or "Sin observaciones registradas.")
-                st.markdown("**Alérgenos**")
-                st.warning(ficha.get("alergenos_texto") or "Sin alérgenos declarados")
-    else:
-        st.info("Añade recetas al menú para generar sus fichas técnicas.")
 
     accion_menu_col1, accion_menu_col2, accion_menu_col3, accion_menu_col4 = st.columns(4)
     with accion_menu_col1:
