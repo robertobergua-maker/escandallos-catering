@@ -2851,9 +2851,24 @@ def validar_factura_normativa_basica(factura, cliente, lineas):
     if not re.match(r"^FAC-\d{4}-\d{4}-\d{4,}$", str(factura.get("numero_factura") or "")):
         return False, "La factura debe usar numeración FAC-AAAA-MMDD-000X."
     if not lineas:
-        return False, "La factura debe incluir el desglose de recetas del menú."
+        return False, "La factura debe incluir el desglose de recetas de uno o más menús."
     return True, ""
 
+
+
+def agrupar_lineas_documento_por_menu(lineas):
+    """Agrupa líneas de documento por menú, preservando el orden de aparición."""
+    grupos = []
+    indices = {}
+    for linea in lineas or []:
+        menu_id = str(linea.get("menu_origen_id", linea.get("origen_id", "")) or "").strip()
+        nombre_menu = str(linea.get("menu_nombre_snapshot", "") or "").strip() or "Menú"
+        clave = menu_id or nombre_menu
+        if clave not in indices:
+            indices[clave] = len(grupos)
+            grupos.append({"menu_id": menu_id, "nombre_menu": nombre_menu, "lineas": []})
+        grupos[indices[clave]]["lineas"].append(linea)
+    return grupos
 
 def generar_pdf_factura(factura, lineas, cliente):
     """
@@ -2929,26 +2944,41 @@ def generar_pdf_factura(factura, lineas, cliente):
             elementos.append(Paragraph(f"Documento asociado a menú: {html.escape(nombre_menu_asociado)}", estilos["Normal"]))
 
         tabla = [["Descripción", "Cant.", "Ud.", "Precio", "Dto.", "IVA", "Base", "Total"]]
-        for linea in lineas_validas:
-            tabla.append([
-                Paragraph(html.escape(linea["descripcion"]), estilos["BodyText"]),
-                f"{linea['cantidad']:.3f}",
-                html.escape(linea["unidad"]),
-                formatear_importe_euros(linea["precio_unitario"]),
-                f"{linea['descuento_pct']:.2f}%",
-                f"{linea['iva_pct']:.2f}%",
-                formatear_importe_euros(linea["base_linea"]),
-                formatear_importe_euros(linea["total_linea"]),
-            ])
+        filas_menu_pdf = []
+        fila_actual_pdf = 1
+        for grupo in agrupar_lineas_documento_por_menu(lineas_validas):
+            tabla.append([Paragraph(f"<b>Menú: {html.escape(grupo['nombre_menu'])}</b>", estilos["BodyText"]), "", "", "", "", "", "", ""])
+            filas_menu_pdf.append(fila_actual_pdf)
+            fila_actual_pdf += 1
+            for linea in grupo["lineas"]:
+                tabla.append([
+                    Paragraph(html.escape(linea["descripcion"]), estilos["BodyText"]),
+                    f"{linea['cantidad']:.3f}",
+                    html.escape(linea["unidad"]),
+                    formatear_importe_euros(linea["precio_unitario"]),
+                    f"{linea['descuento_pct']:.2f}%",
+                    f"{linea['iva_pct']:.2f}%",
+                    formatear_importe_euros(linea["base_linea"]),
+                    formatear_importe_euros(linea["total_linea"]),
+                ])
+                fila_actual_pdf += 1
         tabla_pdf = Table(tabla, repeatRows=1, colWidths=[150, 45, 35, 58, 42, 42, 58, 58])
-        tabla_pdf.setStyle(TableStyle([
+        estilo_tabla_pdf = [
             ("BACKGROUND", (0, 0), (-1, 0), colors.white),
             ("TEXTCOLOR", (0, 0), (-1, -1), colors.black),
             ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
             ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
             ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ]))
+        ]
+        for fila_menu in filas_menu_pdf:
+            estilo_tabla_pdf.extend([
+                ("SPAN", (0, fila_menu), (-1, fila_menu)),
+                ("BACKGROUND", (0, fila_menu), (-1, fila_menu), colors.HexColor("#eef3fb")),
+                ("FONTNAME", (0, fila_menu), (-1, fila_menu), "Helvetica-Bold"),
+                ("ALIGN", (0, fila_menu), (-1, fila_menu), "LEFT"),
+            ])
+        tabla_pdf.setStyle(TableStyle(estilo_tabla_pdf))
         elementos.extend([Spacer(1, 14), tabla_pdf, Spacer(1, 14)])
         elementos.extend([
             Paragraph(f"Base imponible: {formatear_importe_euros(totales['base_imponible'])}", estilos["Normal"]),
@@ -2974,22 +3004,26 @@ def generar_pdf_factura(factura, lineas, cliente):
         pass
 
     escapar = lambda valor: html.escape(str(valor or ""))
-    filas_html = "\n".join(
-        f"""
-        <tr>
-          <td>{escapar(linea['descripcion'])}</td>
-          <td class="num">{linea['cantidad']:.3f}</td>
-          <td>{escapar(linea['unidad'])}</td>
-          <td class="num">{formatear_importe_euros(linea['precio_unitario'])}</td>
-          <td class="num">{linea['descuento_pct']:.2f}%</td>
-          <td class="num">{linea['iva_pct']:.2f}%</td>
-          <td class="num">{formatear_importe_euros(linea['base_linea'])}</td>
-          <td class="num">{formatear_importe_euros(linea['iva_linea'])}</td>
-          <td class="num">{formatear_importe_euros(linea['total_linea'])}</td>
-        </tr>
-        """
-        for linea in lineas_validas
-    )
+    filas_html_partes = []
+    for grupo in agrupar_lineas_documento_por_menu(lineas_validas):
+        filas_html_partes.append(
+            f'<tr class="menu-row"><td colspan="9">Menú: {escapar(grupo["nombre_menu"])}</td></tr>'
+        )
+        for linea in grupo["lineas"]:
+            filas_html_partes.append(f"""
+            <tr>
+              <td>{escapar(linea['descripcion'])}</td>
+              <td class="num">{linea['cantidad']:.3f}</td>
+              <td>{escapar(linea['unidad'])}</td>
+              <td class="num">{formatear_importe_euros(linea['precio_unitario'])}</td>
+              <td class="num">{linea['descuento_pct']:.2f}%</td>
+              <td class="num">{linea['iva_pct']:.2f}%</td>
+              <td class="num">{formatear_importe_euros(linea['base_linea'])}</td>
+              <td class="num">{formatear_importe_euros(linea['iva_linea'])}</td>
+              <td class="num">{formatear_importe_euros(linea['total_linea'])}</td>
+            </tr>
+            """)
+    filas_html = "\n".join(filas_html_partes)
     cliente_html = "".join(f"<div>{escapar(dato)}</div>" for dato in datos_cliente)
     emisor = obtener_datos_fiscales_emisor()
     logo_b64 = logo_samirarte_base64()
@@ -3028,6 +3062,7 @@ def generar_pdf_factura(factura, lineas, cliente):
     table {{ width: 100%; border-collapse: collapse; margin-top: 18px; }}
     th, td {{ border: 1px solid #111; padding: 7px; font-size: 12px; vertical-align: top; }}
     th {{ text-align: left; }}
+    .menu-row td {{ background: #eef3fb; font-weight: 700; color: #14264a; }}
     .num {{ text-align: right; white-space: nowrap; }}
     .totals {{ margin-left: auto; margin-top: 18px; width: 310px; }}
     .total-row {{ display: flex; justify-content: space-between; border-bottom: 1px solid #999; padding: 6px 0; }}
@@ -3710,7 +3745,7 @@ def crear_lineas_factura_desde_menu(
             "unidad": "ración",
             "precio_unitario": precio_unitario,
             "descuento_pct": 0.0,
-            "iva_pct": 21.0,
+            "iva_pct": iva_aplicable,
             "origen_tipo": "menu",
             "origen_id": menu_id,
             "origen_receta_tipo": "menu_receta",
@@ -5157,6 +5192,32 @@ st.markdown(
     div[data-testid="stAlert"] p {
         margin-bottom: 0;
     }
+
+    div[data-testid="stTextInput"] input,
+    div[data-testid="stTextArea"] textarea {
+        background: #fffaf2 !important;
+    }
+    div[data-testid="stNumberInput"] input {
+        background: #f3f7ff !important;
+    }
+    div[data-baseweb="select"] > div {
+        background: #f8fff6 !important;
+    }
+    div[data-testid="stDataFrame"] {
+        background: #ffffff;
+    }
+    .samirarte-factura-menu-chip {
+        display: inline-block;
+        background: #eef3fb;
+        color: #14264a;
+        border: 1px solid #d9e3f3;
+        border-radius: 999px;
+        padding: 0.18rem 0.55rem;
+        margin: 0.12rem 0.18rem 0.12rem 0;
+        font-size: 0.82rem;
+        font-weight: 700;
+    }
+
     @media (max-width: 720px) {
         .block-container {
             padding-left: 0.85rem;
@@ -7232,12 +7293,12 @@ with main_tab_facturas:
                             )
                         with menu_doc_col2:
                             anadir_menu_documento = st.button(
-                                "Usar este menú",
+                                "Añadir menú",
                                 type="primary",
                                 use_container_width=True,
                             )
 
-                        st.caption("Cada presupuesto o factura corresponde siempre a un único menú. El documento se desglosa por recetas y raciones.")
+                        st.caption("Cada presupuesto o factura puede incluir uno o más menús. Cada menú se desglosa por sus recetas y raciones.")
                         cantidad_menu_documento = 1.0
 
                         if anadir_menu_documento:
@@ -7263,18 +7324,40 @@ with main_tab_facturas:
                                 if not lineas_desde_menu:
                                     st.warning("No se pudieron crear líneas desde el menú seleccionado.")
                                 else:
-                                    st.session_state["factura_lineas_actual"] = lineas_desde_menu
-                                    st.session_state["factura_menu_feedback"] = (
-                                        "Menú aplicado y desglosado por recetas.",
-                                        aviso_precio_menu
-                                    )
-                                    st.rerun()
+                                    lineas_existentes_documento = [
+                                        dict(linea) for linea in st.session_state.get("factura_lineas_actual", [])
+                                        if str(linea.get("descripcion", "") or "").strip()
+                                    ]
+                                    menus_existentes_documento = {
+                                        str(linea.get("menu_origen_id", linea.get("origen_id", "")) or "").strip()
+                                        for linea in lineas_existentes_documento
+                                    }
+                                    if str(menu_factura_id) in menus_existentes_documento:
+                                        st.warning("Ese menú ya está incluido en el documento.")
+                                    else:
+                                        st.session_state["factura_lineas_actual"] = lineas_existentes_documento + lineas_desde_menu
+                                        st.session_state["factura_menu_feedback"] = (
+                                            "Menú añadido y desglosado por recetas.",
+                                            aviso_precio_menu
+                                        )
+                                        st.rerun()
 
                 lineas_accion_col1, lineas_accion_col2 = st.columns(2)
                 with lineas_accion_col1:
-                    if st.button("Quitar menú", use_container_width=True):
-                        if st.session_state["factura_lineas_actual"]:
-                            st.session_state["factura_lineas_actual"] = []
+                    if st.button("Quitar último menú", use_container_width=True):
+                        lineas_actuales_doc = [
+                            dict(linea) for linea in st.session_state.get("factura_lineas_actual", [])
+                            if str(linea.get("descripcion", "") or "").strip()
+                        ]
+                        if lineas_actuales_doc:
+                            ultimo_menu_id = str(lineas_actuales_doc[-1].get("menu_origen_id", lineas_actuales_doc[-1].get("origen_id", "")) or "").strip()
+                            if ultimo_menu_id:
+                                st.session_state["factura_lineas_actual"] = [
+                                    linea for linea in lineas_actuales_doc
+                                    if str(linea.get("menu_origen_id", linea.get("origen_id", "")) or "").strip() != ultimo_menu_id
+                                ]
+                            else:
+                                st.session_state["factura_lineas_actual"] = lineas_actuales_doc[:-1]
                             st.rerun()
                         else:
                             st.info("No hay menú para quitar.")
@@ -7286,13 +7369,23 @@ with main_tab_facturas:
                         st.rerun()
 
                 columnas_editor_factura = [
-                    "descripcion", "cantidad", "unidad", "precio_unitario",
+                    "menu_nombre_snapshot", "descripcion", "cantidad", "unidad", "precio_unitario",
                     "base_linea", "iva_linea", "total_linea"
                 ]
-                lineas_df = pd.DataFrame([
+                lineas_documento_visibles = [
                     calcular_linea_factura(linea)
                     for linea in st.session_state["factura_lineas_actual"]
-                ])
+                    if str(linea.get("descripcion", "") or "").strip()
+                ]
+                grupos_documento_visibles = agrupar_lineas_documento_por_menu(lineas_documento_visibles)
+                if grupos_documento_visibles:
+                    st.markdown("##### Menús incluidos")
+                    chips_menus = "".join(
+                        f'<span class="samirarte-factura-menu-chip">{html.escape(grupo["nombre_menu"])} · {len(grupo["lineas"])} recetas</span>'
+                        for grupo in grupos_documento_visibles
+                    )
+                    st.markdown(chips_menus, unsafe_allow_html=True)
+                lineas_df = pd.DataFrame(lineas_documento_visibles)
                 for columna_editor in columnas_editor_factura:
                     if columna_editor not in lineas_df.columns:
                         lineas_df[columna_editor] = None
@@ -7303,7 +7396,8 @@ with main_tab_facturas:
                     use_container_width=True,
                     hide_index=True,
                     column_config={
-                        "descripcion": st.column_config.TextColumn("Descripción", required=True, width="large"),
+                        "menu_nombre_snapshot": st.column_config.TextColumn("Menú", width="medium"),
+                        "descripcion": st.column_config.TextColumn("Receta", required=True, width="large"),
                         "cantidad": st.column_config.NumberColumn("Raciones", min_value=0.001, step=1.0, format="%.3f"),
                         "unidad": st.column_config.TextColumn("Unidad", width="small"),
                         "precio_unitario": st.column_config.NumberColumn("Precio unitario", min_value=0.0, step=1.0, format="%.4f €"),
@@ -7312,7 +7406,7 @@ with main_tab_facturas:
                         "total_linea": st.column_config.NumberColumn("Total línea", format="%.2f €")
                     },
                     disabled=[
-                        "descripcion", "unidad", "base_linea",
+                        "menu_nombre_snapshot", "descripcion", "unidad", "base_linea",
                         "iva_linea", "total_linea",
                     ],
                     key="editor_factura_lineas"
@@ -7326,7 +7420,7 @@ with main_tab_facturas:
                         else {}
                     )
                     for campo_origen in [
-                        "origen_tipo", "origen_id", "menu_origen_id",
+                        "origen_tipo", "origen_id", "origen_receta_tipo", "origen_receta_id", "menu_origen_id",
                         "menu_nombre_snapshot", "cantidad_menu",
                         "coste_total_menu", "coste_linea_menu_documento",
                         "precio_total_menu", "precio_linea_menu_documento",
@@ -7334,21 +7428,9 @@ with main_tab_facturas:
                     ]:
                         if linea_origen.get(campo_origen) is not None:
                             linea_editada[campo_origen] = linea_origen.get(campo_origen)
-                    if linea_editada.get("origen_tipo") == "menu":
-                        cantidad_editada = numero_seguro(linea_editada.get("cantidad"), 0.0)
-                        precio_menu_editado = numero_seguro(
-                            linea_editada.get("precio_unitario"),
-                            0.0,
-                        )
-                        linea_editada["cantidad_menu"] = cantidad_editada
-                        linea_editada["coste_linea_menu_documento"] = (
-                            numero_seguro(linea_editada.get("coste_total_menu"), 0.0)
-                            * cantidad_editada
-                        )
-                        linea_editada["precio_total_menu"] = precio_menu_editado
-                        linea_editada["precio_linea_menu_documento"] = (
-                            precio_menu_editado * cantidad_editada
-                        )
+                    # En documentos desglosados, la cantidad editada representa raciones de receta,
+                    # no cantidad de menú. La relación de menú se mantiene por menu_origen_id.
+                    linea_editada["iva_pct"] = iva_documento_actual()
                     lineas_actualizadas.append(calcular_linea_factura(linea_editada))
                 if lineas_actualizadas != st.session_state["factura_lineas_actual"]:
                     st.session_state["factura_lineas_actual"] = lineas_actualizadas
