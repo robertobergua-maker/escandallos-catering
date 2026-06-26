@@ -2203,6 +2203,17 @@ def normalizar_ingredientes_a_una_racion(ingredientes, raciones_base):
     return ingredientes_normalizados
 
 
+def calcular_pvp_neto_desde_margen(coste_base, margen_beneficio_pct):
+    """Calcula PVP sin IVA aplicando beneficio sobre coste.
+
+    Se usa un margen abierto: 0%, 30%, 100%, 250%... son válidos.
+    Ejemplo: coste 10 y margen 150% => PVP sin IVA 25.
+    """
+    coste = numero_seguro(coste_base, 0.0)
+    margen = numero_seguro(margen_beneficio_pct, 0.0)
+    return coste * (1 + margen / 100)
+
+
 def preparar_receta_para_una_racion(datos_receta, ingredientes):
     """
     Devuelve cabecera e ingredientes listos para persistir, siempre referidos
@@ -2227,8 +2238,7 @@ def preparar_receta_para_una_racion(datos_receta, ingredientes):
     iva_pct = numero_seguro(datos_normalizados.get("iva_pct", 0.0), 0.0)
     coste_total = subtotal
     coste_para_precio = coste_total + (coste_total * ci_pct / 100)
-    factor_margen = 1 - (margen_pct / 100)
-    pvp_neto = coste_para_precio / factor_margen if factor_margen > 0 else 0.0
+    pvp_neto = calcular_pvp_neto_desde_margen(coste_para_precio, margen_pct)
     pvp_final = pvp_neto + (pvp_neto * iva_pct / 100)
 
     datos_normalizados.update({
@@ -2260,8 +2270,7 @@ def crear_copia_receta_normalizada_supabase(datos_receta, ingredientes, raciones
         for ing in ingredientes_normalizados
     )
     coste_total = subtotal + (subtotal * ci_pct / 100)
-    factor_margen = 1 - (margen_pct / 100)
-    pvp_neto = coste_total / factor_margen if factor_margen > 0 else 0.0
+    pvp_neto = calcular_pvp_neto_desde_margen(coste_total, margen_pct)
     pvp_final = pvp_neto + (pvp_neto * iva_pct_receta / 100)
 
     nombre_original = str(datos_receta.get("nombre", "") or "Receta").strip() or "Receta"
@@ -4674,8 +4683,8 @@ def marcar_cambios_receta():
 
 def normalizar_raciones_desde_campo_receta():
     """
-    Aplica el valor introducido en 'Raciones base receta' como divisor y deja
-    inmediatamente la receta activa expresada para una ración.
+    Aplica el valor confirmado en 'Raciones base receta' como divisor y deja
+    la receta activa expresada para una ración.
     """
     raciones = numero_seguro(st.session_state.get("input_raciones_base_receta", 1.0), 1.0)
     if raciones <= 0:
@@ -4866,10 +4875,10 @@ def generar_excel(
     ws.cell(row=res+2, column=6, value="COSTE TOTAL DEL PLATO:").font = Font(bold=True)
     ws.cell(row=res+2, column=total_col, value=f"={total_col_letter}{res}+{total_col_letter}{res+1}").number_format = '#,##0.00 €'
 
-    ws.cell(row=res+4, column=6, value=f"Margen Deseado ({mb}%):").font = Font(bold=True)
+    ws.cell(row=res+4, column=6, value=f"Beneficio sobre coste ({mb}%):").font = Font(bold=True)
     
     ws.cell(row=res+5, column=6, value="PRECIO VENTA (SIN IVA):").font = Font(bold=True)
-    pvp_sin_iva = ws.cell(row=res+5, column=total_col, value=f"={total_col_letter}{res+2}/(1-({mb}/100))")
+    pvp_sin_iva = ws.cell(row=res+5, column=total_col, value=f"={total_col_letter}{res+2}*(1+({mb}/100))")
     pvp_sin_iva.number_format = '#,##0.00 €'
     pvp_sin_iva.font = Font(bold=True)
 
@@ -5656,6 +5665,21 @@ ADMIN_BOOLEAN_COLUMNS = {"activa", "es_temporal", "activo"}
 ADMIN_READONLY_COLUMNS = {"id", "created_at", "updated_at"}
 
 
+def columna_admin_es_id(columna):
+    """Devuelve True si una columna expone IDs técnicos o claves foráneas.
+
+    La Administración necesita cargar esos campos internamente para guardar,
+    actualizar o borrar filas, pero no deben mostrarse al usuario.
+    """
+    columna_limpia = str(columna or "").strip().lower()
+    return columna_limpia == "id" or columna_limpia.endswith("_id")
+
+
+def columnas_visibles_admin(columnas):
+    """Oculta cualquier ID técnico en la gestión visual de BBDD."""
+    return [col for col in columnas if not columna_admin_es_id(col)]
+
+
 def normalizar_valor_admin(valor, columna):
     if valor is None:
         return None
@@ -5792,9 +5816,14 @@ def render_pagina_administracion():
             st.warning(mensaje_tabla)
         else:
             st.caption(f"{len(tabla_df)} registros cargados de public.{tabla_seleccionada}")
+            columnas_visibles = columnas_visibles_admin(config_tabla["columns"])
             column_config = {}
             for columna in config_tabla["columns"]:
-                if columna in ADMIN_BOOLEAN_COLUMNS:
+                if columna not in columnas_visibles:
+                    # Campo técnico: se conserva en el DataFrame para poder guardar
+                    # cambios, pero no se muestra en la interfaz de Administración.
+                    column_config[columna] = None
+                elif columna in ADMIN_BOOLEAN_COLUMNS:
                     column_config[columna] = st.column_config.CheckboxColumn(columna)
                 elif columna == "rol":
                     column_config[columna] = st.column_config.SelectboxColumn(columna, options=["usuario", "admin"])
@@ -5806,6 +5835,7 @@ def render_pagina_administracion():
             columnas_bloqueadas = [
                 col for col in config_tabla["columns"]
                 if col in ADMIN_READONLY_COLUMNS
+                or columna_admin_es_id(col)
                 or (col == config_tabla["pk"] and config_tabla.get("fixed_rows"))
             ]
             editor_key = f"admin_editor_{tabla_seleccionada}"
@@ -5814,6 +5844,7 @@ def render_pagina_administracion():
                 num_rows="fixed" if config_tabla.get("fixed_rows") else "dynamic",
                 use_container_width=True,
                 height=520,
+                column_order=columnas_visibles,
                 column_config=column_config,
                 disabled=columnas_bloqueadas,
                 key=editor_key
@@ -5936,10 +5967,9 @@ with main_tab_recetas:
     coste_para_precio_cabecera = coste_cabecera + (
         coste_cabecera * (ci_cabecera / 100)
     )
-    factor_margen_cabecera = 1 - (mb_cabecera / 100)
-    pvp_neto_cabecera = (
-        coste_para_precio_cabecera / factor_margen_cabecera
-        if factor_margen_cabecera > 0 else 0.0
+    pvp_neto_cabecera = calcular_pvp_neto_desde_margen(
+        coste_para_precio_cabecera,
+        mb_cabecera,
     )
     pvp_final_cabecera = pvp_neto_cabecera + (pvp_neto_cabecera * (iva_cabecera / 100))
     food_cost_cabecera = (coste_cabecera / pvp_final_cabecera * 100) if pvp_final_cabecera > 0 else 0.0
@@ -5953,16 +5983,41 @@ with main_tab_recetas:
     with met_col1:
         if "input_raciones_base_receta" not in st.session_state:
             st.session_state["input_raciones_base_receta"] = float(raciones_base_actual)
-        raciones_base_actual = st.number_input(
+        raciones_base_input = st.number_input(
             "Raciones base receta",
             min_value=0.001,
             step=1.0,
             key="input_raciones_base_receta",
-            on_change=normalizar_raciones_desde_campo_receta,
-            help="Introduce las raciones de la receta original. Las cantidades se dividirán automáticamente y el valor volverá a 1.",
+            help=(
+                "Introduce las raciones de la receta original. Antes de ajustar "
+                "las cantidades a 1 ración se pedirá confirmación."
+            ),
         )
-        st.session_state["receta_raciones_base"] = float(raciones_base_actual)
-        st.session_state["raciones_base"] = float(raciones_base_actual)
+        raciones_base_input = float(raciones_base_input)
+        raciones_actuales_guardadas = float(st.session_state.get("receta_raciones_base", raciones_base_actual) or 1.0)
+        cambio_raciones_pendiente = abs(raciones_base_input - raciones_actuales_guardadas) > 1e-9
+
+        if cambio_raciones_pendiente and st.session_state.get("ingredientes"):
+            st.warning(
+                f"Vas a cambiar la base de la receta a {raciones_base_input:g} raciones. "
+                "Si confirmas, todas las cantidades de ingredientes se dividirán entre "
+                f"{raciones_base_input:g} y la receta quedará ajustada a 1 ración."
+            )
+            confirmar_col, cancelar_col = st.columns(2)
+            with confirmar_col:
+                if st.button("Confirmar ajuste", type="primary", use_container_width=True, key="confirmar_ajuste_raciones_base"):
+                    normalizar_raciones_desde_campo_receta()
+                    st.rerun()
+            with cancelar_col:
+                if st.button("Cancelar", use_container_width=True, key="cancelar_ajuste_raciones_base"):
+                    st.session_state["input_raciones_base_receta"] = float(raciones_actuales_guardadas)
+                    st.rerun()
+        elif cambio_raciones_pendiente:
+            st.session_state["receta_raciones_base"] = raciones_base_input
+            st.session_state["raciones_base"] = raciones_base_input
+        else:
+            st.session_state["receta_raciones_base"] = float(raciones_base_actual)
+            st.session_state["raciones_base"] = float(raciones_base_actual)
     met_col2.metric("Coste por ración", f"{coste_por_racion_cabecera:.2f} €")
     met_col3.metric("PVP por ración", f"{pvp_por_racion_cabecera:.2f} €" if pvp_final_cabecera else "-")
     met_col4.metric("Food Cost", f"{food_cost_cabecera:.1f} %" if food_cost_cabecera else "-")
@@ -6958,7 +7013,13 @@ with main_tab_recetas:
         with c1:
             costes_indirectos_pct = st.number_input("Costes Indirectos (%)", min_value=0.0, key="costes_indirectos_pct")
         with c2:
-            margen_beneficio_pct = st.number_input("Margen Beneficio (%)", min_value=0.0, max_value=99.9, key="margen_beneficio_pct")
+            margen_beneficio_pct = st.number_input(
+                "Margen Beneficio (%)",
+                min_value=0.0,
+                step=1.0,
+                key="margen_beneficio_pct",
+                help="Porcentaje de beneficio sobre coste. Admite valores superiores al 100%."
+            )
         with c3:
             iva_pct = st.number_input("IVA Evento (%)", min_value=0.0, max_value=100.0, step=1.0, key="iva_pct")
 
@@ -6973,8 +7034,7 @@ with main_tab_recetas:
         coste_total = subtotal_ing
         coste_para_precio = coste_total + costes_ind
 
-        factor_margen = (1 - (mb_val / 100))
-        pvp_neto = coste_para_precio / factor_margen if factor_margen > 0 else 0.0
+        pvp_neto = calcular_pvp_neto_desde_margen(coste_para_precio, mb_val)
         monto_iva = pvp_neto * (iva_val / 100)
         pvp_final = pvp_neto + monto_iva
         raciones_deseadas_metricas = pd.to_numeric(st.session_state.get('raciones_deseadas', 0.0), errors='coerce')
@@ -7133,11 +7193,7 @@ with main_tab_recetas:
         costes_ind_guardado = subtotal_ing_guardado * (ci_val / 100)
         coste_total = subtotal_ing_guardado
         coste_para_precio_guardado = coste_total + costes_ind_guardado
-        factor_margen_guardado = (1 - (mb_val / 100))
-        pvp_neto = (
-            coste_para_precio_guardado / factor_margen_guardado
-            if factor_margen_guardado > 0 else 0.0
-        )
+        pvp_neto = calcular_pvp_neto_desde_margen(coste_para_precio_guardado, mb_val)
         pvp_final = pvp_neto + (pvp_neto * (iva_val / 100))
     else:
         ci_val = float(st.session_state.get('costes_indirectos_pct', 0.0))
