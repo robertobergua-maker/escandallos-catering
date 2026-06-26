@@ -1089,6 +1089,7 @@ def cargar_alergenos_supabase():
         return pd.DataFrame(columns=columnas)
 
 
+@st.cache_data(ttl=600)
 def cargar_ingrediente_alergenos_supabase(trigger=0):
     """Carga relaciones ingrediente-alérgeno y las enriquece con nombre/código."""
     columnas = ["codigo_ingrediente", "alergeno_id", "codigo", "nombre"]
@@ -5662,7 +5663,6 @@ ADMIN_NUMERIC_COLUMNS = {
 
 ADMIN_BOOLEAN_COLUMNS = {"activa", "es_temporal", "activo"}
 ADMIN_READONLY_COLUMNS = {"id", "created_at", "updated_at"}
-ADMIN_DELETE_COLUMN = "__eliminar__"
 
 
 def columna_admin_es_id(columna):
@@ -6090,24 +6090,6 @@ def cargar_tabla_admin(nombre_tabla, limite=500):
         return False, f"No se pudo cargar {nombre_tabla}: {e}", pd.DataFrame(columns=columnas)
 
 
-def filtrar_tabla_admin(df, texto_busqueda):
-    """Filtra la tabla admin por texto libre sin perder columnas técnicas ocultas."""
-    if df is None or df.empty:
-        return df
-    texto = normalizar_texto_busqueda(texto_busqueda)
-    if not texto:
-        return df
-    columnas_busqueda = [
-        col for col in df.columns
-        if col != ADMIN_DELETE_COLUMN and not columna_admin_es_id(col)
-    ]
-    if not columnas_busqueda:
-        columnas_busqueda = [col for col in df.columns if col != ADMIN_DELETE_COLUMN]
-    serie = df[columnas_busqueda].fillna("").astype(str).agg(" ".join, axis=1)
-    mascara = serie.apply(lambda valor: texto in normalizar_texto_busqueda(valor))
-    return df.loc[mascara].copy()
-
-
 def guardar_cambios_tabla_admin(nombre_tabla, df_original, editor_state, lookups=None):
     config = ADMIN_TABLAS_BBDD[nombre_tabla]
     pk = config["pk"]
@@ -6116,31 +6098,9 @@ def guardar_cambios_tabla_admin(nombre_tabla, df_original, editor_state, lookups
     anadidos = editor_state.get("added_rows", []) if editor_state else []
     borrados = editor_state.get("deleted_rows", []) if editor_state else []
     cambios = 0
-    filas_eliminadas_por_checkbox = set()
-
-    # Eliminación explícita: se muestra una columna "Eliminar" porque Streamlit
-    # no siempre hace evidente el borrado nativo de filas en data_editor.
-    for row_idx_str, edits in editados.items():
-        if not isinstance(edits, dict) or not bool(edits.get(ADMIN_DELETE_COLUMN)):
-            continue
-        row_idx = int(row_idx_str)
-        if row_idx < 0 or row_idx >= len(df_original):
-            continue
-        fila_original = df_original.iloc[row_idx].to_dict()
-        pk_valor = normalizar_valor_admin(fila_original.get(pk), pk)
-        if pk_valor:
-            supabase.table(nombre_tabla).delete().eq(pk, pk_valor).execute()
-            cambios += 1
-            filas_eliminadas_por_checkbox.add(row_idx)
 
     for row_idx_str, edits in editados.items():
         row_idx = int(row_idx_str)
-        if row_idx in filas_eliminadas_por_checkbox:
-            continue
-        edits = dict(edits or {})
-        edits.pop(ADMIN_DELETE_COLUMN, None)
-        if not edits:
-            continue
         fila_original = df_original.iloc[row_idx].to_dict()
         pk_valor = normalizar_valor_admin(fila_original.get(pk), pk)
         if not pk_valor:
@@ -6150,14 +6110,11 @@ def guardar_cambios_tabla_admin(nombre_tabla, df_original, editor_state, lookups
         fila_actualizada = aplicar_campos_intuitivos_admin(nombre_tabla, fila_actualizada, lookups)
         datos_actualizados = fila_admin_para_guardar(fila_actualizada, config, incluir_pk=False)
         datos_actualizados.pop(pk, None)
-        datos_actualizados.pop(ADMIN_DELETE_COLUMN, None)
         if datos_actualizados:
             supabase.table(nombre_tabla).update(datos_actualizados).eq(pk, pk_valor).execute()
             cambios += 1
 
     for nueva_fila in anadidos:
-        nueva_fila = dict(nueva_fila or {})
-        nueva_fila.pop(ADMIN_DELETE_COLUMN, None)
         nueva_fila = aplicar_campos_intuitivos_admin(nombre_tabla, nueva_fila, lookups)
         datos_nuevos = fila_admin_para_guardar(nueva_fila, config, incluir_pk=not config.get("generated_pk"))
         datos_nuevos = {k: v for k, v in datos_nuevos.items() if v is not None}
@@ -6211,31 +6168,12 @@ def render_pagina_administracion():
             st.warning(mensaje_tabla)
         else:
             st.caption(f"{len(tabla_df)} registros cargados de public.{tabla_seleccionada}")
-            texto_busqueda_admin = st.text_input(
-                "Buscar en esta tabla",
-                placeholder="Buscar por nombre, ingrediente, receta, cliente, alérgeno, estado...",
-                key=f"admin_buscar_{tabla_seleccionada}",
-            )
             tabla_editor_df, admin_lookups = preparar_tabla_admin_intuitiva(tabla_seleccionada, tabla_df)
-            if not config_tabla.get("fixed_rows"):
-                tabla_editor_df[ADMIN_DELETE_COLUMN] = False
-            tabla_editor_df = filtrar_tabla_admin(tabla_editor_df, texto_busqueda_admin)
-            if texto_busqueda_admin:
-                st.caption(f"{len(tabla_editor_df)} registros encontrados con el filtro actual.")
-
             columnas_visibles = columnas_editor_admin(tabla_seleccionada, config_tabla)
-            if not config_tabla.get("fixed_rows"):
-                columnas_visibles = [ADMIN_DELETE_COLUMN] + columnas_visibles
             column_config = {}
             for columna in tabla_editor_df.columns:
                 etiqueta = ADMIN_ETIQUETAS_COLUMNAS.get(columna, columna)
-                if columna == ADMIN_DELETE_COLUMN:
-                    column_config[columna] = st.column_config.CheckboxColumn(
-                        "Eliminar",
-                        help="Marca esta casilla y pulsa Guardar cambios para borrar el registro.",
-                        width="small",
-                    )
-                elif columna not in columnas_visibles:
+                if columna not in columnas_visibles:
                     # Campo técnico: se conserva para guardar/actualizar/borrar, pero no se muestra.
                     column_config[columna] = None
                 elif columna in ADMIN_BOOLEAN_COLUMNS:
@@ -6250,13 +6188,11 @@ def render_pagina_administracion():
 
             columnas_bloqueadas = [
                 col for col in tabla_editor_df.columns
-                if col != ADMIN_DELETE_COLUMN and (
-                    col in ADMIN_READONLY_COLUMNS
-                    or columna_admin_es_id(col)
-                    or (col == config_tabla["pk"] and config_tabla.get("fixed_rows"))
-                )
+                if col in ADMIN_READONLY_COLUMNS
+                or columna_admin_es_id(col)
+                or (col == config_tabla["pk"] and config_tabla.get("fixed_rows"))
             ]
-            editor_key = f"admin_editor_{tabla_seleccionada}_{normalizar_texto_busqueda(texto_busqueda_admin)[:20]}"
+            editor_key = f"admin_editor_{tabla_seleccionada}"
             st.data_editor(
                 tabla_editor_df,
                 num_rows="fixed" if config_tabla.get("fixed_rows") else "dynamic",
@@ -6276,10 +6212,8 @@ def render_pagina_administracion():
                         cambios = guardar_cambios_tabla_admin(tabla_seleccionada, tabla_editor_df, editor_state, admin_lookups)
                         if tabla_seleccionada == "usuarios_app":
                             asegurar_usuario_app_supabase()
-                        if tabla_seleccionada in {"inventario", "alergenos", "ingrediente_alergenos", "receta_ingredientes", "menu_recetas"}:
+                        if tabla_seleccionada == "inventario":
                             st.session_state["db_trigger"] += 1
-                        if tabla_seleccionada in {"alergenos", "ingrediente_alergenos"}:
-                            limpiar_cache_alergenos()
                         st.success(f"Cambios guardados: {cambios}")
                         st.rerun()
                     except Exception as e:
@@ -6492,11 +6426,6 @@ with main_tab_recetas:
     if aviso_ingrediente:
         st.success(aviso_ingrediente)
 
-    # Mantener alérgenos de la receta sincronizados con la tabla normalizada.
-    st.session_state["ingredientes"] = [
-        enriquecer_ingrediente_con_alergenos(ing)
-        for ing in st.session_state.get("ingredientes", [])
-    ]
     ingredientes_activos = st.session_state.get("ingredientes", [])
     fila_seleccionada = st.session_state.get("ingrediente_fila_seleccionada")
     borrador_alta = datos_ficha_ingrediente(
@@ -6747,18 +6676,7 @@ with main_tab_recetas:
         st.rerun()
 
     alergenos_receta_actual = calcular_alergenos_desde_ingredientes(st.session_state.get("ingredientes", []))
-    alerg_col1, alerg_col2 = st.columns([5, 1])
-    with alerg_col1:
-        st.markdown("#### Alérgenos detectados")
-    with alerg_col2:
-        if st.button("Refrescar alérgenos", use_container_width=True, key="refrescar_alergenos_receta"):
-            limpiar_cache_alergenos()
-            st.session_state["db_trigger"] += 1
-            st.session_state["ingredientes"] = [
-                enriquecer_ingrediente_con_alergenos({**ing, "alergenos": []})
-                for ing in st.session_state.get("ingredientes", [])
-            ]
-            st.rerun()
+    st.markdown("#### Alérgenos detectados")
     if alergenos_receta_actual:
         st.warning(formatear_alergenos(alergenos_receta_actual))
     else:
@@ -8172,14 +8090,7 @@ with main_tab_menus:
     if lineas_menu_actual:
         fichas_menu_actual = cargar_fichas_tecnicas_menu_desde_lineas(lineas_menu_actual)
         alergenos_menu_actual = calcular_alergenos_menu(fichas_menu_actual)
-        alerg_menu_col1, alerg_menu_col2 = st.columns([5, 1])
-        with alerg_menu_col1:
-            st.caption(f"Alérgenos del menú: {formatear_alergenos(alergenos_menu_actual)}")
-        with alerg_menu_col2:
-            if st.button("Refrescar alérgenos", use_container_width=True, key="refrescar_alergenos_menu"):
-                limpiar_cache_alergenos()
-                st.session_state["db_trigger"] += 1
-                st.rerun()
+        st.caption(f"Alérgenos del menú: {formatear_alergenos(alergenos_menu_actual)}")
         nombre_menu_excel = str(nombre_menu or "Menu").strip() or "Menu"
         st.download_button(
             "Descargar fichas técnicas del menú",
