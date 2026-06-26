@@ -5680,6 +5680,355 @@ def columnas_visibles_admin(columnas):
     return [col for col in columnas if not columna_admin_es_id(col)]
 
 
+ADMIN_COLUMNAS_INTUITIVAS = {
+    "alergenos": ["codigo", "nombre", "descripcion", "activo"],
+    "ingrediente_alergenos": ["ingrediente", "alergeno"],
+    "inventario": [
+        "codigo", "familia", "descripcion", "unidad_medida", "merma", "precio_unidad",
+        "proveedor_precio", "formato_compra", "cantidad_formato_compra",
+        "unidad_formato_compra", "precio_formato_compra", "fecha_precio",
+        "url_precio", "observaciones_precio",
+    ],
+    "recetas": [
+        "codigo_receta", "nombre", "categoria", "tipo_plato", "raciones_base",
+        "unidad_servicio", "descripcion", "elaboracion", "observaciones",
+        "costes_indirectos_pct", "margen_beneficio_pct", "iva_pct",
+        "coste_total", "precio_venta_sin_iva", "precio_venta_con_iva", "activa",
+    ],
+    "receta_ingredientes": [
+        "receta", "ingrediente", "descripcion_ingrediente", "cantidad_bruta",
+        "unidad_medida", "merma", "cantidad_neta", "precio_unidad",
+        "coste_total", "orden", "es_temporal",
+    ],
+    "menus": ["nombre", "tipo_menu", "descripcion", "numero_comensales", "coste_total", "precio_total"],
+    "menu_recetas": ["menu", "receta", "raciones", "orden", "seccion"],
+    "clientes": [
+        "nombre", "tipo_cliente", "nif_cif", "email", "telefono", "direccion",
+        "codigo_postal", "ciudad", "provincia", "pais", "observaciones",
+    ],
+    "facturas": [
+        "cliente", "numero_factura", "tipo_documento", "estado", "fecha_emision",
+        "fecha_vencimiento", "concepto", "base_imponible", "iva_pct", "iva_importe",
+        "retencion_pct", "retencion_importe", "total", "metodo_pago",
+        "estado_cobro", "notas",
+    ],
+    "factura_lineas": [
+        "factura", "origen_tipo", "descripcion", "cantidad", "unidad",
+        "precio_unitario", "descuento_pct", "base_linea", "iva_pct",
+        "iva_linea", "total_linea", "orden",
+    ],
+    "usuarios_app": ["email", "nombre", "rol", "activo"],
+}
+
+ADMIN_ETIQUETAS_COLUMNAS = {
+    "codigo": "Código",
+    "familia": "Familia",
+    "descripcion": "Descripción",
+    "unidad_medida": "Unidad",
+    "merma": "Merma %",
+    "precio_unidad": "Precio unidad",
+    "proveedor_precio": "Proveedor",
+    "formato_compra": "Formato compra",
+    "cantidad_formato_compra": "Cantidad formato",
+    "unidad_formato_compra": "Unidad formato",
+    "precio_formato_compra": "Precio formato",
+    "fecha_precio": "Fecha precio",
+    "url_precio": "URL precio",
+    "observaciones_precio": "Observaciones precio",
+    "nombre": "Nombre",
+    "activo": "Activo",
+    "receta": "Receta",
+    "ingrediente": "Ingrediente",
+    "alergeno": "Alérgeno",
+    "codigo_receta": "Código receta",
+    "categoria": "Categoría",
+    "tipo_plato": "Tipo plato",
+    "raciones_base": "Raciones base",
+    "unidad_servicio": "Unidad servicio",
+    "elaboracion": "Elaboración",
+    "observaciones": "Observaciones",
+    "costes_indirectos_pct": "Costes indirectos %",
+    "margen_beneficio_pct": "Beneficio %",
+    "iva_pct": "IVA %",
+    "coste_total": "Coste total",
+    "precio_venta_sin_iva": "PVP sin IVA",
+    "precio_venta_con_iva": "PVP con IVA",
+    "descripcion_ingrediente": "Ingrediente en receta",
+    "cantidad_bruta": "Cantidad bruta",
+    "cantidad_neta": "Cantidad neta",
+    "orden": "Orden",
+    "es_temporal": "Temporal",
+    "tipo_menu": "Tipo menú",
+    "numero_comensales": "Comensales",
+    "precio_total": "Precio total",
+    "raciones": "Raciones",
+    "seccion": "Sección",
+    "tipo_cliente": "Tipo cliente",
+    "nif_cif": "NIF/CIF",
+    "email": "Email",
+    "telefono": "Teléfono",
+    "direccion": "Dirección",
+    "codigo_postal": "Código postal",
+    "ciudad": "Ciudad",
+    "provincia": "Provincia",
+    "pais": "País",
+    "cliente": "Cliente",
+    "numero_factura": "Nº documento",
+    "tipo_documento": "Tipo documento",
+    "estado": "Estado",
+    "fecha_emision": "Fecha emisión",
+    "fecha_vencimiento": "Fecha vencimiento",
+    "concepto": "Concepto",
+    "base_imponible": "Base imponible",
+    "iva_importe": "IVA importe",
+    "retencion_pct": "Retención %",
+    "retencion_importe": "Retención importe",
+    "total": "Total",
+    "metodo_pago": "Método pago",
+    "estado_cobro": "Estado cobro",
+    "notas": "Notas",
+    "factura": "Factura/presupuesto",
+    "origen_tipo": "Origen",
+    "cantidad": "Cantidad",
+    "unidad": "Unidad",
+    "precio_unitario": "Precio unitario",
+    "descuento_pct": "Descuento %",
+    "base_linea": "Base línea",
+    "iva_linea": "IVA línea",
+    "total_linea": "Total línea",
+    "rol": "Rol",
+}
+
+ADMIN_SELECTBOX_COLUMNS = {"ingrediente", "alergeno", "receta", "menu", "cliente", "factura", "rol", "tipo_documento", "estado", "estado_cobro"}
+
+
+def etiqueta_admin(*partes):
+    """Crea etiquetas legibles sin exponer IDs técnicos."""
+    limpias = []
+    for parte in partes:
+        texto = str(parte or "").strip()
+        if texto:
+            limpias.append(texto)
+    return " · ".join(limpias)
+
+
+def _df_admin(tabla, columnas, order=None, limite=5000):
+    if not supabase_disponible or supabase is None:
+        return pd.DataFrame(columns=columnas)
+    try:
+        consulta = supabase.table(tabla).select(",".join(columnas)).limit(int(limite))
+        if order:
+            consulta = consulta.order(order)
+        respuesta = consulta.execute()
+        df = pd.DataFrame(respuesta.data or [])
+        for col in columnas:
+            if col not in df.columns:
+                df[col] = None
+        return df[columnas].copy()
+    except Exception:
+        return pd.DataFrame(columns=columnas)
+
+
+def obtener_lookups_admin():
+    """Construye mapas id/código -> etiqueta y etiqueta -> id/código para edición intuitiva."""
+    inventario = cargar_inventario_supabase(st.session_state.get("db_trigger", 0))
+    alergenos = cargar_alergenos_supabase()
+    recetas = _df_admin("recetas", ["id", "codigo_receta", "nombre", "categoria"], order="nombre")
+    menus = _df_admin("menus", ["id", "nombre", "tipo_menu"], order="nombre")
+    clientes = _df_admin("clientes", ["id", "nombre", "email", "telefono"], order="nombre")
+    facturas = _df_admin("facturas", ["id", "numero_factura", "tipo_documento", "fecha_emision", "cliente_id", "concepto"], order="fecha_emision")
+
+    def mapas(df, clave, columnas_etiqueta):
+        por_clave = {}
+        por_etiqueta = {}
+        opciones = []
+        if df is None or df.empty:
+            return por_clave, por_etiqueta, opciones
+        vistos = {}
+        for _, fila in df.iterrows():
+            valor = str(fila.get(clave, "") or "").strip()
+            if not valor:
+                continue
+            etiqueta = etiqueta_admin(*[fila.get(col, "") for col in columnas_etiqueta])
+            if not etiqueta:
+                etiqueta = valor
+            # Si hay dos etiquetas iguales, se añade una pista no técnica para distinguirlas.
+            cuenta = vistos.get(etiqueta, 0) + 1
+            vistos[etiqueta] = cuenta
+            etiqueta_final = etiqueta if cuenta == 1 else f"{etiqueta} ({cuenta})"
+            por_clave[valor] = etiqueta_final
+            por_etiqueta[etiqueta_final] = valor
+            opciones.append(etiqueta_final)
+        return por_clave, por_etiqueta, opciones
+
+    inv_df = inventario.copy() if isinstance(inventario, pd.DataFrame) else pd.DataFrame()
+    if not inv_df.empty:
+        inv_df["codigo"] = inv_df["codigo"].fillna("").astype(str).str.strip().str.upper()
+    ingrediente_por_codigo, codigo_por_ingrediente, opciones_ingredientes = mapas(
+        inv_df, "codigo", ["descripcion", "codigo", "familia"]
+    )
+    alergeno_por_id, id_por_alergeno, opciones_alergenos = mapas(
+        alergenos, "id", ["nombre", "codigo"]
+    )
+    receta_por_id, id_por_receta, opciones_recetas = mapas(
+        recetas, "id", ["nombre", "codigo_receta", "categoria"]
+    )
+    menu_por_id, id_por_menu, opciones_menus = mapas(
+        menus, "id", ["nombre", "tipo_menu"]
+    )
+    cliente_por_id, id_por_cliente, opciones_clientes = mapas(
+        clientes, "id", ["nombre", "email", "telefono"]
+    )
+
+    facturas_etiquetas = facturas.copy()
+    if not facturas_etiquetas.empty:
+        facturas_etiquetas["cliente"] = facturas_etiquetas["cliente_id"].fillna("").astype(str).map(cliente_por_id).fillna("")
+        facturas_etiquetas["etiqueta"] = facturas_etiquetas.apply(
+            lambda f: etiqueta_admin(
+                f.get("numero_factura"),
+                f.get("tipo_documento"),
+                f.get("fecha_emision"),
+                f.get("cliente"),
+                f.get("concepto"),
+            ),
+            axis=1,
+        )
+    factura_por_id, id_por_factura, opciones_facturas = mapas(
+        facturas_etiquetas, "id", ["etiqueta"]
+    )
+
+    return {
+        "ingrediente_por_codigo": ingrediente_por_codigo,
+        "codigo_por_ingrediente": codigo_por_ingrediente,
+        "opciones_ingredientes": opciones_ingredientes,
+        "alergeno_por_id": alergeno_por_id,
+        "id_por_alergeno": id_por_alergeno,
+        "opciones_alergenos": opciones_alergenos,
+        "receta_por_id": receta_por_id,
+        "id_por_receta": id_por_receta,
+        "opciones_recetas": opciones_recetas,
+        "menu_por_id": menu_por_id,
+        "id_por_menu": id_por_menu,
+        "opciones_menus": opciones_menus,
+        "cliente_por_id": cliente_por_id,
+        "id_por_cliente": id_por_cliente,
+        "opciones_clientes": opciones_clientes,
+        "factura_por_id": factura_por_id,
+        "id_por_factura": id_por_factura,
+        "opciones_facturas": opciones_facturas,
+    }
+
+
+def preparar_tabla_admin_intuitiva(nombre_tabla, df):
+    """Añade columnas legibles para claves foráneas sin enseñar IDs."""
+    lookups = obtener_lookups_admin()
+    editor_df = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    for col in ADMIN_COLUMNAS_INTUITIVAS.get(nombre_tabla, []):
+        if col not in editor_df.columns:
+            editor_df[col] = ""
+
+    if nombre_tabla == "ingrediente_alergenos":
+        editor_df["ingrediente"] = editor_df.get("codigo_ingrediente", "").fillna("").astype(str).str.upper().map(
+            lookups["ingrediente_por_codigo"]
+        ).fillna(editor_df.get("codigo_ingrediente", ""))
+        editor_df["alergeno"] = editor_df.get("alergeno_id", "").fillna("").astype(str).map(
+            lookups["alergeno_por_id"]
+        ).fillna("")
+    elif nombre_tabla == "receta_ingredientes":
+        editor_df["receta"] = editor_df.get("receta_id", "").fillna("").astype(str).map(
+            lookups["receta_por_id"]
+        ).fillna("")
+        codigo_ing = editor_df.get("codigo_ingrediente", "").fillna("").astype(str).str.upper()
+        editor_df["ingrediente"] = codigo_ing.map(lookups["ingrediente_por_codigo"]).fillna(
+            editor_df.get("descripcion_ingrediente", "")
+        )
+    elif nombre_tabla == "menu_recetas":
+        editor_df["menu"] = editor_df.get("menu_id", "").fillna("").astype(str).map(
+            lookups["menu_por_id"]
+        ).fillna("")
+        editor_df["receta"] = editor_df.get("receta_id", "").fillna("").astype(str).map(
+            lookups["receta_por_id"]
+        ).fillna("")
+    elif nombre_tabla == "facturas":
+        editor_df["cliente"] = editor_df.get("cliente_id", "").fillna("").astype(str).map(
+            lookups["cliente_por_id"]
+        ).fillna("")
+    elif nombre_tabla == "factura_lineas":
+        editor_df["factura"] = editor_df.get("factura_id", "").fillna("").astype(str).map(
+            lookups["factura_por_id"]
+        ).fillna("")
+
+    return editor_df, lookups
+
+
+def aplicar_campos_intuitivos_admin(nombre_tabla, fila, lookups=None):
+    """Convierte columnas legibles del editor en claves reales antes de guardar."""
+    datos = dict(fila or {})
+    lookups = lookups or obtener_lookups_admin()
+
+    if nombre_tabla == "ingrediente_alergenos":
+        if datos.get("ingrediente"):
+            datos["codigo_ingrediente"] = lookups["codigo_por_ingrediente"].get(str(datos.get("ingrediente")), datos.get("codigo_ingrediente"))
+        if datos.get("alergeno"):
+            datos["alergeno_id"] = lookups["id_por_alergeno"].get(str(datos.get("alergeno")), datos.get("alergeno_id"))
+    elif nombre_tabla == "receta_ingredientes":
+        if datos.get("receta"):
+            datos["receta_id"] = lookups["id_por_receta"].get(str(datos.get("receta")), datos.get("receta_id"))
+        if datos.get("ingrediente"):
+            codigo = lookups["codigo_por_ingrediente"].get(str(datos.get("ingrediente")))
+            if codigo:
+                datos["codigo_ingrediente"] = codigo
+                datos["es_temporal"] = False
+                if not datos.get("descripcion_ingrediente"):
+                    datos["descripcion_ingrediente"] = str(datos.get("ingrediente", "")).split(" · ")[0]
+    elif nombre_tabla == "menu_recetas":
+        if datos.get("menu"):
+            datos["menu_id"] = lookups["id_por_menu"].get(str(datos.get("menu")), datos.get("menu_id"))
+        if datos.get("receta"):
+            datos["receta_id"] = lookups["id_por_receta"].get(str(datos.get("receta")), datos.get("receta_id"))
+    elif nombre_tabla == "facturas":
+        if datos.get("cliente"):
+            datos["cliente_id"] = lookups["id_por_cliente"].get(str(datos.get("cliente")), datos.get("cliente_id"))
+    elif nombre_tabla == "factura_lineas":
+        if datos.get("factura"):
+            datos["factura_id"] = lookups["id_por_factura"].get(str(datos.get("factura")), datos.get("factura_id"))
+
+    for col in ["ingrediente", "alergeno", "receta", "menu", "cliente", "factura"]:
+        datos.pop(col, None)
+    return datos
+
+
+def columnas_editor_admin(nombre_tabla, config):
+    columnas = ADMIN_COLUMNAS_INTUITIVAS.get(nombre_tabla)
+    if columnas:
+        return [col for col in columnas if col in config["columns"] or col in {"ingrediente", "alergeno", "receta", "menu", "cliente", "factura"}]
+    return columnas_visibles_admin(config["columns"])
+
+
+def opciones_columna_admin(columna, lookups):
+    if columna == "ingrediente":
+        return lookups.get("opciones_ingredientes", [])
+    if columna == "alergeno":
+        return lookups.get("opciones_alergenos", [])
+    if columna == "receta":
+        return lookups.get("opciones_recetas", [])
+    if columna == "menu":
+        return lookups.get("opciones_menus", [])
+    if columna == "cliente":
+        return lookups.get("opciones_clientes", [])
+    if columna == "factura":
+        return lookups.get("opciones_facturas", [])
+    if columna == "rol":
+        return ["usuario", "admin"]
+    if columna == "tipo_documento":
+        return ["presupuesto", "factura"]
+    if columna == "estado_cobro":
+        return ["pendiente", "parcial", "cobrado", "vencido"]
+    if columna == "estado":
+        return ["borrador", "emitido", "enviado", "aceptado", "rechazado", "cancelado"]
+    return []
+
+
 def normalizar_valor_admin(valor, columna):
     if valor is None:
         return None
@@ -5741,9 +6090,10 @@ def cargar_tabla_admin(nombre_tabla, limite=500):
         return False, f"No se pudo cargar {nombre_tabla}: {e}", pd.DataFrame(columns=columnas)
 
 
-def guardar_cambios_tabla_admin(nombre_tabla, df_original, editor_state):
+def guardar_cambios_tabla_admin(nombre_tabla, df_original, editor_state, lookups=None):
     config = ADMIN_TABLAS_BBDD[nombre_tabla]
     pk = config["pk"]
+    lookups = lookups or obtener_lookups_admin()
     editados = editor_state.get("edited_rows", {}) if editor_state else {}
     anadidos = editor_state.get("added_rows", []) if editor_state else []
     borrados = editor_state.get("deleted_rows", []) if editor_state else []
@@ -5757,6 +6107,7 @@ def guardar_cambios_tabla_admin(nombre_tabla, df_original, editor_state):
             continue
         fila_actualizada = dict(fila_original)
         fila_actualizada.update(edits)
+        fila_actualizada = aplicar_campos_intuitivos_admin(nombre_tabla, fila_actualizada, lookups)
         datos_actualizados = fila_admin_para_guardar(fila_actualizada, config, incluir_pk=False)
         datos_actualizados.pop(pk, None)
         if datos_actualizados:
@@ -5764,6 +6115,7 @@ def guardar_cambios_tabla_admin(nombre_tabla, df_original, editor_state):
             cambios += 1
 
     for nueva_fila in anadidos:
+        nueva_fila = aplicar_campos_intuitivos_admin(nombre_tabla, nueva_fila, lookups)
         datos_nuevos = fila_admin_para_guardar(nueva_fila, config, incluir_pk=not config.get("generated_pk"))
         datos_nuevos = {k: v for k, v in datos_nuevos.items() if v is not None}
         if datos_nuevos:
@@ -5816,31 +6168,33 @@ def render_pagina_administracion():
             st.warning(mensaje_tabla)
         else:
             st.caption(f"{len(tabla_df)} registros cargados de public.{tabla_seleccionada}")
-            columnas_visibles = columnas_visibles_admin(config_tabla["columns"])
+            tabla_editor_df, admin_lookups = preparar_tabla_admin_intuitiva(tabla_seleccionada, tabla_df)
+            columnas_visibles = columnas_editor_admin(tabla_seleccionada, config_tabla)
             column_config = {}
-            for columna in config_tabla["columns"]:
+            for columna in tabla_editor_df.columns:
+                etiqueta = ADMIN_ETIQUETAS_COLUMNAS.get(columna, columna)
                 if columna not in columnas_visibles:
-                    # Campo técnico: se conserva en el DataFrame para poder guardar
-                    # cambios, pero no se muestra en la interfaz de Administración.
+                    # Campo técnico: se conserva para guardar/actualizar/borrar, pero no se muestra.
                     column_config[columna] = None
                 elif columna in ADMIN_BOOLEAN_COLUMNS:
-                    column_config[columna] = st.column_config.CheckboxColumn(columna)
-                elif columna == "rol":
-                    column_config[columna] = st.column_config.SelectboxColumn(columna, options=["usuario", "admin"])
+                    column_config[columna] = st.column_config.CheckboxColumn(etiqueta)
+                elif columna in ADMIN_SELECTBOX_COLUMNS:
+                    opciones = opciones_columna_admin(columna, admin_lookups)
+                    column_config[columna] = st.column_config.SelectboxColumn(etiqueta, options=opciones or None)
                 elif columna in ADMIN_NUMERIC_COLUMNS:
-                    column_config[columna] = st.column_config.NumberColumn(columna)
+                    column_config[columna] = st.column_config.NumberColumn(etiqueta)
                 else:
-                    column_config[columna] = st.column_config.TextColumn(columna)
+                    column_config[columna] = st.column_config.TextColumn(etiqueta)
 
             columnas_bloqueadas = [
-                col for col in config_tabla["columns"]
+                col for col in tabla_editor_df.columns
                 if col in ADMIN_READONLY_COLUMNS
                 or columna_admin_es_id(col)
                 or (col == config_tabla["pk"] and config_tabla.get("fixed_rows"))
             ]
             editor_key = f"admin_editor_{tabla_seleccionada}"
             st.data_editor(
-                tabla_df,
+                tabla_editor_df,
                 num_rows="fixed" if config_tabla.get("fixed_rows") else "dynamic",
                 use_container_width=True,
                 height=520,
@@ -5855,7 +6209,7 @@ def render_pagina_administracion():
                 if st.button("Guardar cambios", type="primary", use_container_width=True, key=f"guardar_{tabla_seleccionada}"):
                     editor_state = st.session_state.get(editor_key)
                     try:
-                        cambios = guardar_cambios_tabla_admin(tabla_seleccionada, tabla_df, editor_state)
+                        cambios = guardar_cambios_tabla_admin(tabla_seleccionada, tabla_editor_df, editor_state, admin_lookups)
                         if tabla_seleccionada == "usuarios_app":
                             asegurar_usuario_app_supabase()
                         if tabla_seleccionada == "inventario":
@@ -5865,7 +6219,7 @@ def render_pagina_administracion():
                     except Exception as e:
                         st.error(f"No se pudieron guardar los cambios en {tabla_seleccionada}: {e}")
             with acciones_col2:
-                st.caption("Las altas en tablas relacionadas necesitan claves foráneas válidas. Los borrados se aplican directamente al guardar.")
+                st.caption("Puedes añadir, editar y eliminar registros. En tablas relacionadas se muestran nombres legibles; los IDs técnicos quedan ocultos.")
 
     with admin_tab_estado:
         st.subheader("Configuración y estado")
