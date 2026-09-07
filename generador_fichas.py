@@ -56,6 +56,7 @@ if supabase_disponible:
 
 BASE_DIR = Path(__file__).resolve().parent
 LOGO_SAMIRARTE_PATH = BASE_DIR / "assets" / "logo_samirarte.png"
+LOGO_SAMIRARTE_BLANCO_PATH = BASE_DIR / "assets" / "samirarte_logo_white.png"
 
 AUTH_REFRESH_COOKIE = "escandallos_refresh_token"
 
@@ -189,6 +190,234 @@ def logo_samirarte_base64():
         return base64.b64encode(LOGO_SAMIRARTE_PATH.read_bytes()).decode("ascii")
     except Exception:
         return ""
+
+
+def logo_samirarte_blanco_existe():
+    return LOGO_SAMIRARTE_BLANCO_PATH.exists()
+
+
+def logo_samirarte_blanco_base64():
+    if not logo_samirarte_blanco_existe():
+        return ""
+    try:
+        return base64.b64encode(LOGO_SAMIRARTE_BLANCO_PATH.read_bytes()).decode("ascii")
+    except Exception:
+        return ""
+
+
+def mostrar_portal_acceso():
+    """Pantalla de bienvenida de marca mostrada antes de entrar al Gestor de Escandallos."""
+    logo_b64 = logo_samirarte_blanco_base64()
+    logo_html = (
+        f'<img src="data:image/png;base64,{logo_b64}" alt="Samirarte — Artesanía Gourmet">'
+        if logo_b64
+        else '<span class="portal-logo-fallback">SAMIRARTE</span>'
+    )
+
+    st.markdown(
+        """
+        <style>
+        [data-testid="stAppViewContainer"], [data-testid="stHeader"], html, body {
+            background: #0c0a08 !important;
+        }
+        [data-testid="stHeader"] { background: transparent !important; }
+        .block-container {
+            padding: 0 !important;
+            max-width: 100% !important;
+        }
+        #MainMenu, footer[data-testid="stBottom"] { visibility: hidden; }
+
+        .portal-gate {
+            font-family: "Cormorant Garamond", Georgia, "Times New Roman", serif;
+            color: #f1e8d8;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+            max-width: 620px;
+            margin: 0 auto;
+            padding: 6vh 6vw 2vh;
+            background:
+                radial-gradient(ellipse 900px 620px at 50% 0%, rgba(201,161,95,.13), transparent 60%),
+                radial-gradient(ellipse 1200px 800px at 50% 100%, rgba(77,59,46,.2), transparent 65%);
+        }
+        .portal-plaque {
+            width: min(260px, 58vw);
+            position: relative;
+        }
+        .portal-plaque::before {
+            content: "";
+            position: absolute;
+            inset: -30%;
+            background: radial-gradient(ellipse closest-side, rgba(201,161,95,.22), transparent 70%);
+            z-index: 0;
+        }
+        .portal-plaque img {
+            position: relative;
+            z-index: 1;
+            width: 100%;
+            display: block;
+            filter: drop-shadow(0 0 28px rgba(201,161,95,.2));
+        }
+        .portal-logo-fallback {
+            font-family: "Cinzel", serif;
+            font-size: 2rem;
+            letter-spacing: .2em;
+            color: #e8cd9a;
+        }
+        .portal-eyebrow {
+            margin: 1.4rem 0 0;
+            font-family: "Cinzel", Georgia, serif;
+            font-size: .66rem;
+            letter-spacing: .4em;
+            text-transform: uppercase;
+            color: #e8cd9a;
+            opacity: .8;
+        }
+        .portal-h1 {
+            margin: .6rem 0 0;
+            font-family: "Cormorant Garamond", serif;
+            font-weight: 600;
+            font-size: clamp(1.9rem, 5vw, 2.7rem);
+            line-height: 1.1;
+            color: #f1e8d8;
+        }
+        .portal-lede {
+            margin: .9rem 0 0;
+            max-width: 42ch;
+            font-size: 1.08rem;
+            font-style: italic;
+            line-height: 1.5;
+            color: #a89a86;
+        }
+        .portal-cta-note {
+            margin: .7rem 0 0;
+            font-size: .8rem;
+            color: #6d5f50;
+        }
+        .portal-ornament {
+            margin: 2rem 0 1.6rem;
+            display: flex;
+            align-items: center;
+            gap: .9rem;
+            color: #8a6f56;
+            width: 100%;
+            max-width: 380px;
+        }
+        .portal-ornament .line { flex: 1; height: 1px; background: linear-gradient(90deg, transparent, rgba(201,161,95,.16)); }
+        .portal-ornament .line.right { background: linear-gradient(90deg, rgba(201,161,95,.16), transparent); }
+        .portal-ornament svg { width: 11px; height: 11px; flex-shrink: 0; }
+        .portal-grid {
+            width: 100%;
+            max-width: 460px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1px;
+            background: rgba(201,161,95,.16);
+            border: 1px solid rgba(201,161,95,.16);
+        }
+        .portal-cell {
+            background: #18130e;
+            padding: 1.2rem 1.2rem;
+            text-align: left;
+            display: flex;
+            flex-direction: column;
+            gap: .35rem;
+        }
+        .portal-cell .label {
+            font-family: "Cinzel", serif;
+            font-size: .62rem;
+            letter-spacing: .22em;
+            text-transform: uppercase;
+            color: #e8cd9a;
+            opacity: .9;
+        }
+        .portal-cell p { margin: 0; font-size: .94rem; line-height: 1.4; color: #a89a86; }
+        .portal-footer { margin-top: 2.2rem; display: flex; flex-direction: column; align-items: center; gap: .3rem; }
+        .portal-footer-note { font-size: .76rem; color: #6d5f50; }
+        .portal-footer-brand { font-family: "Cinzel", serif; font-size: .58rem; letter-spacing: .32em; text-transform: uppercase; color: #8a6f56; }
+        .portal-footer-credit { margin-top: .6rem; font-size: .72rem; color: #6d5f50; }
+        .portal-footer-credit a { color: #8a6f56; text-decoration: none; border-bottom: 1px solid rgba(138,111,86,.4); }
+
+        div[data-testid="stButton"] {
+            display: flex;
+            justify-content: center;
+            margin: 0 auto 2.4rem;
+            max-width: 460px;
+        }
+        div[data-testid="stButton"] > button {
+            font-family: "Cinzel", serif !important;
+            font-size: .8rem !important;
+            font-weight: 500 !important;
+            letter-spacing: .2em;
+            text-transform: uppercase;
+            color: #141009 !important;
+            background: linear-gradient(180deg, #e8cd9a, #c9a15f) !important;
+            border: 1px solid rgba(232,205,154,.5) !important;
+            border-radius: 2px !important;
+            padding: .95rem 2.5rem !important;
+            box-shadow: 0 8px 30px rgba(201,161,95,.18);
+        }
+        div[data-testid="stButton"] > button:hover {
+            filter: brightness(1.06);
+            color: #141009 !important;
+        }
+        </style>
+        <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;500;600&family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&display=swap" rel="stylesheet">
+        <div class="portal-gate">
+            <div class="portal-plaque">{logo}</div>
+            <p class="portal-eyebrow">Acceso interno</p>
+            <h1 class="portal-h1">Gestor de Escandallos</h1>
+            <p class="portal-lede">La misma precisión con la que se pesa un ingrediente en obrador, aplicada a cada receta, menú y factura.</p>
+        </div>
+        """.replace("{logo}", logo_html),
+        unsafe_allow_html=True,
+    )
+
+    _, col_cta, _ = st.columns([1, 1.4, 1])
+    with col_cta:
+        entrar = st.button("Entrar a la aplicación", use_container_width=True, key="portal_entrar_btn")
+
+    st.markdown(
+        """
+        <div class="portal-gate" style="padding-top:0;">
+            <p class="portal-cta-note">Acceso restringido al personal de Samirarte.</p>
+            <div class="portal-ornament">
+                <span class="line"></span>
+                <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0l2.5 9.5L24 12l-9.5 2.5L12 24l-2.5-9.5L0 12l9.5-2.5L12 0z"/></svg>
+                <span class="line right"></span>
+            </div>
+            <div class="portal-grid">
+                <div class="portal-cell">
+                    <span class="label">Recetas</span>
+                    <p>Escandallos, ingredientes y coste por ración, siempre a 1 ración base.</p>
+                </div>
+                <div class="portal-cell">
+                    <span class="label">Menús</span>
+                    <p>Composición de menús, raciones propias por receta y precio de línea.</p>
+                </div>
+                <div class="portal-cell">
+                    <span class="label">Clientes</span>
+                    <p>Fichas de cliente listas para presupuestos y facturas.</p>
+                </div>
+                <div class="portal-cell">
+                    <span class="label">Facturas</span>
+                    <p>Presupuestos, facturas y documentos generados desde el menú.</p>
+                </div>
+            </div>
+            <div class="portal-footer">
+                <p class="portal-footer-note">&nbsp;</p>
+                <p class="portal-footer-brand">Samirarte · Artesanía Gourmet</p>
+                <p class="portal-footer-credit">Desarrollado por <a href="https://samirarte.com/samirarte-digital/" target="_blank" rel="noopener">Samirarte Digital</a></p>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if entrar:
+        st.session_state["portal_entrado"] = True
+        st.rerun()
 
 
 def _obtener_campo_auth(objeto, campo, valor_por_defecto=None):
@@ -4999,6 +5228,10 @@ def generar_excel(
 
 
 # --- INTERFAZ GRÁFICA DE STREAMLIT ---
+if not st.session_state.get("portal_entrado"):
+    mostrar_portal_acceso()
+    st.stop()
+
 st.markdown(
     """
     <style>
