@@ -1,0 +1,23 @@
+name: Keep Streamlit and Supabase alive
+
+on:
+  schedule:
+    - cron: '0 6 * * 1,4' # lunes y jueves a las 06:00 UTC
+  workflow_dispatch: {}
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Streamlit app
+        run: curl -sS -o /dev/null -w "Streamlit status: %{http_code}\n" https://escandallos.streamlit.app/
+
+      - name: Ping Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          curl -sS -o /dev/null -w "Supabase status: %{http_code}\n" \
+            "$SUPABASE_URL/rest/v1/alergenos?select=*&limit=1" \
+            -H "apikey: $SUPABASE_ANON_KEY" \
+            -H "Authorization: Bearer $SUPABASE_ANON_KEY"
