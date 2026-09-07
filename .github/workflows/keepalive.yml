@@ -10,7 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Ping Streamlit app
-        run: curl -sS -o /dev/null -w "Streamlit status: %{http_code}\n" https://escandallos.streamlit.app/
+        run: |
+          curl -sS -o /dev/null -w "Streamlit status: %{http_code}\n" https://escandallos.streamlit.app/
 
       - name: Ping Supabase
         env:
