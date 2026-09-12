@@ -1,0 +1,9 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "escandallos-proxy",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-08",
+  "routes": [
+    { "pattern": "escandallos.samirarte.com", "custom_domain": true }
+  ]
+}

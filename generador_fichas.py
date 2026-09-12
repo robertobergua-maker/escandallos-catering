@@ -598,6 +598,14 @@ def obtener_usuario_actual():
     }
 
 
+def es_modo_invitado():
+    """
+    True si la persona navega como invitada, sin cuenta ni sesión iniciada.
+    En este modo no se guarda nada en Supabase.
+    """
+    return bool(st.session_state.get("modo_invitado")) and not obtener_usuario_actual()
+
+
 def _limpiar_sesion_autenticacion():
     _borrar_cookie_refresh_token()
     st.session_state["user_id"] = None
@@ -2263,6 +2271,8 @@ def guardar_receta_nueva_supabase(datos_receta, ingredientes):
     """
     Guarda una receta nueva y sus lineas de escandallo en el inventario.
     """
+    if es_modo_invitado():
+        return False, "Estás en modo invitado: crea una cuenta gratuita para guardar recetas.", None
     if not supabase_disponible or supabase is None:
         return False, "El inventario no está conectado correctamente.", None
     datos_receta, ingredientes = preparar_receta_para_una_racion(
@@ -2317,6 +2327,8 @@ def actualizar_receta_supabase(receta_id, datos_receta, ingredientes):
     """
     Actualiza una receta existente y reemplaza solo sus lineas de escandallo.
     """
+    if es_modo_invitado():
+        return False, "Estás en modo invitado: crea una cuenta gratuita para guardar cambios."
     if not receta_id:
         return False, "No hay una receta cargada para actualizar."
     if not supabase_disponible or supabase is None:
@@ -4164,6 +4176,8 @@ def guardar_menu_supabase(datos_menu, lineas_menu):
     """
     Crea un menu nuevo y sus recetas asociadas. No modifica recetas.
     """
+    if es_modo_invitado():
+        return False, "Estás en modo invitado: crea una cuenta gratuita para guardar menús.", None
     if not supabase_disponible or supabase is None:
         return False, "El inventario no está conectado correctamente.", None
 
@@ -5629,6 +5643,17 @@ with st.sidebar:
                         st.success(mensaje_password)
                     else:
                         st.error(mensaje_password)
+
+        st.divider()
+        if st.button("Continuar como invitado", use_container_width=True, help="Prueba la app sin crear cuenta. Los cambios no se guardan."):
+            st.session_state["modo_invitado"] = True
+            st.rerun()
+
+    if not usuario_actual and not es_modo_invitado():
+        st.stop()
+
+    if es_modo_invitado():
+        st.warning("👀 Modo invitado: estás probando la app. Nada de lo que hagas se guarda. Crea una cuenta para conservar tus cambios.")
 
     st.divider()
     st.info("💡 Consejo: el inventario común se gestiona desde Administración, disponible solo para usuarios admin.")

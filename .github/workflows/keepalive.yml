@@ -2,13 +2,21 @@ name: Keep Streamlit and Supabase alive
 
 on:
   schedule:
-    - cron: '0 6 * * 1,4' # lunes y jueves a las 06:00 UTC
+    # Se dispara cada 15 minutos; la espera aleatoria de abajo evita un
+    # intervalo fijo y mantiene los pings aproximadamente entre 15 y 60 min.
+    - cron: '*/15 * * * *'
   workflow_dispatch: {}
 
 jobs:
   keepalive:
     runs-on: ubuntu-latest
     steps:
+      - name: Wait a random interval
+        run: |
+          delay=$((RANDOM % 2701))
+          echo "Waiting $delay seconds before keepalive ping"
+          sleep "$delay"
+
       - name: Ping Streamlit app
         run: |
           curl -sS -o /dev/null -w "Streamlit status: %{http_code}\n" \
