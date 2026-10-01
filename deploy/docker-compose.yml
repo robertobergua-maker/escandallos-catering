@@ -1,0 +1,55 @@
+# Despliegue en una VM siempre encendida (Oracle Cloud Always Free).
+# Uso: ver docs/despliegue_oracle.md
+services:
+  app:
+    build: ..
+    image: escandallos:latest
+    restart: unless-stopped
+    volumes:
+      # Mismo secrets.toml que se usaba en Streamlit Cloud (no se sube a git).
+      - ./secrets.toml:/app/.streamlit/secrets.toml:ro
+    # Solo accesible desde la propia VM; la entrada pública es Caddy.
+    expose:
+      - "8501"
+
+  # Proxy inverso con HTTPS automático (Let's Encrypt) para el subdominio
+  # configurado en Hostalia (registro A apuntando a la IP de la VM).
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      - APP_DOMAIN=${APP_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+
+  # Evita que Supabase Free pause el proyecto por inactividad (7 días).
+  # Sustituye al workflow de GitHub Actions, que GitHub desactiva en repos
+  # sin actividad.
+  supabase-keepalive:
+    image: curlimages/curl:latest
+    restart: unless-stopped
+    environment:
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          curl -sS -o /dev/null -w "$$(date -Iseconds) Supabase status: %{http_code}\n" \
+            "$$SUPABASE_URL/rest/v1/alergenos?select=*&limit=1" \
+            -H "apikey: $$SUPABASE_KEY" \
+            -H "Authorization: Bearer $$SUPABASE_KEY"
+          sleep 21600
+        done
+
+volumes:
+  caddy_data:
+  caddy_config:

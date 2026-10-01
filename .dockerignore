@@ -1,0 +1,22 @@
+.git
+.github
+.devcontainer
+.venv
+venv
+__pycache__
+*.pyc
+.env
+*.env
+.streamlit/secrets.toml
+.supabase_session.json
+cloudflare-proxy
+redirect-hostalia
+deploy
+docs
+sql
+tests
+scripts
+Nueva carpeta
+fix_alergenos_normalizados_fichas_menu
+*.sql
+*.pyy
