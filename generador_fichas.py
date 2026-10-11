@@ -73,6 +73,11 @@ def obtener_cookie_manager():
 
 def _leer_cookie_refresh_token():
     """Lee el refresh_token persistido en cookie del navegador."""
+    # st.context.cookies conserva hasta el siguiente F5 las cookies con las que
+    # se abrió la sesión, aunque ya se hayan borrado en el navegador.
+    if st.session_state.get("_ignorar_cookie_sesion"):
+        return None
+
     # 1) Streamlit expone las cookies de la petición actual de forma síncrona.
     try:
         valor = st.context.cookies.get(AUTH_REFRESH_COOKIE)
@@ -571,15 +576,25 @@ def enviar_recuperacion_password(email):
 
 def logout_supabase():
     """
-    Cierra la sesion y limpia los datos de autenticacion locales.
+    Revoca la sesión en Supabase y limpia lo local: estado, cookie y cachés
+    por usuario.
     """
-    if supabase_disponible and supabase is not None:
+    access_token = st.session_state.get("access_token")
+    refresh_token = st.session_state.get("refresh_token")
+    if supabase_disponible and supabase is not None and access_token and refresh_token:
+        # El cliente se crea en cada ejecución sin sesión de Auth; sin
+        # set_session, sign_out() no llama a /logout y el refresh_token
+        # seguiría siendo válido.
         try:
-            supabase.auth.sign_out()
+            supabase.auth.set_session(access_token, refresh_token)
+            supabase.auth.sign_out({"scope": "local"})
         except Exception:
+            # Token caducado o ya revocado: no queda nada que revocar.
             pass
 
     _limpiar_sesion_autenticacion()
+    for cargar_por_usuario in (cargar_alergenos_supabase, cargar_recetas_supabase, cargar_menus_supabase):
+        cargar_por_usuario.clear()
     return True, "Sesión cerrada correctamente."
 
 
@@ -607,7 +622,12 @@ def es_modo_invitado():
 
 
 def _limpiar_sesion_autenticacion():
-    _borrar_cookie_refresh_token()
+    # La cookie se borra en la siguiente ejecución completa (ver el bloque
+    # tras restaurar_sesion_supabase()): si se pintara aquí, el st.rerun()
+    # posterior abortaría el componente antes de llegar al navegador.
+    st.session_state["_borrar_cookie_pendiente"] = True
+    st.session_state["_ignorar_cookie_sesion"] = True
+    st.session_state["_auth_cookie_retry_done"] = True
     st.session_state["user_id"] = None
     st.session_state["user_email"] = None
     st.session_state["access_token"] = None
@@ -625,6 +645,8 @@ def _guardar_sesion_supabase(usuario, sesion):
     access_token = _obtener_campo_auth(sesion, "access_token")
     refresh_token = _obtener_campo_auth(sesion, "refresh_token")
     if user_id:
+        st.session_state["_borrar_cookie_pendiente"] = False
+        st.session_state["_ignorar_cookie_sesion"] = False
         st.session_state["user_id"] = str(user_id)
         st.session_state["user_email"] = str(user_email or "")
         st.session_state["access_token"] = access_token
@@ -633,13 +655,64 @@ def _guardar_sesion_supabase(usuario, sesion):
             _guardar_cookie_refresh_token(refresh_token)
 
 
+def _token_caduca_pronto(access_token, margen_segundos=60):
+    """True si el JWT de acceso caduca en menos de `margen_segundos` o no se puede leer."""
+    try:
+        carga = str(access_token).split(".")[1]
+        carga += "=" * (-len(carga) % 4)
+        exp = json.loads(base64.urlsafe_b64decode(carga)).get("exp")
+        return not exp or exp - datetime.now().timestamp() < margen_segundos
+    except Exception:
+        return True
+
+
+def _aplicar_sesion_al_cliente():
+    """
+    El cliente se crea en cada ejecución del script solo con la clave
+    publishable, así que sin el JWT del usuario RLS trata las consultas como
+    anónimas (devuelven 0 filas sin error). Renueva el token si está a punto
+    de caducar y lo aplica a las consultas de la base de datos.
+    """
+    access_token = st.session_state.get("access_token")
+    refresh_token = st.session_state.get("refresh_token")
+    if not access_token or not refresh_token:
+        return False
+    if not supabase_disponible or supabase is None:
+        return False
+
+    if _token_caduca_pronto(access_token):
+        if not refresh_token:
+            return False
+        try:
+            try:
+                respuesta = supabase.auth.refresh_session(refresh_token=refresh_token)
+            except TypeError:
+                respuesta = supabase.auth.refresh_session(refresh_token)
+        except Exception:
+            return False
+        usuario = _obtener_campo_auth(respuesta, "user")
+        sesion = _obtener_campo_auth(respuesta, "session")
+        if not usuario or not sesion:
+            return False
+        _guardar_sesion_supabase(usuario, sesion)
+        access_token = st.session_state.get("access_token")
+
+    supabase.postgrest.auth(access_token)
+    return True
+
+
 def restaurar_sesion_supabase():
     """
     Restaura la sesión tras F5 usando refresh_token de session_state o cookie.
     No guarda tokens en disco; solo usa cookie del navegador.
     """
     if obtener_usuario_actual():
-        return True
+        if _aplicar_sesion_al_cliente():
+            return True
+        # Sesión caducada y sin posibilidad de renovarla: volver al login en
+        # lugar de seguir con consultas anónimas que RLS deja vacías.
+        _limpiar_sesion_autenticacion()
+        return False
     if not supabase_disponible or supabase is None:
         return False
 
@@ -672,6 +745,7 @@ def restaurar_sesion_supabase():
         sesion = _obtener_campo_auth(respuesta, "session")
 
         if not usuario or not sesion:
+            _limpiar_sesion_autenticacion()
             return False
 
         _guardar_sesion_supabase(usuario, sesion)
@@ -679,6 +753,8 @@ def restaurar_sesion_supabase():
         asegurar_usuario_app_supabase()
         return True
     except Exception:
+        # refresh_token revocado o caducado (p. ej. tras cerrar sesión).
+        _limpiar_sesion_autenticacion()
         return False
 
 
@@ -948,6 +1024,10 @@ if 'usuario_app_user_id' not in st.session_state:
 
 # Restaurar sesión guardada antes de renderizar la UI.
 restaurar_sesion_supabase()
+
+# Borrado de la cookie pendiente tras cerrar sesión o rechazar el token.
+if st.session_state.get("_borrar_cookie_pendiente") and not obtener_usuario_actual():
+    _borrar_cookie_refresh_token()
 
 if 'nombre_plato' not in st.session_state:
     st.session_state['nombre_plato'] = st.session_state['receta_nombre']
@@ -1298,8 +1378,13 @@ def codigo_ingrediente_valido(codigo):
 
 
 @st.cache_data(ttl=600)
-def cargar_alergenos_supabase():
-    """Carga el catálogo normalizado de alérgenos activos."""
+def cargar_alergenos_supabase(user_id_actual=None):
+    """
+    Carga el catálogo normalizado de alérgenos activos.
+
+    `user_id_actual` solo separa la caché por usuario: con RLS, una carga
+    anónima devuelve 0 filas y no debe servirse a usuarios con sesión.
+    """
     columnas = ALERGENOS_COLUMNAS
     if not supabase_disponible or supabase is None:
         return pd.DataFrame(columns=columnas)
@@ -1347,7 +1432,7 @@ def cargar_ingrediente_alergenos_supabase(trigger=0):
         relaciones["codigo_ingrediente"] = relaciones["codigo_ingrediente"].fillna("").astype(str).str.strip().str.upper()
         relaciones["alergeno_id"] = relaciones["alergeno_id"].fillna("").astype(str)
 
-        catalogo = cargar_alergenos_supabase()
+        catalogo = cargar_alergenos_supabase(obtener_user_id_actual())
         if catalogo.empty:
             relaciones["codigo"] = ""
             relaciones["nombre"] = ""
@@ -1429,7 +1514,7 @@ def alergeno_ids_desde_nombres(nombres):
     nombres_set = {str(n or "").strip() for n in nombres or [] if str(n or "").strip()}
     if not nombres_set:
         return []
-    catalogo = cargar_alergenos_supabase()
+    catalogo = cargar_alergenos_supabase(obtener_user_id_actual())
     if catalogo.empty:
         return []
     ids = []
@@ -5723,7 +5808,7 @@ with st.sidebar:
                 value=ficha["observaciones_precio"],
                 height=70,
             )
-            catalogo_alergenos_ficha = cargar_alergenos_supabase()
+            catalogo_alergenos_ficha = cargar_alergenos_supabase(obtener_user_id_actual())
             opciones_alergenos_ficha = catalogo_alergenos_ficha["nombre"].dropna().astype(str).tolist() if not catalogo_alergenos_ficha.empty else []
             nombres_alergenos_actuales = [
                 str(item.get("nombre", "") or "").strip()
@@ -6197,7 +6282,7 @@ def _df_admin(tabla, columnas, order=None, limite=5000):
 def obtener_lookups_admin():
     """Construye mapas id/código -> etiqueta y etiqueta -> id/código para edición intuitiva."""
     inventario = cargar_inventario_supabase(st.session_state.get("db_trigger", 0))
-    alergenos = cargar_alergenos_supabase()
+    alergenos = cargar_alergenos_supabase(obtener_user_id_actual())
     recetas = _df_admin("recetas", ["id", "codigo_receta", "nombre", "categoria"], order="nombre")
     menus = _df_admin("menus", ["id", "nombre", "tipo_menu"], order="nombre")
     clientes = _df_admin("clientes", ["id", "nombre", "email", "telefono"], order="nombre")
