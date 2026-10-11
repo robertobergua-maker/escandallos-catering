@@ -1,7 +1,11 @@
-streamlit
-pandas
-openpyxl
-openai
-supabase
-reportlab
-extra-streamlit-components
+# Versiones fijadas (probadas en python:3.11-slim arm64, 2026-10-11).
+# pandas y openai se mantienen en la serie mayor con la que se desarrolló la
+# app (2.x); subir a pandas 3 / openai 3 requiere probarla antes.
+streamlit==1.65.0
+pandas==2.3.3
+numpy==2.4.6
+openpyxl==3.1.5
+openai==2.54.0
+supabase==2.32.0
+reportlab==5.0.1
+extra-streamlit-components==0.1.81
