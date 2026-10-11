@@ -574,6 +574,100 @@ def enviar_recuperacion_password(email):
         return False, f"No se pudo enviar el correo de recuperación: {e}"
 
 
+def procesar_enlace_recuperacion():
+    """
+    Valida el enlace del correo de recuperación y abre la sesión del usuario.
+
+    La plantilla "Reset Password" de Supabase debe enlazar a
+    {{ .RedirectTo }}?token_hash={{ .TokenHash }}&type=recovery. Se usa
+    token_hash y no el flujo PKCE porque el cliente se crea en cada ejecución
+    y perdería el code_verifier guardado al pedir el correo.
+    """
+    try:
+        token_hash = st.query_params.get("token_hash")
+        tipo = st.query_params.get("type")
+        error_enlace = st.query_params.get("error_description") or st.query_params.get("error")
+    except Exception:
+        return
+
+    if error_enlace:
+        st.query_params.clear()
+        st.session_state["portal_entrado"] = True
+        st.session_state["auth_feedback"] = ("error", f"El enlace no es válido: {error_enlace}. Pide uno nuevo.")
+        return
+    if not token_hash or tipo != "recovery":
+        return
+
+    # El token es de un solo uso: se quita de la URL antes de validarlo.
+    st.query_params.clear()
+    st.session_state["portal_entrado"] = True
+    mensaje_caducado = "El enlace de recuperación no es válido o ha caducado. Pide uno nuevo."
+    if not supabase_disponible or supabase is None:
+        st.session_state["auth_feedback"] = ("error", "El inventario no está conectado correctamente.")
+        return
+    try:
+        respuesta = supabase.auth.verify_otp({"token_hash": token_hash, "type": "recovery"})
+    except Exception:
+        st.session_state["auth_feedback"] = ("error", mensaje_caducado)
+        return
+
+    usuario = _obtener_campo_auth(respuesta, "user")
+    sesion = _obtener_campo_auth(respuesta, "session")
+    if not usuario or not sesion:
+        st.session_state["auth_feedback"] = ("error", mensaje_caducado)
+        return
+    _guardar_sesion_supabase(usuario, sesion)
+    st.session_state["recuperacion_password_activa"] = True
+
+
+def actualizar_password_supabase(password, password_repetida):
+    """Cambia la contraseña del usuario con la sesión abierta por el enlace de recuperación."""
+    password = str(password or "")
+    if len(password) < 6:
+        return False, "La contraseña debe tener al menos 6 caracteres."
+    if password != str(password_repetida or ""):
+        return False, "Las contraseñas no coinciden."
+
+    access_token = st.session_state.get("access_token")
+    refresh_token = st.session_state.get("refresh_token")
+    if not access_token or not refresh_token or not supabase_disponible or supabase is None:
+        return False, "La sesión de recuperación ha caducado. Pide un enlace nuevo."
+
+    try:
+        # update_user necesita la sesión dentro del cliente de Auth.
+        supabase.auth.set_session(access_token, refresh_token)
+        supabase.auth.update_user({"password": password})
+    except Exception as e:
+        return False, f"No se pudo cambiar la contraseña: {e}"
+
+    # set_session pudo renovar los tokens: guardar los vigentes.
+    sesion = supabase.auth.get_session()
+    if sesion:
+        _guardar_sesion_supabase(_obtener_campo_auth(sesion, "user"), sesion)
+    return True, "Contraseña actualizada. Ya has iniciado sesión."
+
+
+def mostrar_formulario_nueva_password():
+    st.subheader("Nueva contraseña")
+    st.caption(f"Cuenta: {st.session_state.get('user_email') or ''}")
+    with st.form("form_nueva_password"):
+        password = st.text_input("Nueva contraseña", type="password")
+        password_repetida = st.text_input("Repite la contraseña", type="password")
+        guardar = st.form_submit_button("Guardar contraseña", use_container_width=True)
+    if guardar:
+        ok, mensaje = actualizar_password_supabase(password, password_repetida)
+        if ok:
+            st.session_state["recuperacion_password_activa"] = False
+            st.session_state["auth_feedback"] = ("success", mensaje)
+            st.rerun()
+        else:
+            st.error(mensaje)
+    if st.button("Cancelar", use_container_width=True):
+        st.session_state["recuperacion_password_activa"] = False
+        logout_supabase()
+        st.rerun()
+
+
 def logout_supabase():
     """
     Revoca la sesión en Supabase y limpia lo local: estado, cookie y cachés
@@ -5327,6 +5421,12 @@ def generar_excel(
 
 
 # --- INTERFAZ GRÁFICA DE STREAMLIT ---
+# Vuelta desde el correo de recuperación: va antes de la portada.
+procesar_enlace_recuperacion()
+if st.session_state.get("recuperacion_password_activa") and obtener_usuario_actual():
+    mostrar_formulario_nueva_password()
+    st.stop()
+
 if not st.session_state.get("portal_entrado"):
     mostrar_portal_acceso()
     st.stop()

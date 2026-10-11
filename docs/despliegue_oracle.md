@@ -110,7 +110,13 @@ docker compose ps
 docker compose logs -f caddy app   # Caddy debe indicar "certificate obtained successfully"
 ```
 
-Tanto la URL provisional como la definitiva deben estar en Supabase → *Authentication → URL Configuration → Redirect URLs*.
+Tanto la URL provisional como la definitiva deben estar en Supabase → *Authentication → URL Configuration → Redirect URLs*, con comodín (`https://<dominio>/**`), porque la app envía `redirect_to` con barra final.
+
+**Recuperación de contraseña:** la app valida el enlace con `token_hash` (no con PKCE, que no funciona porque el cliente se crea en cada ejecución). En Supabase → *Authentication → Emails → Reset Password*, el enlace de la plantilla debe ser:
+
+```html
+<a href="{{ .RedirectTo }}?token_hash={{ .TokenHash }}&type=recovery">Restablecer contraseña</a>
+```
 
 ## 5. Actualizar la app
 
