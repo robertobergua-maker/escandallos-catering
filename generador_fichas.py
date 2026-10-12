@@ -672,22 +672,9 @@ def mostrar_formulario_nueva_password():
         st.rerun()
 
 
-def _diag_confirmacion(evento, clave, valor):
-    # TEMPORAL: diagnóstico del borrado con "ELIMINAR". Quitar tras la prueba.
-    print(
-        f"[diag-eliminar] ejecución={st.session_state.get('_diag_ejecucion')} {evento} "
-        f"clave={clave!r} longitud={len(str(valor or ''))} "
-        f"en_estado={clave in st.session_state} "
-        f"longitud_estado={len(str(st.session_state.get(clave) or ''))}",
-        flush=True,
-    )
-
-
-def confirmacion_eliminar_valida(valor, clave):
+def confirmacion_eliminar_valida(valor):
     """True si el texto de confirmación es ELIMINAR, sin depender de espacios ni mayúsculas."""
-    valida = str(valor or "").strip().upper() == "ELIMINAR"
-    _diag_confirmacion(f"boton valida={valida}", clave, valor)
-    return valida
+    return str(valor or "").strip().upper() == "ELIMINAR"
 
 
 def logout_supabase():
@@ -1137,20 +1124,6 @@ if 'usuario_app_error' not in st.session_state:
     st.session_state['usuario_app_error'] = None
 if 'usuario_app_user_id' not in st.session_state:
     st.session_state['usuario_app_user_id'] = None
-
-# TEMPORAL: diagnóstico del borrado con "ELIMINAR". Quitar tras la prueba.
-st.session_state["_diag_ejecucion"] = st.session_state.get("_diag_ejecucion", 0) + 1
-_diag_estado_confirmaciones = {
-    clave: len(str(valor or ""))
-    for clave, valor in st.session_state.items()
-    if str(clave).startswith("confirmar_eliminar_")
-}
-if _diag_estado_confirmaciones:
-    print(
-        f"[diag-eliminar] ejecución={st.session_state['_diag_ejecucion']} inicio "
-        f"longitudes_en_estado={_diag_estado_confirmaciones}",
-        flush=True,
-    )
 
 # Restaurar sesión guardada antes de renderizar la UI.
 restaurar_sesion_supabase()
@@ -2840,6 +2813,46 @@ def eliminar_receta_supabase(receta_id):
                 "Primero elimínala del menú o duplica/modifica el menú."
             )
         return False, f"Error al eliminar la receta en el inventario: {e}"
+
+
+def eliminar_menu_supabase(menu_id):
+    """
+    Elimina un menú y su lista de recetas (menu_recetas va en cascada).
+    Las recetas no se borran. No se puede borrar un menú usado en
+    presupuestos o facturas (presupuesto_menus/factura_menus: on delete restrict).
+    """
+    menu_id = str(menu_id or "").strip()
+    if not menu_id:
+        return False, "No hay un menú seleccionado para eliminar."
+    if not supabase_disponible or supabase is None:
+        return False, "El inventario no está conectado correctamente."
+
+    mensaje_en_uso = (
+        "No se puede eliminar porque este menú está usado en uno o varios presupuestos o facturas."
+    )
+    try:
+        cabecera_actual, _ = cargar_menu_detalle_supabase(menu_id)
+        if not cabecera_actual:
+            return False, "No se pudo comprobar el menú antes de eliminarlo."
+        if not menu_es_modificable(cabecera_actual):
+            return False, mensaje_menu_no_modificable(cabecera_actual)
+
+        for tabla in ("presupuesto_menus", "factura_menus"):
+            respuesta_uso = supabase.table(tabla).select("id").eq("menu_id", menu_id).limit(1).execute()
+            if respuesta_uso.data:
+                return False, mensaje_en_uso
+
+        respuesta = supabase.table("menus").delete().eq("id", menu_id).execute()
+        # Si RLS no deja borrarlo, PostgREST no da error: devuelve 0 filas.
+        if not respuesta.data:
+            return False, "No se ha eliminado el menú: no tienes permiso para borrarlo."
+        cargar_menus_supabase.clear()
+        return True, "Menú eliminado correctamente."
+    except Exception as e:
+        mensaje_error_lower = str(e).lower()
+        if "foreign key" in mensaje_error_lower or "23503" in mensaje_error_lower:
+            return False, mensaje_en_uso
+        return False, f"Error al eliminar el menú: {e}"
 
 
 @st.cache_data(ttl=600)
@@ -7555,9 +7568,8 @@ with main_tab_clientes:
                     "Escribe ELIMINAR para confirmar",
                     key=clave_confirmar_cliente
                 )
-                _diag_confirmacion("pintado", clave_confirmar_cliente, confirmar_eliminar_cliente)
                 if st.button("Eliminar cliente seleccionado", type="secondary", use_container_width=True):
-                    if not confirmacion_eliminar_valida(confirmar_eliminar_cliente, clave_confirmar_cliente):
+                    if not confirmacion_eliminar_valida(confirmar_eliminar_cliente):
                         st.error("Para eliminar el cliente debes escribir exactamente ELIMINAR.")
                     else:
                         ok_eliminar, mensaje_eliminar = eliminar_cliente_supabase(cliente_id_seleccionado)
@@ -8489,9 +8501,8 @@ with main_tab_recetas:
                 "Escribe ELIMINAR para confirmar",
                 key=clave_confirmar_receta
             )
-            _diag_confirmacion("pintado", clave_confirmar_receta, confirmacion_eliminar)
             if st.button("Borrar receta seleccionada", type="secondary", use_container_width=True):
-                if not confirmacion_eliminar_valida(confirmacion_eliminar, clave_confirmar_receta):
+                if not confirmacion_eliminar_valida(confirmacion_eliminar):
                     st.error("Para borrar la receta debes escribir exactamente ELIMINAR.")
                 else:
                     ok, mensaje = eliminar_receta_supabase(receta_id_para_eliminar)
@@ -8605,6 +8616,33 @@ with main_tab_menus:
                             st.session_state["menu_numero_comensales"] = int(numero_seguro(cabecera_menu.get("numero_comensales", 1), 1))
                             st.session_state["mensaje_menu_cargado"] = f"Menú cargado: {st.session_state['menu_nombre']}."
                             st.rerun()
+
+                with st.expander("Eliminar menú", expanded=False):
+                    menu_para_eliminar = menus_por_id.get(str(menu_id_seleccionado), {})
+                    if not menu_es_modificable(menu_para_eliminar):
+                        st.warning(mensaje_menu_no_modificable(menu_para_eliminar))
+                    else:
+                        st.warning(
+                            "Esta acción no se puede deshacer. Se borrará el menú y su lista de recetas; "
+                            "las recetas no se borran. No se puede eliminar un menú usado en presupuestos o facturas."
+                        )
+                        st.write(f"**Menú seleccionado:** {menu_para_eliminar.get('nombre') or menu_id_seleccionado}")
+                        confirmacion_eliminar_menu = st.text_input(
+                            "Escribe ELIMINAR para confirmar",
+                            key=f"confirmar_eliminar_menu_{menu_id_seleccionado}"
+                        )
+                        if st.button("Eliminar menú seleccionado", type="secondary", use_container_width=True):
+                            if not confirmacion_eliminar_valida(confirmacion_eliminar_menu):
+                                st.error("Para eliminar el menú debes escribir exactamente ELIMINAR.")
+                            else:
+                                ok_menu, mensaje_menu = eliminar_menu_supabase(menu_id_seleccionado)
+                                if ok_menu:
+                                    if str(st.session_state.get("menu_id") or "") == str(menu_id_seleccionado):
+                                        st.session_state["menu_id"] = None
+                                    st.session_state["mensaje_menu_cargado"] = mensaje_menu
+                                    st.rerun()
+                                else:
+                                    st.error(mensaje_menu)
 
     menu_col1, menu_col2, menu_col3 = st.columns([2.1, 1, 1])
     with menu_col1:
