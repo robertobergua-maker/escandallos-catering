@@ -2815,11 +2815,51 @@ def eliminar_receta_supabase(receta_id):
         return False, f"Error al eliminar la receta en el inventario: {e}"
 
 
+def _error_tabla_no_existe(error):
+    mensaje = str(error).lower()
+    return any(
+        marca in mensaje
+        for marca in ("does not exist", "schema cache", "42p01", "pgrst205", "could not find")
+    )
+
+
+def menu_usado_en_documentos(menu_id):
+    """
+    True si algún presupuesto o factura del usuario usa el menú.
+
+    Con el esquema aplicado (015/016), presupuestos y facturas viven en
+    public.facturas y el menú queda enlazado en cada línea mediante
+    factura_lineas.origen_tipo = 'menu' y origen_id. Las tablas
+    presupuesto_menus y factura_menus solo existen si se aplica la 019.
+    """
+    respuesta = (
+        supabase
+        .table("factura_lineas")
+        .select("id")
+        .eq("origen_tipo", "menu")
+        .eq("origen_id", menu_id)
+        .limit(1)
+        .execute()
+    )
+    if respuesta.data:
+        return True
+    for tabla in ("presupuesto_menus", "factura_menus"):
+        try:
+            respuesta = supabase.table(tabla).select("id").eq("menu_id", menu_id).limit(1).execute()
+        except Exception as e:
+            if _error_tabla_no_existe(e):
+                continue
+            raise
+        if respuesta.data:
+            return True
+    return False
+
+
 def eliminar_menu_supabase(menu_id):
     """
     Elimina un menú y su lista de recetas (menu_recetas va en cascada).
-    Las recetas no se borran. No se puede borrar un menú usado en
-    presupuestos o facturas (presupuesto_menus/factura_menus: on delete restrict).
+    Las recetas no se borran. No se borra un menú usado en presupuestos o
+    facturas: sus líneas conservan el enlace en factura_lineas.origen_id.
     """
     menu_id = str(menu_id or "").strip()
     if not menu_id:
@@ -2837,10 +2877,8 @@ def eliminar_menu_supabase(menu_id):
         if not menu_es_modificable(cabecera_actual):
             return False, mensaje_menu_no_modificable(cabecera_actual)
 
-        for tabla in ("presupuesto_menus", "factura_menus"):
-            respuesta_uso = supabase.table(tabla).select("id").eq("menu_id", menu_id).limit(1).execute()
-            if respuesta_uso.data:
-                return False, mensaje_en_uso
+        if menu_usado_en_documentos(menu_id):
+            return False, mensaje_en_uso
 
         respuesta = supabase.table("menus").delete().eq("id", menu_id).execute()
         # Si RLS no deja borrarlo, PostgREST no da error: devuelve 0 filas.
