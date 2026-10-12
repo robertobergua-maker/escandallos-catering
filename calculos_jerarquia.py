@@ -57,6 +57,18 @@ def calcular_coste_por_racion(coste_total_receta, raciones_base_receta):
     return coste_total / raciones_base
 
 
+def calcular_food_cost_pct(coste, precio_sin_iva):
+    """Food Cost en %: coste entre precio de venta sin IVA, ambos sin redondear.
+
+    Devuelve 0.0 si no hay precio de venta.
+    """
+    coste_num = _no_negativo(coste, "Coste")
+    precio_num = _no_negativo(precio_sin_iva, "Precio sin IVA")
+    if precio_num <= 0:
+        return 0.0
+    return coste_num / precio_num * 100
+
+
 def calcular_coste_menu(lineas_receta):
     """Suma coste por racion por las raciones propias de cada receta."""
     lineas = list(lineas_receta or [])

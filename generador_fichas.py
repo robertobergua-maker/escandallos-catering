@@ -26,6 +26,7 @@ from calculos_jerarquia import (
     calcular_coste_por_racion,
     calcular_coste_presupuesto,
     calcular_coste_receta,
+    calcular_food_cost_pct,
 )
 
 # Configuración de página obligatoria al inicio de Streamlit
@@ -33,7 +34,7 @@ st.set_page_config(
     page_title="Gestor de Fichas Técnicas Cloud",
     page_icon="👨‍🍳",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
 
 # =============================================================================
@@ -59,6 +60,7 @@ LOGO_SAMIRARTE_PATH = BASE_DIR / "assets" / "logo_samirarte.png"
 LOGO_SAMIRARTE_BLANCO_PATH = BASE_DIR / "assets" / "samirarte_logo_white.png"
 
 AUTH_REFRESH_COOKIE = "escandallos_refresh_token"
+AUTH_REFRESH_COOKIE_DIAS = 7
 
 
 def obtener_cookie_manager():
@@ -122,7 +124,7 @@ def _inyectar_cookie_refresh_token(refresh_token):
               const name = {nombre_js};
               const value = encodeURIComponent({token_js});
               const secure = window.location.protocol === "https:" ? "; Secure" : "";
-              document.cookie = name + "=" + value + "; Max-Age=2592000; Path=/; SameSite=Lax" + secure;
+              document.cookie = name + "=" + value + "; Max-Age={AUTH_REFRESH_COOKIE_DIAS * 86400}; Path=/; SameSite=Lax" + secure;
             }})();
             </script>
             """,
@@ -145,8 +147,10 @@ def _guardar_cookie_refresh_token(refresh_token):
             gestor.set(
                 AUTH_REFRESH_COOKIE,
                 token,
-                expires_at=datetime.now() + timedelta(days=30),
+                expires_at=datetime.now() + timedelta(days=AUTH_REFRESH_COOKIE_DIAS),
                 key="set_refresh_token_cookie",
+                secure=True,
+                same_site="lax",
             )
             guardado = True
     except Exception:
@@ -668,6 +672,24 @@ def mostrar_formulario_nueva_password():
         st.rerun()
 
 
+def _diag_confirmacion(evento, clave, valor):
+    # TEMPORAL: diagnóstico del borrado con "ELIMINAR". Quitar tras la prueba.
+    print(
+        f"[diag-eliminar] ejecución={st.session_state.get('_diag_ejecucion')} {evento} "
+        f"clave={clave!r} longitud={len(str(valor or ''))} "
+        f"en_estado={clave in st.session_state} "
+        f"longitud_estado={len(str(st.session_state.get(clave) or ''))}",
+        flush=True,
+    )
+
+
+def confirmacion_eliminar_valida(valor, clave):
+    """True si el texto de confirmación es ELIMINAR, sin depender de espacios ni mayúsculas."""
+    valida = str(valor or "").strip().upper() == "ELIMINAR"
+    _diag_confirmacion(f"boton valida={valida}", clave, valor)
+    return valida
+
+
 def logout_supabase():
     """
     Revoca la sesión en Supabase y limpia lo local: estado, cookie y cachés
@@ -1115,6 +1137,20 @@ if 'usuario_app_error' not in st.session_state:
     st.session_state['usuario_app_error'] = None
 if 'usuario_app_user_id' not in st.session_state:
     st.session_state['usuario_app_user_id'] = None
+
+# TEMPORAL: diagnóstico del borrado con "ELIMINAR". Quitar tras la prueba.
+st.session_state["_diag_ejecucion"] = st.session_state.get("_diag_ejecucion", 0) + 1
+_diag_estado_confirmaciones = {
+    clave: len(str(valor or ""))
+    for clave, valor in st.session_state.items()
+    if str(clave).startswith("confirmar_eliminar_")
+}
+if _diag_estado_confirmaciones:
+    print(
+        f"[diag-eliminar] ejecución={st.session_state['_diag_ejecucion']} inicio "
+        f"longitudes_en_estado={_diag_estado_confirmaciones}",
+        flush=True,
+    )
 
 # Restaurar sesión guardada antes de renderizar la UI.
 restaurar_sesion_supabase()
@@ -3218,6 +3254,13 @@ def obtener_nombre_menu_por_id(menu_id):
 def calcular_totales_factura(lineas, iva_pct=21, retencion_pct=0):
     lineas_calculadas = [calcular_linea_factura(linea) for linea in (lineas or [])]
     base_imponible = sum(numero_seguro(linea.get("base_linea", 0.0), 0.0) for linea in lineas_calculadas)
+    # base_linea va redondeada a céntimos; para el Food Cost se usa la exacta.
+    base_imponible_sin_redondear = sum(
+        numero_seguro(linea.get("cantidad", 1.0), 1.0)
+        * numero_seguro(linea.get("precio_unitario", 0.0), 0.0)
+        * (1 - numero_seguro(linea.get("descuento_pct", 0.0), 0.0) / 100)
+        for linea in lineas_calculadas
+    )
     iva_importe = sum(numero_seguro(linea.get("iva_linea", 0.0), 0.0) for linea in lineas_calculadas)
     retencion_pct_num = numero_seguro(retencion_pct, 0.0)
     retencion_importe = base_imponible * retencion_pct_num / 100
@@ -3226,6 +3269,7 @@ def calcular_totales_factura(lineas, iva_pct=21, retencion_pct=0):
     return {
         "lineas": lineas_calculadas,
         "base_imponible": round(base_imponible, 2),
+        "base_imponible_sin_redondear": base_imponible_sin_redondear,
         "iva_pct": iva_pct_num,
         "iva_importe": round(iva_importe, 2),
         "retencion_pct": retencion_pct_num,
@@ -6954,7 +6998,7 @@ with main_tab_recetas:
         mb_cabecera,
     )
     pvp_final_cabecera = pvp_neto_cabecera + (pvp_neto_cabecera * (iva_cabecera / 100))
-    food_cost_cabecera = (coste_cabecera / pvp_final_cabecera * 100) if pvp_final_cabecera > 0 else 0.0
+    food_cost_cabecera = calcular_food_cost_pct(coste_cabecera, pvp_neto_cabecera)
 
     coste_por_racion_cabecera = calcular_coste_por_racion(
         coste_cabecera,
@@ -7467,12 +7511,14 @@ with main_tab_clientes:
 
                 st.markdown("#### Eliminar cliente")
                 st.warning("Esta acción no se puede deshacer. No elimines clientes con documentación asociada.")
+                clave_confirmar_cliente = f"confirmar_eliminar_cliente_{cliente_id_seleccionado}"
                 confirmar_eliminar_cliente = st.text_input(
                     "Escribe ELIMINAR para confirmar",
-                    key=f"confirmar_eliminar_cliente_{cliente_id_seleccionado}"
+                    key=clave_confirmar_cliente
                 )
+                _diag_confirmacion("pintado", clave_confirmar_cliente, confirmar_eliminar_cliente)
                 if st.button("Eliminar cliente seleccionado", type="secondary", use_container_width=True):
-                    if confirmar_eliminar_cliente != "ELIMINAR":
+                    if not confirmacion_eliminar_valida(confirmar_eliminar_cliente, clave_confirmar_cliente):
                         st.error("Para eliminar el cliente debes escribir exactamente ELIMINAR.")
                     else:
                         ok_eliminar, mensaje_eliminar = eliminar_cliente_supabase(cliente_id_seleccionado)
@@ -7900,9 +7946,9 @@ with main_tab_facturas:
                     else 0.0
                 )
                 margen_documento = totales_factura["base_imponible"] - coste_documento
-                food_cost_documento = (
-                    coste_documento / totales_factura["base_imponible"] * 100
-                    if totales_factura["base_imponible"] > 0 else 0.0
+                food_cost_documento = calcular_food_cost_pct(
+                    coste_documento,
+                    totales_factura["base_imponible_sin_redondear"],
                 )
                 total_col1, total_col2, total_col3, total_col4, total_col5, total_col6 = st.columns(6)
                 with total_col1:
@@ -8399,12 +8445,14 @@ with main_tab_recetas:
                 "sus ingredientes asociados. No se borrarán ingredientes del inventario."
             )
             st.write(f"**Receta seleccionada:** {codigo_eliminar} · {nombre_eliminar}")
+            clave_confirmar_receta = f"confirmar_eliminar_receta_{receta_id_para_eliminar}"
             confirmacion_eliminar = st.text_input(
                 "Escribe ELIMINAR para confirmar",
-                key=f"confirmar_eliminar_receta_{receta_id_para_eliminar}"
+                key=clave_confirmar_receta
             )
+            _diag_confirmacion("pintado", clave_confirmar_receta, confirmacion_eliminar)
             if st.button("Borrar receta seleccionada", type="secondary", use_container_width=True):
-                if confirmacion_eliminar != "ELIMINAR":
+                if not confirmacion_eliminar_valida(confirmacion_eliminar, clave_confirmar_receta):
                     st.error("Para borrar la receta debes escribir exactamente ELIMINAR.")
                 else:
                     ok, mensaje = eliminar_receta_supabase(receta_id_para_eliminar)
