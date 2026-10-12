@@ -1680,7 +1680,13 @@ def enriquecer_inventario_dict_con_alergenos():
 
 
 def guardar_alergenos_ingrediente(codigo_ingrediente, alergeno_ids):
-    """Reemplaza las relaciones de alérgenos de un ingrediente."""
+    """
+    Guarda las relaciones de alérgenos de un ingrediente.
+
+    Un admin las reemplaza (borra y vuelve a insertar). El resto de usuarios
+    solo puede añadir (sql/021): se insertan los que faltan ignorando
+    duplicados, y si se intenta quitar alguno se mantiene y se avisa.
+    """
     codigo = str(codigo_ingrediente or "").strip().upper()
     if not codigo_ingrediente_valido(codigo):
         return True, ""
@@ -1692,22 +1698,52 @@ def guardar_alergenos_ingrediente(codigo_ingrediente, alergeno_ids):
         if alergeno_id and alergeno_id not in ids_limpios:
             ids_limpios.append(alergeno_id)
     try:
-        (
-            supabase
-            .table("ingrediente_alergenos")
-            .delete()
-            .eq("codigo_ingrediente", codigo)
-            .execute()
-        )
-        if ids_limpios:
-            filas = [
-                {"codigo_ingrediente": codigo, "alergeno_id": alergeno_id}
-                for alergeno_id in ids_limpios
-            ]
-            supabase.table("ingrediente_alergenos").insert(filas).execute()
+        if usuario_actual_es_admin():
+            (
+                supabase
+                .table("ingrediente_alergenos")
+                .delete()
+                .eq("codigo_ingrediente", codigo)
+                .execute()
+            )
+            if ids_limpios:
+                filas = [
+                    {"codigo_ingrediente": codigo, "alergeno_id": alergeno_id}
+                    for alergeno_id in ids_limpios
+                ]
+                supabase.table("ingrediente_alergenos").insert(filas).execute()
+            mensaje = ""
+        else:
+            respuesta = (
+                supabase
+                .table("ingrediente_alergenos")
+                .select("alergeno_id")
+                .eq("codigo_ingrediente", codigo)
+                .execute()
+            )
+            existentes = {str(fila.get("alergeno_id") or "") for fila in (respuesta.data or [])}
+            faltan = [alergeno_id for alergeno_id in ids_limpios if alergeno_id not in existentes]
+            if faltan:
+                (
+                    supabase
+                    .table("ingrediente_alergenos")
+                    .upsert(
+                        [{"codigo_ingrediente": codigo, "alergeno_id": alergeno_id} for alergeno_id in faltan],
+                        on_conflict="codigo_ingrediente,alergeno_id",
+                        ignore_duplicates=True,
+                    )
+                    .execute()
+                )
+            quitados = existentes - set(ids_limpios) - {""}
+            mensaje = ""
+            if quitados:
+                catalogo = cargar_alergenos_supabase(obtener_user_id_actual())
+                nombres = dict(zip(catalogo["id"], catalogo["nombre"])) if not catalogo.empty else {}
+                lista = ", ".join(sorted(nombres.get(alergeno_id, alergeno_id) for alergeno_id in quitados))
+                mensaje = f"Solo un administrador puede quitar alérgenos; se mantienen: {lista}."
         limpiar_cache_alergenos()
         st.session_state["db_trigger"] += 1
-        return True, ""
+        return True, mensaje
     except Exception as exc:
         return False, f"No se pudieron guardar los alérgenos del ingrediente: {exc}"
 
@@ -1975,7 +2011,10 @@ def guardar_ficha_en_inventario(datos):
             return False, mensaje_alergenos, None
         st.session_state["db_trigger"] += 1
         accion = "actualizado" if codigo_existente else "guardado"
-        return True, f"Ingrediente {codigo} {accion} en inventario.", codigo
+        mensaje = f"Ingrediente {codigo} {accion} en inventario."
+        if mensaje_alergenos:
+            mensaje = f"{mensaje} {mensaje_alergenos}"
+        return True, mensaje, codigo
     except Exception as exc:
         return False, f"Error al guardar el ingrediente en inventario: {exc}", None
 
