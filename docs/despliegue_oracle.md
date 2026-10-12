@@ -70,7 +70,7 @@ Estructura en la VM:
 
 ```
 /opt/escandallos/app/              código (copia del repo)
-/opt/escandallos/app/deploy/.env   APP_DOMAIN y ruta del secreto (no es secreto)
+/opt/escandallos/app/deploy/.env   dominios (APP_DOMAIN, REDIRECT_DOMAIN, CANONICAL_DOMAIN) y ruta del secreto (no es secreto)
 /opt/escandallos/secrets/secrets.toml   secretos, permisos 600, dueño UID 10001
 ```
 
@@ -86,7 +86,17 @@ Cuando todo funcione, se hace el cambio definitivo:
 2. En la *zona DNS* `escandallos.samirarte.com`, editar el registro **A** del propio nombre de la zona (`escandallos.samirarte.com`, a veces mostrado como `@` o vacío), que hoy apunta a `82.194.68.97`, para que apunte a la IP de la VM. Si la zona desaparece al quitar el subdominio de hosting, crear en la zona `samirarte.com` un registro **A** `escandallos` → IP de la VM y volver a crear el provisional si sigue haciendo falta.
 3. Comprobar la propagación (puede tardar de minutos a unas horas) con `nslookup escandallos.samirarte.com`, que debe devolver la IP de la VM.
 
-Hasta que el DNS no apunte a la VM, Caddy no podrá obtener el certificado. Conviene hacer este paso antes de arrancar.
+Hasta que el DNS no apunte a la VM, Caddy no podrá obtener el certificado de ese nombre. No pasa nada por desplegar antes: Caddy gestiona cada dominio por separado, sigue sirviendo los que ya tienen certificado y reintenta solo los demás con espera creciente (y contra el entorno de pruebas de Let's Encrypt para no gastar el límite de intentos) hasta que el DNS llegue.
+
+Configuración definitiva en `deploy/.env`:
+
+```
+APP_DOMAIN=escandallos.samirarte.com, nuevo-escandallos.escandallos.samirarte.com
+REDIRECT_DOMAIN=www.escandallos.samirarte.com
+CANONICAL_DOMAIN=escandallos.samirarte.com
+```
+
+`www.escandallos.samirarte.com` (registro A `www` en la zona `escandallos.samirarte.com`) redirige con 301 a `https://escandallos.samirarte.com`, conservando la ruta. Seguimiento del certificado: `docker compose logs caddy | grep -E "obtained|error"`.
 
 ## 4. Secretos y arranque
 

@@ -27,12 +27,15 @@ services:
     logging: *logging
 
   # Proxy inverso con HTTPS automático (Let's Encrypt). APP_DOMAIN admite
-  # varios dominios separados por comas.
+  # varios dominios separados por comas; REDIRECT_DOMAIN redirige (301) a
+  # CANONICAL_DOMAIN.
   caddy:
     image: caddy:2
     restart: unless-stopped
     environment:
       - APP_DOMAIN=${APP_DOMAIN}
+      - REDIRECT_DOMAIN=${REDIRECT_DOMAIN}
+      - CANONICAL_DOMAIN=${CANONICAL_DOMAIN}
     ports:
       - "80:80"
       - "443:443"
