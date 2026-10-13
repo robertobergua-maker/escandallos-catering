@@ -16,7 +16,8 @@ RUN pip install -r requirements.txt
 COPY generador_fichas.py calculos_jerarquia.py ./
 COPY assets ./assets
 
-RUN useradd --create-home appuser && mkdir -p /app/.streamlit && chown -R appuser /app
+# UID fijo: el secrets.toml del host se entrega a este UID con permisos 600.
+RUN useradd --create-home --uid 10001 appuser && mkdir -p /app/.streamlit && chown -R appuser /app
 USER appuser
 
 EXPOSE 8501

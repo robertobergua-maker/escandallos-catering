@@ -26,6 +26,7 @@ from calculos_jerarquia import (
     calcular_coste_por_racion,
     calcular_coste_presupuesto,
     calcular_coste_receta,
+    calcular_food_cost_pct,
 )
 
 # Configuración de página obligatoria al inicio de Streamlit
@@ -33,7 +34,7 @@ st.set_page_config(
     page_title="Gestor de Fichas Técnicas Cloud",
     page_icon="👨‍🍳",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
 
 # =============================================================================
@@ -59,6 +60,7 @@ LOGO_SAMIRARTE_PATH = BASE_DIR / "assets" / "logo_samirarte.png"
 LOGO_SAMIRARTE_BLANCO_PATH = BASE_DIR / "assets" / "samirarte_logo_white.png"
 
 AUTH_REFRESH_COOKIE = "escandallos_refresh_token"
+AUTH_REFRESH_COOKIE_DIAS = 7
 
 
 def obtener_cookie_manager():
@@ -73,6 +75,11 @@ def obtener_cookie_manager():
 
 def _leer_cookie_refresh_token():
     """Lee el refresh_token persistido en cookie del navegador."""
+    # st.context.cookies conserva hasta el siguiente F5 las cookies con las que
+    # se abrió la sesión, aunque ya se hayan borrado en el navegador.
+    if st.session_state.get("_ignorar_cookie_sesion"):
+        return None
+
     # 1) Streamlit expone las cookies de la petición actual de forma síncrona.
     try:
         valor = st.context.cookies.get(AUTH_REFRESH_COOKIE)
@@ -117,7 +124,7 @@ def _inyectar_cookie_refresh_token(refresh_token):
               const name = {nombre_js};
               const value = encodeURIComponent({token_js});
               const secure = window.location.protocol === "https:" ? "; Secure" : "";
-              document.cookie = name + "=" + value + "; Max-Age=2592000; Path=/; SameSite=Lax" + secure;
+              document.cookie = name + "=" + value + "; Max-Age={AUTH_REFRESH_COOKIE_DIAS * 86400}; Path=/; SameSite=Lax" + secure;
             }})();
             </script>
             """,
@@ -140,8 +147,10 @@ def _guardar_cookie_refresh_token(refresh_token):
             gestor.set(
                 AUTH_REFRESH_COOKIE,
                 token,
-                expires_at=datetime.now() + timedelta(days=30),
+                expires_at=datetime.now() + timedelta(days=AUTH_REFRESH_COOKIE_DIAS),
                 key="set_refresh_token_cookie",
+                secure=True,
+                same_site="lax",
             )
             guardado = True
     except Exception:
@@ -569,17 +578,126 @@ def enviar_recuperacion_password(email):
         return False, f"No se pudo enviar el correo de recuperación: {e}"
 
 
+def procesar_enlace_recuperacion():
+    """
+    Valida el enlace del correo de recuperación y abre la sesión del usuario.
+
+    La plantilla "Reset Password" de Supabase debe enlazar a
+    {{ .RedirectTo }}?token_hash={{ .TokenHash }}&type=recovery. Se usa
+    token_hash y no el flujo PKCE porque el cliente se crea en cada ejecución
+    y perdería el code_verifier guardado al pedir el correo.
+    """
+    try:
+        token_hash = st.query_params.get("token_hash")
+        tipo = st.query_params.get("type")
+        error_enlace = st.query_params.get("error_description") or st.query_params.get("error")
+    except Exception:
+        return
+
+    if error_enlace:
+        st.query_params.clear()
+        st.session_state["portal_entrado"] = True
+        st.session_state["auth_feedback"] = ("error", f"El enlace no es válido: {error_enlace}. Pide uno nuevo.")
+        return
+    if not token_hash or tipo != "recovery":
+        return
+
+    # El token es de un solo uso: se quita de la URL antes de validarlo.
+    st.query_params.clear()
+    st.session_state["portal_entrado"] = True
+    mensaje_caducado = "El enlace de recuperación no es válido o ha caducado. Pide uno nuevo."
+    if not supabase_disponible or supabase is None:
+        st.session_state["auth_feedback"] = ("error", "El inventario no está conectado correctamente.")
+        return
+    try:
+        respuesta = supabase.auth.verify_otp({"token_hash": token_hash, "type": "recovery"})
+    except Exception:
+        st.session_state["auth_feedback"] = ("error", mensaje_caducado)
+        return
+
+    usuario = _obtener_campo_auth(respuesta, "user")
+    sesion = _obtener_campo_auth(respuesta, "session")
+    if not usuario or not sesion:
+        st.session_state["auth_feedback"] = ("error", mensaje_caducado)
+        return
+    _guardar_sesion_supabase(usuario, sesion)
+    st.session_state["recuperacion_password_activa"] = True
+
+
+def actualizar_password_supabase(password, password_repetida):
+    """Cambia la contraseña del usuario con la sesión abierta por el enlace de recuperación."""
+    password = str(password or "")
+    if len(password) < 6:
+        return False, "La contraseña debe tener al menos 6 caracteres."
+    if password != str(password_repetida or ""):
+        return False, "Las contraseñas no coinciden."
+
+    access_token = st.session_state.get("access_token")
+    refresh_token = st.session_state.get("refresh_token")
+    if not access_token or not refresh_token or not supabase_disponible or supabase is None:
+        return False, "La sesión de recuperación ha caducado. Pide un enlace nuevo."
+
+    try:
+        # update_user necesita la sesión dentro del cliente de Auth.
+        supabase.auth.set_session(access_token, refresh_token)
+        supabase.auth.update_user({"password": password})
+    except Exception as e:
+        return False, f"No se pudo cambiar la contraseña: {e}"
+
+    # set_session pudo renovar los tokens: guardar los vigentes.
+    sesion = supabase.auth.get_session()
+    if sesion:
+        _guardar_sesion_supabase(_obtener_campo_auth(sesion, "user"), sesion)
+    return True, "Contraseña actualizada. Ya has iniciado sesión."
+
+
+def mostrar_formulario_nueva_password():
+    st.subheader("Nueva contraseña")
+    st.caption(f"Cuenta: {st.session_state.get('user_email') or ''}")
+    with st.form("form_nueva_password"):
+        password = st.text_input("Nueva contraseña", type="password")
+        password_repetida = st.text_input("Repite la contraseña", type="password")
+        guardar = st.form_submit_button("Guardar contraseña", use_container_width=True)
+    if guardar:
+        ok, mensaje = actualizar_password_supabase(password, password_repetida)
+        if ok:
+            st.session_state["recuperacion_password_activa"] = False
+            st.session_state["auth_feedback"] = ("success", mensaje)
+            st.rerun()
+        else:
+            st.error(mensaje)
+    if st.button("Cancelar", use_container_width=True):
+        st.session_state["recuperacion_password_activa"] = False
+        logout_supabase()
+        st.rerun()
+
+
+def confirmacion_eliminar_valida(valor):
+    """True si el texto de confirmación es ELIMINAR, sin depender de espacios ni mayúsculas."""
+    return str(valor or "").strip().upper() == "ELIMINAR"
+
+
 def logout_supabase():
     """
-    Cierra la sesion y limpia los datos de autenticacion locales.
+    Revoca la sesión en Supabase y limpia lo local: estado, cookie y cachés
+    por usuario.
     """
-    if supabase_disponible and supabase is not None:
+    access_token = st.session_state.get("access_token")
+    refresh_token = st.session_state.get("refresh_token")
+    if supabase_disponible and supabase is not None and access_token and refresh_token:
+        # El cliente se crea en cada ejecución sin sesión de Auth; sin
+        # set_session, sign_out() no llama a /logout y el refresh_token
+        # seguiría siendo válido.
         try:
-            supabase.auth.sign_out()
+            supabase.auth.set_session(access_token, refresh_token)
+            supabase.auth.sign_out({"scope": "local"})
         except Exception:
+            # Token caducado o ya revocado: no queda nada que revocar.
             pass
 
     _limpiar_sesion_autenticacion()
+    for cargar_por_usuario in (cargar_alergenos_supabase, cargar_recetas_supabase, cargar_menus_supabase):
+        cargar_por_usuario.clear()
     return True, "Sesión cerrada correctamente."
 
 
@@ -607,7 +725,12 @@ def es_modo_invitado():
 
 
 def _limpiar_sesion_autenticacion():
-    _borrar_cookie_refresh_token()
+    # La cookie se borra en la siguiente ejecución completa (ver el bloque
+    # tras restaurar_sesion_supabase()): si se pintara aquí, el st.rerun()
+    # posterior abortaría el componente antes de llegar al navegador.
+    st.session_state["_borrar_cookie_pendiente"] = True
+    st.session_state["_ignorar_cookie_sesion"] = True
+    st.session_state["_auth_cookie_retry_done"] = True
     st.session_state["user_id"] = None
     st.session_state["user_email"] = None
     st.session_state["access_token"] = None
@@ -625,6 +748,8 @@ def _guardar_sesion_supabase(usuario, sesion):
     access_token = _obtener_campo_auth(sesion, "access_token")
     refresh_token = _obtener_campo_auth(sesion, "refresh_token")
     if user_id:
+        st.session_state["_borrar_cookie_pendiente"] = False
+        st.session_state["_ignorar_cookie_sesion"] = False
         st.session_state["user_id"] = str(user_id)
         st.session_state["user_email"] = str(user_email or "")
         st.session_state["access_token"] = access_token
@@ -633,13 +758,64 @@ def _guardar_sesion_supabase(usuario, sesion):
             _guardar_cookie_refresh_token(refresh_token)
 
 
+def _token_caduca_pronto(access_token, margen_segundos=60):
+    """True si el JWT de acceso caduca en menos de `margen_segundos` o no se puede leer."""
+    try:
+        carga = str(access_token).split(".")[1]
+        carga += "=" * (-len(carga) % 4)
+        exp = json.loads(base64.urlsafe_b64decode(carga)).get("exp")
+        return not exp or exp - datetime.now().timestamp() < margen_segundos
+    except Exception:
+        return True
+
+
+def _aplicar_sesion_al_cliente():
+    """
+    El cliente se crea en cada ejecución del script solo con la clave
+    publishable, así que sin el JWT del usuario RLS trata las consultas como
+    anónimas (devuelven 0 filas sin error). Renueva el token si está a punto
+    de caducar y lo aplica a las consultas de la base de datos.
+    """
+    access_token = st.session_state.get("access_token")
+    refresh_token = st.session_state.get("refresh_token")
+    if not access_token or not refresh_token:
+        return False
+    if not supabase_disponible or supabase is None:
+        return False
+
+    if _token_caduca_pronto(access_token):
+        if not refresh_token:
+            return False
+        try:
+            try:
+                respuesta = supabase.auth.refresh_session(refresh_token=refresh_token)
+            except TypeError:
+                respuesta = supabase.auth.refresh_session(refresh_token)
+        except Exception:
+            return False
+        usuario = _obtener_campo_auth(respuesta, "user")
+        sesion = _obtener_campo_auth(respuesta, "session")
+        if not usuario or not sesion:
+            return False
+        _guardar_sesion_supabase(usuario, sesion)
+        access_token = st.session_state.get("access_token")
+
+    supabase.postgrest.auth(access_token)
+    return True
+
+
 def restaurar_sesion_supabase():
     """
     Restaura la sesión tras F5 usando refresh_token de session_state o cookie.
     No guarda tokens en disco; solo usa cookie del navegador.
     """
     if obtener_usuario_actual():
-        return True
+        if _aplicar_sesion_al_cliente():
+            return True
+        # Sesión caducada y sin posibilidad de renovarla: volver al login en
+        # lugar de seguir con consultas anónimas que RLS deja vacías.
+        _limpiar_sesion_autenticacion()
+        return False
     if not supabase_disponible or supabase is None:
         return False
 
@@ -672,6 +848,7 @@ def restaurar_sesion_supabase():
         sesion = _obtener_campo_auth(respuesta, "session")
 
         if not usuario or not sesion:
+            _limpiar_sesion_autenticacion()
             return False
 
         _guardar_sesion_supabase(usuario, sesion)
@@ -679,6 +856,8 @@ def restaurar_sesion_supabase():
         asegurar_usuario_app_supabase()
         return True
     except Exception:
+        # refresh_token revocado o caducado (p. ej. tras cerrar sesión).
+        _limpiar_sesion_autenticacion()
         return False
 
 
@@ -948,6 +1127,10 @@ if 'usuario_app_user_id' not in st.session_state:
 
 # Restaurar sesión guardada antes de renderizar la UI.
 restaurar_sesion_supabase()
+
+# Borrado de la cookie pendiente tras cerrar sesión o rechazar el token.
+if st.session_state.get("_borrar_cookie_pendiente") and not obtener_usuario_actual():
+    _borrar_cookie_refresh_token()
 
 if 'nombre_plato' not in st.session_state:
     st.session_state['nombre_plato'] = st.session_state['receta_nombre']
@@ -1298,8 +1481,13 @@ def codigo_ingrediente_valido(codigo):
 
 
 @st.cache_data(ttl=600)
-def cargar_alergenos_supabase():
-    """Carga el catálogo normalizado de alérgenos activos."""
+def cargar_alergenos_supabase(user_id_actual=None):
+    """
+    Carga el catálogo normalizado de alérgenos activos.
+
+    `user_id_actual` solo separa la caché por usuario: con RLS, una carga
+    anónima devuelve 0 filas y no debe servirse a usuarios con sesión.
+    """
     columnas = ALERGENOS_COLUMNAS
     if not supabase_disponible or supabase is None:
         return pd.DataFrame(columns=columnas)
@@ -1347,7 +1535,7 @@ def cargar_ingrediente_alergenos_supabase(trigger=0):
         relaciones["codigo_ingrediente"] = relaciones["codigo_ingrediente"].fillna("").astype(str).str.strip().str.upper()
         relaciones["alergeno_id"] = relaciones["alergeno_id"].fillna("").astype(str)
 
-        catalogo = cargar_alergenos_supabase()
+        catalogo = cargar_alergenos_supabase(obtener_user_id_actual())
         if catalogo.empty:
             relaciones["codigo"] = ""
             relaciones["nombre"] = ""
@@ -1429,7 +1617,7 @@ def alergeno_ids_desde_nombres(nombres):
     nombres_set = {str(n or "").strip() for n in nombres or [] if str(n or "").strip()}
     if not nombres_set:
         return []
-    catalogo = cargar_alergenos_supabase()
+    catalogo = cargar_alergenos_supabase(obtener_user_id_actual())
     if catalogo.empty:
         return []
     ids = []
@@ -1465,7 +1653,13 @@ def enriquecer_inventario_dict_con_alergenos():
 
 
 def guardar_alergenos_ingrediente(codigo_ingrediente, alergeno_ids):
-    """Reemplaza las relaciones de alérgenos de un ingrediente."""
+    """
+    Guarda las relaciones de alérgenos de un ingrediente.
+
+    Un admin las reemplaza (borra y vuelve a insertar). El resto de usuarios
+    solo puede añadir (sql/021): se insertan los que faltan ignorando
+    duplicados, y si se intenta quitar alguno se mantiene y se avisa.
+    """
     codigo = str(codigo_ingrediente or "").strip().upper()
     if not codigo_ingrediente_valido(codigo):
         return True, ""
@@ -1477,22 +1671,52 @@ def guardar_alergenos_ingrediente(codigo_ingrediente, alergeno_ids):
         if alergeno_id and alergeno_id not in ids_limpios:
             ids_limpios.append(alergeno_id)
     try:
-        (
-            supabase
-            .table("ingrediente_alergenos")
-            .delete()
-            .eq("codigo_ingrediente", codigo)
-            .execute()
-        )
-        if ids_limpios:
-            filas = [
-                {"codigo_ingrediente": codigo, "alergeno_id": alergeno_id}
-                for alergeno_id in ids_limpios
-            ]
-            supabase.table("ingrediente_alergenos").insert(filas).execute()
+        if usuario_actual_es_admin():
+            (
+                supabase
+                .table("ingrediente_alergenos")
+                .delete()
+                .eq("codigo_ingrediente", codigo)
+                .execute()
+            )
+            if ids_limpios:
+                filas = [
+                    {"codigo_ingrediente": codigo, "alergeno_id": alergeno_id}
+                    for alergeno_id in ids_limpios
+                ]
+                supabase.table("ingrediente_alergenos").insert(filas).execute()
+            mensaje = ""
+        else:
+            respuesta = (
+                supabase
+                .table("ingrediente_alergenos")
+                .select("alergeno_id")
+                .eq("codigo_ingrediente", codigo)
+                .execute()
+            )
+            existentes = {str(fila.get("alergeno_id") or "") for fila in (respuesta.data or [])}
+            faltan = [alergeno_id for alergeno_id in ids_limpios if alergeno_id not in existentes]
+            if faltan:
+                (
+                    supabase
+                    .table("ingrediente_alergenos")
+                    .upsert(
+                        [{"codigo_ingrediente": codigo, "alergeno_id": alergeno_id} for alergeno_id in faltan],
+                        on_conflict="codigo_ingrediente,alergeno_id",
+                        ignore_duplicates=True,
+                    )
+                    .execute()
+                )
+            quitados = existentes - set(ids_limpios) - {""}
+            mensaje = ""
+            if quitados:
+                catalogo = cargar_alergenos_supabase(obtener_user_id_actual())
+                nombres = dict(zip(catalogo["id"], catalogo["nombre"])) if not catalogo.empty else {}
+                lista = ", ".join(sorted(nombres.get(alergeno_id, alergeno_id) for alergeno_id in quitados))
+                mensaje = f"Solo un administrador puede quitar alérgenos; se mantienen: {lista}."
         limpiar_cache_alergenos()
         st.session_state["db_trigger"] += 1
-        return True, ""
+        return True, mensaje
     except Exception as exc:
         return False, f"No se pudieron guardar los alérgenos del ingrediente: {exc}"
 
@@ -1760,7 +1984,10 @@ def guardar_ficha_en_inventario(datos):
             return False, mensaje_alergenos, None
         st.session_state["db_trigger"] += 1
         accion = "actualizado" if codigo_existente else "guardado"
-        return True, f"Ingrediente {codigo} {accion} en inventario.", codigo
+        mensaje = f"Ingrediente {codigo} {accion} en inventario."
+        if mensaje_alergenos:
+            mensaje = f"{mensaje} {mensaje_alergenos}"
+        return True, mensaje, codigo
     except Exception as exc:
         return False, f"Error al guardar el ingrediente en inventario: {exc}", None
 
@@ -2588,6 +2815,84 @@ def eliminar_receta_supabase(receta_id):
         return False, f"Error al eliminar la receta en el inventario: {e}"
 
 
+def _error_tabla_no_existe(error):
+    mensaje = str(error).lower()
+    return any(
+        marca in mensaje
+        for marca in ("does not exist", "schema cache", "42p01", "pgrst205", "could not find")
+    )
+
+
+def menu_usado_en_documentos(menu_id):
+    """
+    True si algún presupuesto o factura del usuario usa el menú.
+
+    Con el esquema aplicado (015/016), presupuestos y facturas viven en
+    public.facturas y el menú queda enlazado en cada línea mediante
+    factura_lineas.origen_tipo = 'menu' y origen_id. Las tablas
+    presupuesto_menus y factura_menus solo existen si se aplica la 019.
+    """
+    respuesta = (
+        supabase
+        .table("factura_lineas")
+        .select("id")
+        .eq("origen_tipo", "menu")
+        .eq("origen_id", menu_id)
+        .limit(1)
+        .execute()
+    )
+    if respuesta.data:
+        return True
+    for tabla in ("presupuesto_menus", "factura_menus"):
+        try:
+            respuesta = supabase.table(tabla).select("id").eq("menu_id", menu_id).limit(1).execute()
+        except Exception as e:
+            if _error_tabla_no_existe(e):
+                continue
+            raise
+        if respuesta.data:
+            return True
+    return False
+
+
+def eliminar_menu_supabase(menu_id):
+    """
+    Elimina un menú y su lista de recetas (menu_recetas va en cascada).
+    Las recetas no se borran. No se borra un menú usado en presupuestos o
+    facturas: sus líneas conservan el enlace en factura_lineas.origen_id.
+    """
+    menu_id = str(menu_id or "").strip()
+    if not menu_id:
+        return False, "No hay un menú seleccionado para eliminar."
+    if not supabase_disponible or supabase is None:
+        return False, "El inventario no está conectado correctamente."
+
+    mensaje_en_uso = (
+        "No se puede eliminar porque este menú está usado en uno o varios presupuestos o facturas."
+    )
+    try:
+        cabecera_actual, _ = cargar_menu_detalle_supabase(menu_id)
+        if not cabecera_actual:
+            return False, "No se pudo comprobar el menú antes de eliminarlo."
+        if not menu_es_modificable(cabecera_actual):
+            return False, mensaje_menu_no_modificable(cabecera_actual)
+
+        if menu_usado_en_documentos(menu_id):
+            return False, mensaje_en_uso
+
+        respuesta = supabase.table("menus").delete().eq("id", menu_id).execute()
+        # Si RLS no deja borrarlo, PostgREST no da error: devuelve 0 filas.
+        if not respuesta.data:
+            return False, "No se ha eliminado el menú: no tienes permiso para borrarlo."
+        cargar_menus_supabase.clear()
+        return True, "Menú eliminado correctamente."
+    except Exception as e:
+        mensaje_error_lower = str(e).lower()
+        if "foreign key" in mensaje_error_lower or "23503" in mensaje_error_lower:
+            return False, mensaje_en_uso
+        return False, f"Error al eliminar el menú: {e}"
+
+
 @st.cache_data(ttl=600)
 def cargar_menus_supabase(user_id_actual=None):
     """
@@ -3039,6 +3344,13 @@ def obtener_nombre_menu_por_id(menu_id):
 def calcular_totales_factura(lineas, iva_pct=21, retencion_pct=0):
     lineas_calculadas = [calcular_linea_factura(linea) for linea in (lineas or [])]
     base_imponible = sum(numero_seguro(linea.get("base_linea", 0.0), 0.0) for linea in lineas_calculadas)
+    # base_linea va redondeada a céntimos; para el Food Cost se usa la exacta.
+    base_imponible_sin_redondear = sum(
+        numero_seguro(linea.get("cantidad", 1.0), 1.0)
+        * numero_seguro(linea.get("precio_unitario", 0.0), 0.0)
+        * (1 - numero_seguro(linea.get("descuento_pct", 0.0), 0.0) / 100)
+        for linea in lineas_calculadas
+    )
     iva_importe = sum(numero_seguro(linea.get("iva_linea", 0.0), 0.0) for linea in lineas_calculadas)
     retencion_pct_num = numero_seguro(retencion_pct, 0.0)
     retencion_importe = base_imponible * retencion_pct_num / 100
@@ -3047,6 +3359,7 @@ def calcular_totales_factura(lineas, iva_pct=21, retencion_pct=0):
     return {
         "lineas": lineas_calculadas,
         "base_imponible": round(base_imponible, 2),
+        "base_imponible_sin_redondear": base_imponible_sin_redondear,
         "iva_pct": iva_pct_num,
         "iva_importe": round(iva_importe, 2),
         "retencion_pct": retencion_pct_num,
@@ -5242,6 +5555,12 @@ def generar_excel(
 
 
 # --- INTERFAZ GRÁFICA DE STREAMLIT ---
+# Vuelta desde el correo de recuperación: va antes de la portada.
+procesar_enlace_recuperacion()
+if st.session_state.get("recuperacion_password_activa") and obtener_usuario_actual():
+    mostrar_formulario_nueva_password()
+    st.stop()
+
 if not st.session_state.get("portal_entrado"):
     mostrar_portal_acceso()
     st.stop()
@@ -5723,7 +6042,7 @@ with st.sidebar:
                 value=ficha["observaciones_precio"],
                 height=70,
             )
-            catalogo_alergenos_ficha = cargar_alergenos_supabase()
+            catalogo_alergenos_ficha = cargar_alergenos_supabase(obtener_user_id_actual())
             opciones_alergenos_ficha = catalogo_alergenos_ficha["nombre"].dropna().astype(str).tolist() if not catalogo_alergenos_ficha.empty else []
             nombres_alergenos_actuales = [
                 str(item.get("nombre", "") or "").strip()
@@ -6197,7 +6516,7 @@ def _df_admin(tabla, columnas, order=None, limite=5000):
 def obtener_lookups_admin():
     """Construye mapas id/código -> etiqueta y etiqueta -> id/código para edición intuitiva."""
     inventario = cargar_inventario_supabase(st.session_state.get("db_trigger", 0))
-    alergenos = cargar_alergenos_supabase()
+    alergenos = cargar_alergenos_supabase(obtener_user_id_actual())
     recetas = _df_admin("recetas", ["id", "codigo_receta", "nombre", "categoria"], order="nombre")
     menus = _df_admin("menus", ["id", "nombre", "tipo_menu"], order="nombre")
     clientes = _df_admin("clientes", ["id", "nombre", "email", "telefono"], order="nombre")
@@ -6769,7 +7088,7 @@ with main_tab_recetas:
         mb_cabecera,
     )
     pvp_final_cabecera = pvp_neto_cabecera + (pvp_neto_cabecera * (iva_cabecera / 100))
-    food_cost_cabecera = (coste_cabecera / pvp_final_cabecera * 100) if pvp_final_cabecera > 0 else 0.0
+    food_cost_cabecera = calcular_food_cost_pct(coste_cabecera, pvp_neto_cabecera)
 
     coste_por_racion_cabecera = calcular_coste_por_racion(
         coste_cabecera,
@@ -7282,12 +7601,13 @@ with main_tab_clientes:
 
                 st.markdown("#### Eliminar cliente")
                 st.warning("Esta acción no se puede deshacer. No elimines clientes con documentación asociada.")
+                clave_confirmar_cliente = f"confirmar_eliminar_cliente_{cliente_id_seleccionado}"
                 confirmar_eliminar_cliente = st.text_input(
                     "Escribe ELIMINAR para confirmar",
-                    key=f"confirmar_eliminar_cliente_{cliente_id_seleccionado}"
+                    key=clave_confirmar_cliente
                 )
                 if st.button("Eliminar cliente seleccionado", type="secondary", use_container_width=True):
-                    if confirmar_eliminar_cliente != "ELIMINAR":
+                    if not confirmacion_eliminar_valida(confirmar_eliminar_cliente):
                         st.error("Para eliminar el cliente debes escribir exactamente ELIMINAR.")
                     else:
                         ok_eliminar, mensaje_eliminar = eliminar_cliente_supabase(cliente_id_seleccionado)
@@ -7715,9 +8035,9 @@ with main_tab_facturas:
                     else 0.0
                 )
                 margen_documento = totales_factura["base_imponible"] - coste_documento
-                food_cost_documento = (
-                    coste_documento / totales_factura["base_imponible"] * 100
-                    if totales_factura["base_imponible"] > 0 else 0.0
+                food_cost_documento = calcular_food_cost_pct(
+                    coste_documento,
+                    totales_factura["base_imponible_sin_redondear"],
                 )
                 total_col1, total_col2, total_col3, total_col4, total_col5, total_col6 = st.columns(6)
                 with total_col1:
@@ -8214,12 +8534,13 @@ with main_tab_recetas:
                 "sus ingredientes asociados. No se borrarán ingredientes del inventario."
             )
             st.write(f"**Receta seleccionada:** {codigo_eliminar} · {nombre_eliminar}")
+            clave_confirmar_receta = f"confirmar_eliminar_receta_{receta_id_para_eliminar}"
             confirmacion_eliminar = st.text_input(
                 "Escribe ELIMINAR para confirmar",
-                key=f"confirmar_eliminar_receta_{receta_id_para_eliminar}"
+                key=clave_confirmar_receta
             )
             if st.button("Borrar receta seleccionada", type="secondary", use_container_width=True):
-                if confirmacion_eliminar != "ELIMINAR":
+                if not confirmacion_eliminar_valida(confirmacion_eliminar):
                     st.error("Para borrar la receta debes escribir exactamente ELIMINAR.")
                 else:
                     ok, mensaje = eliminar_receta_supabase(receta_id_para_eliminar)
@@ -8333,6 +8654,33 @@ with main_tab_menus:
                             st.session_state["menu_numero_comensales"] = int(numero_seguro(cabecera_menu.get("numero_comensales", 1), 1))
                             st.session_state["mensaje_menu_cargado"] = f"Menú cargado: {st.session_state['menu_nombre']}."
                             st.rerun()
+
+                with st.expander("Eliminar menú", expanded=False):
+                    menu_para_eliminar = menus_por_id.get(str(menu_id_seleccionado), {})
+                    if not menu_es_modificable(menu_para_eliminar):
+                        st.warning(mensaje_menu_no_modificable(menu_para_eliminar))
+                    else:
+                        st.warning(
+                            "Esta acción no se puede deshacer. Se borrará el menú y su lista de recetas; "
+                            "las recetas no se borran. No se puede eliminar un menú usado en presupuestos o facturas."
+                        )
+                        st.write(f"**Menú seleccionado:** {menu_para_eliminar.get('nombre') or menu_id_seleccionado}")
+                        confirmacion_eliminar_menu = st.text_input(
+                            "Escribe ELIMINAR para confirmar",
+                            key=f"confirmar_eliminar_menu_{menu_id_seleccionado}"
+                        )
+                        if st.button("Eliminar menú seleccionado", type="secondary", use_container_width=True):
+                            if not confirmacion_eliminar_valida(confirmacion_eliminar_menu):
+                                st.error("Para eliminar el menú debes escribir exactamente ELIMINAR.")
+                            else:
+                                ok_menu, mensaje_menu = eliminar_menu_supabase(menu_id_seleccionado)
+                                if ok_menu:
+                                    if str(st.session_state.get("menu_id") or "") == str(menu_id_seleccionado):
+                                        st.session_state["menu_id"] = None
+                                    st.session_state["mensaje_menu_cargado"] = mensaje_menu
+                                    st.rerun()
+                                else:
+                                    st.error(mensaje_menu)
 
     menu_col1, menu_col2, menu_col3 = st.columns([2.1, 1, 1])
     with menu_col1:

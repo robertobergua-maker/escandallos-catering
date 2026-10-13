@@ -6,10 +6,18 @@ from calculos_jerarquia import (
     calcular_coste_por_racion,
     calcular_coste_presupuesto,
     calcular_coste_receta,
+    calcular_food_cost_pct,
 )
 
 
 class CalculosJerarquiaTest(unittest.TestCase):
+    def test_food_cost_sin_redondeos(self):
+        # 2 raciones de 0,14835 €: coste y venta sin IVA iguales => 100 %,
+        # aunque la base imponible mostrada se redondee a 0,30 €.
+        self.assertAlmostEqual(calcular_food_cost_pct(2 * 0.14835, 2 * 0.14835), 100.0)
+        self.assertAlmostEqual(calcular_food_cost_pct(25.0, 100.0), 25.0)
+        self.assertEqual(calcular_food_cost_pct(10.0, 0), 0.0)
+
     def test_ejemplo_menu_y_presupuesto(self):
         lineas_menu = [
             {

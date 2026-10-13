@@ -25,7 +25,7 @@ Usuario ──► escandallos.samirarte.com
 2. **Recomendado**: pasar la cuenta a *Pay As You Go*. Sigue siendo gratis mientras no se superen los límites Always Free, y evita que Oracle recupere instancias gratuitas que considere inactivas. Poner una alerta de presupuesto de 1 € en *Billing → Budgets*.
 3. *Compute → Instances → Create instance*:
    - Image: **Ubuntu 24.04** (aarch64)
-   - Shape: **VM.Standard.A1.Flex**, con 2 OCPU y 12 GB (o 4/24).
+   - Shape: **VM.Standard.A1.Flex**, con 2 OCPU y 12 GB. Es la VM actual: `escandallos-vm`, región Madrid 3, Ubuntu 24.04 arm64, usuario `ubuntu`, IP `82.70.90.53`.
    - Añadir tu clave SSH pública.
    - Si sale *Out of capacity*, reintentar más tarde o probar con otro Availability Domain.
 4. Anotar la **IP pública** de la instancia. Se mantiene aunque la VM se pare o reinicie, y solo se pierde si se elimina la instancia.
@@ -34,47 +34,106 @@ Usuario ──► escandallos.samirarte.com
 ## 2. Preparar la VM
 
 ```bash
-ssh ubuntu@<IP_PUBLICA>
+ssh -i <clave_privada> ubuntu@82.70.90.53
 sudo apt update && sudo apt -y upgrade
-curl -fsSL https://get.docker.com | sudo sh
-sudo usermod -aG docker ubuntu && exit   # volver a entrar por SSH
 sudo apt -y install unattended-upgrades  # parches de seguridad automáticos
-git clone <URL_DEL_REPO> escandallos
 ```
 
-Las imágenes Ubuntu de Oracle traen un cortafuegos (iptables) que bloquea todo salvo SSH. Hay que abrir también 80 y 443 dentro de la VM:
+Las imágenes Ubuntu de Oracle traen un cortafuegos (iptables) que rechaza todo salvo SSH, con un `REJECT` final en la cadena INPUT. Las reglas de 80 y 443 se insertan **justo antes de ese REJECT** y se guardan **antes de instalar Docker**, para no persistir también las reglas que Docker crea solo:
 
 ```bash
-sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 80 -j ACCEPT
-sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 443 -j ACCEPT
+sudo iptables -L INPUT -n --line-numbers          # localizar el número N del REJECT
+sudo iptables -I INPUT N -p tcp -m state --state NEW --dport 443 -j ACCEPT
+sudo iptables -I INPUT N -p tcp -m state --state NEW --dport 80 -j ACCEPT
 sudo netfilter-persistent save
+```
+
+Docker y el plugin compose desde el repositorio oficial de Docker:
+
+```bash
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" \
+  | sudo tee /etc/apt/sources.list.d/docker.list
+sudo apt-get update
+sudo apt-get -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo usermod -aG docker ubuntu        # salir y volver a entrar por SSH
+docker compose version
+sudo mkdir -p /opt/escandallos/app /opt/escandallos/secrets
+sudo chown ubuntu:ubuntu /opt/escandallos /opt/escandallos/app
+```
+
+> **⚠️ Tras instalar Docker, no volver a ejecutar `sudo netfilter-persistent save`.** Docker crea sus propias reglas de iptables (cadenas `DOCKER-*` en FORWARD y NAT) cada vez que arranca. Si se guardan, se cargan duplicadas en el siguiente arranque y pueden romper la red de los contenedores. Para cambiar el cortafuegos, editar directamente `/etc/iptables/rules.v4` (solo la cadena `INPUT`, siempre antes del `REJECT`) y aplicarlo con `sudo reboot`, o con `sudo netfilter-persistent reload && sudo systemctl restart docker` (el reload vacía las cadenas de Docker y el reinicio de Docker las recrea).
+
+Estructura en la VM:
+
+```
+/opt/escandallos/app/              código (copia del repo)
+/opt/escandallos/app/deploy/.env   dominios (APP_DOMAIN, REDIRECT_DOMAIN, CANONICAL_DOMAIN) y ruta del secreto (no es secreto)
+/opt/escandallos/secrets/secrets.toml   secretos, permisos 600, dueño UID 10001
 ```
 
 ## 3. Apuntar el subdominio en Hostalia
 
+En Hostalia, `escandallos.samirarte.com` es **una zona DNS propia** (con su SOA y sus NS), separada de la de `samirarte.com`. Por eso los registros de este subdominio se crean dentro de la zona `escandallos.samirarte.com`.
+
+**Primero, prueba con un subdominio provisional** sin tocar el actual: en la zona `escandallos.samirarte.com`, registro **A** `nuevo-escandallos` → `82.70.90.53`. El nombre completo es `nuevo-escandallos.escandallos.samirarte.com`, y en `.env` se pone `APP_DOMAIN=nuevo-escandallos.escandallos.samirarte.com`. El panel tarda unos minutos en publicar los cambios. Para comprobarlo sin cachés, **desde la VM** (la red de casa puede interceptar las consultas DNS y dar resultados falsos): `dig +short A nuevo-escandallos.escandallos.samirarte.com @ns10.servicio-online.net`, o `dig +trace` para seguir la delegación completa.
+
+Cuando todo funcione, se hace el cambio definitivo:
+
 1. En el panel de Hostalia, quitar la configuración actual de `escandallos.samirarte.com` como subdominio de hosting (la redirección de `redirect-hostalia/`).
-2. En la *zona DNS* de `samirarte.com`, crear un registro **A** con nombre `escandallos` y valor igual a la IP pública de la VM. Si Hostalia no deja crear el registro porque ya existe, editar el que haya o borrar antes el subdominio.
+2. En la *zona DNS* `escandallos.samirarte.com`, editar el registro **A** del propio nombre de la zona (`escandallos.samirarte.com`, a veces mostrado como `@` o vacío), que hoy apunta a `82.194.68.97`, para que apunte a la IP de la VM. Si la zona desaparece al quitar el subdominio de hosting, crear en la zona `samirarte.com` un registro **A** `escandallos` → IP de la VM y volver a crear el provisional si sigue haciendo falta.
 3. Comprobar la propagación (puede tardar de minutos a unas horas) con `nslookup escandallos.samirarte.com`, que debe devolver la IP de la VM.
 
-Hasta que el DNS no apunte a la VM, Caddy no podrá obtener el certificado. Conviene hacer este paso antes de arrancar.
+Hasta que el DNS no apunte a la VM, Caddy no podrá obtener el certificado de ese nombre. No pasa nada por desplegar antes: Caddy gestiona cada dominio por separado, sigue sirviendo los que ya tienen certificado y reintenta solo los demás con espera creciente (y contra el entorno de pruebas de Let's Encrypt para no gastar el límite de intentos) hasta que el DNS llegue.
+
+Configuración definitiva en `deploy/.env`:
+
+```
+APP_DOMAIN=escandallos.samirarte.com, nuevo-escandallos.escandallos.samirarte.com
+REDIRECT_DOMAIN=www.escandallos.samirarte.com
+CANONICAL_DOMAIN=escandallos.samirarte.com
+```
+
+`www.escandallos.samirarte.com` (registro A `www` en la zona `escandallos.samirarte.com`) redirige con 301 a `https://escandallos.samirarte.com`, conservando la ruta. Seguimiento del certificado: `docker compose logs caddy | grep -E "obtained|error"`.
 
 ## 4. Secretos y arranque
 
+El secreto se escribe directamente en la VM; nunca pasa por git ni por el chat. La app lee estas claves:
+
+| Clave | Obligatoria | Nota |
+|---|---|---|
+| `SUPABASE_URL` | Sí | |
+| `SUPABASE_KEY` | Sí | Clave anon/publishable (RLS) |
+| `OPENAI_API_KEY` | Sí, para las funciones de IA | |
+| `PASSWORD_RECOVERY_REDIRECT_URL` | Recomendada | URL pública actual (provisional o definitiva) |
+| `EMISOR_NOMBRE_FISCAL`, `EMISOR_NIF`, `EMISOR_DIRECCION`, `EMISOR_CP_CIUDAD`, `EMISOR_PROVINCIA`, `EMISOR_PAIS` | Opcionales | Datos fiscales de facturas |
+
 ```bash
-cd ~/escandallos/deploy
-cp .env.example .env && nano .env   # APP_DOMAIN + SUPABASE_URL/KEY
-nano secrets.toml                   # mismo contenido que en Streamlit Cloud
+sudo install -m 600 -o 10001 -g 10001 /dev/null /opt/escandallos/secrets/secrets.toml
+sudo nano /opt/escandallos/secrets/secrets.toml   # pegar el contenido de Streamlit Cloud
+cd /opt/escandallos/app/deploy
+cp .env.example .env && nano .env   # APP_DOMAIN
 docker compose up -d --build
 docker compose ps
 docker compose logs -f caddy app   # Caddy debe indicar "certificate obtained successfully"
 ```
 
-`secrets.toml` debe incluir `PASSWORD_RECOVERY_REDIRECT_URL = "https://escandallos.samirarte.com"`. Esa URL también debe estar en Supabase → *Authentication → URL Configuration* (Site URL y Redirect URLs).
+Tanto la URL provisional como la definitiva deben estar en Supabase → *Authentication → URL Configuration → Redirect URLs*, con comodín (`https://<dominio>/**`), porque la app envía `redirect_to` con barra final.
+
+**Recuperación de contraseña:** la app valida el enlace con `token_hash` (no con PKCE, que no funciona porque el cliente se crea en cada ejecución). En Supabase → *Authentication → Emails → Reset Password*, el enlace de la plantilla debe ser:
+
+```html
+<a href="{{ .RedirectTo }}?token_hash={{ .TokenHash }}&type=recovery">Restablecer contraseña</a>
+```
 
 ## 5. Actualizar la app
 
-```bash
-cd ~/escandallos && git pull && cd deploy && docker compose up -d --build
+Desde Windows, en la carpeta del repo (copia el último commit, sin pasar por GitHub):
+
+```powershell
+git -c core.autocrlf=false archive --format=tar HEAD | ssh -i <clave_privada> ubuntu@82.70.90.53 "tar -x -C /opt/escandallos/app && cd /opt/escandallos/app/deploy && docker compose up -d --build"
 ```
 
 ## 6. Retirar lo antiguo (cuando todo funcione)
@@ -87,7 +146,7 @@ cd ~/escandallos && git pull && cd deploy && docker compose up -d --build
 
 | Recurso | Límite gratis | Cuándo se notaría |
 |---|---|---|
-| VM Oracle A1 | 4 OCPU / 24 GB RAM / 200 GB disco / 10 TB tráfico al mes | Decenas de usuarios simultáneos. Streamlit usa unos 100-200 MB por sesión activa. |
+| VM Oracle A1 | 4 OCPU / 24 GB RAM / 200 GB disco / 10 TB tráfico al mes (en uso: 2 OCPU / 12 GB) | Decenas de usuarios simultáneos. Streamlit usa unos 100-200 MB por sesión activa. |
 | Supabase Free | 500 MB de BBDD, 50.000 usuarios activos al mes, 1 GB de storage | Cuando la BBDD pase de 500 MB. Hoy son datos de texto (recetas, facturas), así que queda mucho margen. |
 | Caddy + Let's Encrypt | Sin límite práctico | — |
 

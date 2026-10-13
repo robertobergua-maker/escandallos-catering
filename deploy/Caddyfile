@@ -1,4 +1,13 @@
+# Dominios que sirven la app (separados por comas): el definitivo y el
+# provisional. Caddy obtiene y renueva un certificado por cada uno y, si
+# alguno falla (DNS aún sin apuntar a la VM), lo reintenta solo sin afectar
+# a los demás.
 {$APP_DOMAIN} {
 	encode gzip
 	reverse_proxy app:8501
+}
+
+# Alias que redirigen de forma permanente (301) al dominio canónico.
+{$REDIRECT_DOMAIN} {
+	redir https://{$CANONICAL_DOMAIN}{uri} 301
 }

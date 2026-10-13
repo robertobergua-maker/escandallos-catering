@@ -1,24 +1,41 @@
 # Despliegue en una VM siempre encendida (Oracle Cloud Always Free).
 # Uso: ver docs/despliegue_oracle.md
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   app:
     build: ..
     image: escandallos:latest
     restart: unless-stopped
     volumes:
-      # Mismo secrets.toml que se usaba en Streamlit Cloud (no se sube a git).
-      - ./secrets.toml:/app/.streamlit/secrets.toml:ro
-    # Solo accesible desde la propia VM; la entrada pública es Caddy.
+      # Mismo secrets.toml que se usaba en Streamlit Cloud. Vive fuera del
+      # repo (/opt/escandallos/secrets), con permisos 600 y dueño UID 10001.
+      - ${SECRETS_FILE:-/opt/escandallos/secrets/secrets.toml}:/app/.streamlit/secrets.toml:ro
+    # Solo accesible desde la red interna de Docker; la entrada pública es Caddy.
     expose:
       - "8501"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    logging: *logging
 
-  # Proxy inverso con HTTPS automático (Let's Encrypt) para el subdominio
-  # configurado en Hostalia (registro A apuntando a la IP de la VM).
+  # Proxy inverso con HTTPS automático (Let's Encrypt). APP_DOMAIN admite
+  # varios dominios separados por comas; REDIRECT_DOMAIN redirige (301) a
+  # CANONICAL_DOMAIN.
   caddy:
     image: caddy:2
     restart: unless-stopped
     environment:
       - APP_DOMAIN=${APP_DOMAIN}
+      - REDIRECT_DOMAIN=${REDIRECT_DOMAIN}
+      - CANONICAL_DOMAIN=${CANONICAL_DOMAIN}
     ports:
       - "80:80"
       - "443:443"
@@ -28,13 +45,16 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
-      - app
+      app:
+        condition: service_healthy
+    logging: *logging
 
   # Evita que Supabase Free pause el proyecto por inactividad (7 días).
-  # Sustituye al workflow de GitHub Actions, que GitHub desactiva en repos
-  # sin actividad.
+  # Desactivado hasta la fase del latido: se activa con
+  #   docker compose --profile keepalive up -d
   supabase-keepalive:
     image: curlimages/curl:latest
+    profiles: ["keepalive"]
     restart: unless-stopped
     environment:
       - SUPABASE_URL=${SUPABASE_URL}
@@ -49,6 +69,7 @@ services:
             -H "Authorization: Bearer $$SUPABASE_KEY"
           sleep 21600
         done
+    logging: *logging
 
 volumes:
   caddy_data:
