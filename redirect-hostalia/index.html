@@ -2,11 +2,31 @@
 <html lang="es">
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="refresh" content="0; url=https://escandallos.streamlit.app/">
-  <title>Gestor de Escandallos</title>
-  <script>window.location.replace("https://escandallos.streamlit.app/");</script>
+  <meta name="robots" content="noindex, nofollow">
+  <!--
+    Fallback HTML por si Apache no procesa el .htaccess
+    (p.ej. si mod_rewrite no está activo en Hostalia).
+    La cabecera meta refresh y el JS hacen una redirección NO cacheada
+    equivalente a un 302.
+  -->
+  <meta http-equiv="refresh" content="0; url=https://nuevo-escandallos.escandallos.samirarte.com/">
+  <title>Gestor de Escandallos — redirigiendo…</title>
+  <script>
+    // Preserva el path y la query string para que los marcadores sigan funcionando.
+    // window.location.replace no añade entrada al historial del navegador.
+    window.location.replace(
+      "https://nuevo-escandallos.escandallos.samirarte.com" +
+      window.location.pathname +
+      window.location.search +
+      window.location.hash
+    );
+  </script>
 </head>
 <body>
-  <p>Redirigiendo al Gestor de Escandallos... Si no ocurre automáticamente, <a href="https://escandallos.streamlit.app/">haz clic aquí</a>.</p>
+  <p>
+    Redirigiendo al Gestor de Escandallos…
+    Si no ocurre automáticamente,
+    <a href="https://nuevo-escandallos.escandallos.samirarte.com/">haz clic aquí</a>.
+  </p>
 </body>
 </html>
