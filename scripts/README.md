@@ -134,7 +134,7 @@ rm /tmp/backup.dump /tmp/backup.dump.age
 La clave pública usada en el script es:
 
 ```
-age133xvpxx6u6f96zhpfq9r62vt0rqlkrmvzl2804phg9rcs0k8542sh8rky7
+age1u7qgmyjqys7hvhnap0yyzl0gwfu3vlq7gjtjxz05qqghsygtf4jsc2zq7l
 ```
 
 La clave privada correspondiente **no está en el repo**. Guárdala en un gestor

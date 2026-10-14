@@ -23,7 +23,7 @@ set -euo pipefail
 # Configuración
 # ---------------------------------------------------------------------------
 
-AGE_PUBKEY="age133xvpxx6u6f96zhpfq9r62vt0rqlkrmvzl2804phg9rcs0k8542sh8rky7"
+AGE_PUBKEY="age1u7qgmyjqys7hvhnap0yyzl0gwfu3vlq7gjtjxz05qqghsygtf4jsc2zq7l"
 RCLONE_DEST="gdrive:Escandallos_Backups"
 BACKUP_DIR="${BACKUP_DIR:-/tmp}"
 DATE=$(date -u +"%Y-%m-%d")
