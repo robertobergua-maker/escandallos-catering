@@ -26,6 +26,31 @@ services:
       retries: 3
     logging: *logging
 
+  # Entorno de pruebas de la rama multiorganizacion.
+  # Usa su propio clon del repo en /opt/escandallos/app-pruebas y sus propios
+  # secretos en /opt/escandallos/secrets/secrets-pruebas.toml.
+  # Caddy enruta nuevo-escandallos.escandallos.samirarte.com a este servicio.
+  # No tiene ports ni expose 8502: Caddy llega por la red interna Docker a
+  # app-pruebas:8501. Para arrancar solo este servicio:
+  #   docker compose build app-pruebas && docker compose up -d app-pruebas
+  app-pruebas:
+    build:
+      context: /opt/escandallos/app-pruebas
+      dockerfile: Dockerfile
+    image: escandallos-pruebas:latest
+    restart: unless-stopped
+    volumes:
+      - ${SECRETS_FILE_PRUEBAS:-/opt/escandallos/secrets/secrets-pruebas.toml}:/app/.streamlit/secrets.toml:ro
+    expose:
+      - "8501"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+    logging: *logging
+
   # Proxy inverso con HTTPS automático (Let's Encrypt). APP_DOMAIN admite
   # varios dominios separados por comas; REDIRECT_DOMAIN redirige (301) a
   # CANONICAL_DOMAIN.
@@ -36,6 +61,7 @@ services:
       - APP_DOMAIN=${APP_DOMAIN}
       - REDIRECT_DOMAIN=${REDIRECT_DOMAIN}
       - CANONICAL_DOMAIN=${CANONICAL_DOMAIN}
+      - PRUEBAS_DOMAIN=${PRUEBAS_DOMAIN:-nuevo-escandallos.escandallos.samirarte.com}
     ports:
       - "80:80"
       - "443:443"
