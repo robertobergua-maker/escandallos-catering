@@ -1,13 +1,20 @@
-# Dominios que sirven la app (separados por comas): el definitivo y el
-# provisional. Caddy obtiene y renueva un certificado por cada uno y, si
-# alguno falla (DNS aún sin apuntar a la VM), lo reintenta solo sin afectar
-# a los demás.
+# Dominio de producción: escandallos.samirarte.com (y cualquier otro en APP_DOMAIN,
+# separados por comas). Cada dominio obtiene su propio certificado Let's Encrypt.
+# Si alguno falla (DNS sin propagar), Caddy lo reintenta solo sin afectar a los demás.
 {$APP_DOMAIN} {
 	encode gzip
 	reverse_proxy app:8501
 }
 
-# Alias que redirigen de forma permanente (301) al dominio canónico.
+# Entorno de pruebas (rama multiorganizacion).
+# nuevo-escandallos.escandallos.samirarte.com → app-pruebas:8501
+# Solo activo cuando el servicio app-pruebas está levantado.
+{$PRUEBAS_DOMAIN} {
+	encode gzip
+	reverse_proxy app-pruebas:8501
+}
+
+# Alias que redirige de forma permanente (301) al dominio canónico.
 {$REDIRECT_DOMAIN} {
 	redir https://{$CANONICAL_DOMAIN}{uri} 301
 }
