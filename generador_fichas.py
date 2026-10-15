@@ -3286,7 +3286,6 @@ def actualizar_cliente_supabase(cliente_id, cliente):
             .table("clientes")
             .update(dict(cliente))
             .eq("id", cliente_id_limpio)
-            .eq("user_id", user_id_actual)
             .execute()
         )
         return True, "Cliente actualizado correctamente."
@@ -3317,7 +3316,6 @@ def eliminar_cliente_supabase(cliente_id):
             .table("clientes")
             .delete()
             .eq("id", cliente_id_limpio)
-            .eq("user_id", user_id_actual)
             .execute()
         )
         return True, "Cliente eliminado correctamente."
@@ -3336,6 +3334,8 @@ def error_tabla_facturacion_no_activada(error):
         (
             "facturas" in mensaje
             or "factura_lineas" in mensaje
+            # presupuestos/presupuesto_menus/factura_menus son de la 019 (no aplicada);
+            # se mantienen en el detector por si quedan referencias legacy en caché.
             or "presupuestos" in mensaje
             or "presupuesto_menus" in mensaje
             or "factura_menus" in mensaje
@@ -3836,14 +3836,18 @@ def generar_numero_factura(tipo_documento):
         return f"{prefijo}-{fecha_codigo}-0001"
 
     try:
-        respuesta = (
+        consulta_num = (
             supabase
             .table("facturas")
             .select("numero_factura")
-            .eq("user_id", obtener_user_id_actual())
             .ilike("numero_factura", patron)
-            .execute()
         )
+        org_id = obtener_org_activa_id()
+        if org_id:
+            consulta_num = consulta_num.eq("organizacion_id", org_id)
+        else:
+            consulta_num = consulta_num.eq("user_id", obtener_user_id_actual())
+        respuesta = consulta_num.execute()
         ultimo = 0
         regex = re.compile(rf"^{re.escape(prefijo)}-{re.escape(fecha_codigo)}-(\d{{4,}})$")
         for fila in respuesta.data or []:
@@ -3884,7 +3888,43 @@ def preparar_relaciones_menu_documento(lineas, tipo_documento, documento_id):
     return relaciones
 
 
+def _construir_lineas_factura(factura_id, lineas):
+    """
+    Construye la lista de dicts para insertar en factura_lineas.
+    Extrae solo líneas con descripción válida.
+    """
+    lineas_validas = [
+        calcular_linea_factura(l)
+        for l in (lineas or [])
+        if str(l.get("descripcion", "") or "").strip()
+    ]
+    resultado = []
+    for orden, linea in enumerate(lineas_validas, start=1):
+        resultado.append({
+            "factura_id":     factura_id,
+            "origen_tipo":    linea.get("origen_tipo", "manual") or "manual",
+            "origen_id":      linea.get("origen_id"),
+            "descripcion":    linea["descripcion"],
+            "cantidad":       linea["cantidad"],
+            "unidad":         linea["unidad"],
+            "precio_unitario": linea["precio_unitario"],
+            "descuento_pct":  linea["descuento_pct"],
+            "base_linea":     linea["base_linea"],
+            "iva_pct":        linea["iva_pct"],
+            "iva_linea":      linea["iva_linea"],
+            "total_linea":    linea["total_linea"],
+            "orden":          orden,
+        })
+    return resultado
+
+
 def guardar_presupuesto_supabase(presupuesto, lineas):
+    """
+    Guarda un presupuesto como fila de public.facturas con
+    tipo_documento='presupuesto' y número en numero_factura.
+    Las tablas presupuestos/presupuesto_menus (migración 019) no están
+    disponibles en producción y no se usan aquí.
+    """
     user_id_actual = obtener_user_id_actual()
     documento_valido, mensaje_validacion = validar_documento_con_menus(
         presupuesto,
@@ -3894,45 +3934,57 @@ def guardar_presupuesto_supabase(presupuesto, lineas):
         return False, mensaje_validacion, None
 
     lineas_menu = extraer_lineas_menu_documento(lineas)
-    coste_total = calcular_coste_presupuesto(lineas_menu)
-    precio_total = sum(
-        numero_seguro(linea.get("precio_linea_menu_documento"), 0.0)
-        for linea in lineas_menu
+    totales = calcular_totales_factura(
+        [calcular_linea_factura(l) for l in (lineas or []) if str(l.get("descripcion", "") or "").strip()],
+        presupuesto.get("iva_pct", 21),
+        presupuesto.get("retencion_pct", 0),
     )
+
     datos = {
-        "user_id": user_id_actual,
-        "cliente_id": presupuesto.get("cliente_id"),
-        "numero_presupuesto": presupuesto.get("numero_factura"),
-        "estado": presupuesto.get("estado", "borrador"),
-        "fecha_emision": presupuesto.get("fecha_emision"),
+        "user_id":        user_id_actual,
+        "cliente_id":     presupuesto.get("cliente_id"),
+        "numero_factura": presupuesto.get("numero_factura"),
+        "tipo_documento": "presupuesto",
+        "estado":         presupuesto.get("estado", "borrador"),
+        "fecha_emision":  presupuesto.get("fecha_emision"),
         "fecha_vencimiento": presupuesto.get("fecha_vencimiento"),
-        "concepto": presupuesto.get("concepto"),
-        "coste_total": coste_total,
-        "precio_total": precio_total,
-        "notas": presupuesto.get("notas"),
+        "concepto":       presupuesto.get("concepto"),
+        "base_imponible": totales["base_imponible"],
+        "iva_pct":        presupuesto.get("iva_pct", 21),
+        "iva_importe":    totales["iva_importe"],
+        "retencion_pct":  presupuesto.get("retencion_pct", 0),
+        "retencion_importe": totales["retencion_importe"],
+        "total":          totales["total"],
+        "notas":          presupuesto.get("notas"),
     }
-    respuesta = supabase.table("presupuestos").insert(datos).execute()
-    guardado = (respuesta.data or [{}])[0]
-    presupuesto_id = guardado.get("id")
-    if not presupuesto_id:
-        return False, "No se pudo obtener el identificador del presupuesto.", None
-    relaciones = preparar_relaciones_menu_documento(
-        lineas,
-        "presupuesto",
-        presupuesto_id,
-    )
-    supabase.table("presupuesto_menus").insert(relaciones).execute()
-    guardado["numero_factura"] = guardado.get("numero_presupuesto")
-    guardado["tipo_documento"] = "presupuesto"
-    guardado["total"] = guardado.get("precio_total", precio_total)
-    guardado["_origen_almacen"] = "presupuestos"
-    return True, "Presupuesto guardado correctamente.", guardado
+    org_id = obtener_org_activa_id()
+    if org_id:
+        datos["organizacion_id"] = org_id
+
+    try:
+        respuesta = supabase.table("facturas").insert(datos).execute()
+        guardado = (respuesta.data or [{}])[0]
+        factura_id = guardado.get("id")
+        if not factura_id:
+            return False, "No se pudo obtener el identificador del presupuesto.", None
+
+        # Guardar líneas en factura_lineas (no en presupuesto_menus, que no existe)
+        lineas_guardar = _construir_lineas_factura(factura_id, lineas)
+        if lineas_guardar:
+            supabase.table("factura_lineas").insert(lineas_guardar).execute()
+
+        guardado["_origen_almacen"] = "facturas"
+        return True, "Presupuesto guardado correctamente.", preparar_factura_compatibilidad(guardado)
+    except Exception as e:
+        if error_tabla_facturacion_no_activada(e):
+            return False, MENSAJE_FACTURACION_NO_ACTIVADA, None
+        return False, f"Error al guardar presupuesto: {e}", None
 
 
 def guardar_relaciones_factura_supabase(factura_id, lineas):
-    relaciones = preparar_relaciones_menu_documento(lineas, "factura", factura_id)
-    if relaciones:
-        supabase.table("factura_menus").insert(relaciones).execute()
+    # factura_menus pertenece a la migración 019 (no aplicada en producción).
+    # Esta función se mantiene como stub para no romper llamadas existentes.
+    pass
 
 
 def cargar_facturas_supabase():
@@ -4134,50 +4186,62 @@ def guardar_factura_supabase(factura, lineas):
 
 
 def actualizar_presupuesto_supabase(presupuesto_id, presupuesto, lineas):
+    """
+    Actualiza un presupuesto guardado en public.facturas
+    (tipo_documento='presupuesto').
+    Las tablas presupuestos/presupuesto_menus (migración 019) no se usan.
+    """
     documento_valido, mensaje_validacion = validar_documento_con_menus(
-        presupuesto,
-        lineas,
+        presupuesto, lineas,
     )
     if not documento_valido:
         return False, mensaje_validacion, None
-    lineas_menu = extraer_lineas_menu_documento(lineas)
-    coste_total = calcular_coste_presupuesto(lineas_menu)
-    precio_total = sum(
-        numero_seguro(linea.get("precio_linea_menu_documento"), 0.0)
-        for linea in lineas_menu
+
+    totales = calcular_totales_factura(
+        [calcular_linea_factura(l) for l in (lineas or [])
+         if str(l.get("descripcion", "") or "").strip()],
+        presupuesto.get("iva_pct", 21),
+        presupuesto.get("retencion_pct", 0),
     )
     datos = {
-        "cliente_id": presupuesto.get("cliente_id"),
-        "numero_presupuesto": presupuesto.get("numero_factura"),
-        "estado": presupuesto.get("estado", "borrador"),
-        "fecha_emision": presupuesto.get("fecha_emision"),
+        "cliente_id":        presupuesto.get("cliente_id"),
+        "numero_factura":    presupuesto.get("numero_factura"),
+        "tipo_documento":    "presupuesto",
+        "estado":            presupuesto.get("estado", "borrador"),
+        "fecha_emision":     presupuesto.get("fecha_emision"),
         "fecha_vencimiento": presupuesto.get("fecha_vencimiento"),
-        "concepto": presupuesto.get("concepto"),
-        "coste_total": coste_total,
-        "precio_total": precio_total,
-        "notas": presupuesto.get("notas"),
+        "concepto":          presupuesto.get("concepto"),
+        "base_imponible":    totales["base_imponible"],
+        "iva_pct":           presupuesto.get("iva_pct", 21),
+        "iva_importe":       totales["iva_importe"],
+        "retencion_pct":     presupuesto.get("retencion_pct", 0),
+        "retencion_importe": totales["retencion_importe"],
+        "total":             totales["total"],
+        "notas":             presupuesto.get("notas"),
     }
-    respuesta = (
-        supabase
-        .table("presupuestos")
-        .update(datos)
-        .eq("id", presupuesto_id)
-        .eq("user_id", obtener_user_id_actual())
-        .execute()
-    )
-    supabase.table("presupuesto_menus").delete().eq(
-        "presupuesto_id",
-        presupuesto_id,
-    ).execute()
-    relaciones = preparar_relaciones_menu_documento(
-        lineas,
-        "presupuesto",
-        presupuesto_id,
-    )
-    supabase.table("presupuesto_menus").insert(relaciones).execute()
-    actualizado = (respuesta.data or [{}])[0]
-    actualizado["numero_factura"] = actualizado.get("numero_presupuesto")
-    return True, "Presupuesto actualizado correctamente.", actualizado
+    try:
+        respuesta = (
+            supabase
+            .table("facturas")
+            .update(datos)
+            .eq("id", presupuesto_id)
+            .execute()
+        )
+        actualizado = (respuesta.data or [{}])[0]
+
+        # Reemplazar líneas en factura_lineas
+        supabase.table("factura_lineas").delete().eq(
+            "factura_id", presupuesto_id
+        ).execute()
+        lineas_nuevas = _construir_lineas_factura(presupuesto_id, lineas)
+        if lineas_nuevas:
+            supabase.table("factura_lineas").insert(lineas_nuevas).execute()
+
+        return True, "Presupuesto actualizado correctamente.", preparar_factura_compatibilidad(actualizado)
+    except Exception as e:
+        if error_tabla_facturacion_no_activada(e):
+            return False, MENSAJE_FACTURACION_NO_ACTIVADA, None
+        return False, f"Error al actualizar presupuesto: {e}", None
 
 
 def actualizar_factura_supabase(factura_id, factura, lineas):
@@ -4223,7 +4287,6 @@ def actualizar_factura_supabase(factura_id, factura, lineas):
             .table("facturas")
             .update(datos_factura)
             .eq("id", factura_id)
-            .eq("user_id", user_id_actual)
             .execute()
         )
         factura_actualizada = (respuesta_factura.data or [{}])[0]
@@ -8317,13 +8380,17 @@ with main_tab_facturas:
                     st.warning("Selecciona un cliente antes de crear líneas desde un menú.")
                 else:
                     menus_factura_df = cargar_menus_supabase(obtener_user_id_actual(), obtener_org_activa_id())
-                    menus_factura_df = menus_factura_df[
-                        menus_factura_df["organizacion_id"].apply(
-                            lambda v: v == obtener_org_activa_id()
-                        ) if obtener_org_activa_id() else menus_factura_df["user_id"].apply(
-                            lambda v: valor_user_id_menu({"user_id": v}) == obtener_user_id_actual()
-                        )
-                    ].copy() if not menus_factura_df.empty else menus_factura_df
+                    _org_id_fact = obtener_org_activa_id()
+                    if _org_id_fact:
+                        menus_factura_df = menus_factura_df[
+                            menus_factura_df["organizacion_id"] == _org_id_fact
+                        ]
+                    else:
+                        menus_factura_df = menus_factura_df[
+                            menus_factura_df["user_id"].apply(
+                                lambda v: valor_user_id_menu({"user_id": v}) == obtener_user_id_actual()
+                            )
+                        ].copy() if not menus_factura_df.empty else menus_factura_df
                     if menus_factura_df.empty:
                         st.info("No hay menús guardados para crear un documento.")
                     else:
