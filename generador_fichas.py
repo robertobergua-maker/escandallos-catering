@@ -3981,12 +3981,6 @@ def guardar_presupuesto_supabase(presupuesto, lineas):
         return False, f"Error al guardar presupuesto: {e}", None
 
 
-def guardar_relaciones_factura_supabase(factura_id, lineas):
-    # factura_menus pertenece a la migración 019 (no aplicada en producción).
-    # Esta función se mantiene como stub para no romper llamadas existentes.
-    pass
-
-
 def cargar_facturas_supabase():
     if not supabase_disponible or supabase is None:
         return False, "El inventario no está conectado correctamente.", preparar_facturas_df_compatibilidad(pd.DataFrame())
@@ -4061,42 +4055,8 @@ def cargar_factura_detalle_supabase(factura_id):
             if col not in lineas_df.columns:
                 lineas_df[col] = None
 
-        try:
-            respuesta_menus_factura = (
-                supabase
-                .table("factura_menus")
-                .select(",".join(FACTURA_MENUS_COLUMNAS))
-                .eq("factura_id", factura_id_limpio)
-                .order("orden")
-                .execute()
-            )
-            relaciones_factura = respuesta_menus_factura.data or []
-        except Exception:
-            relaciones_factura = []
-
-        if relaciones_factura and not lineas_df.empty:
-            relaciones_por_menu = {
-                str(relacion.get("menu_id")): relacion
-                for relacion in relaciones_factura
-            }
-            for indice, linea in lineas_df.iterrows():
-                relacion = relaciones_por_menu.get(str(linea.get("origen_id")))
-                if not relacion:
-                    continue
-                lineas_df.at[indice, "cantidad_menu"] = relacion.get("cantidad_menu", 1)
-                lineas_df.at[indice, "menu_origen_id"] = relacion.get("menu_id")
-                lineas_df.at[indice, "menu_nombre_snapshot"] = relacion.get("menu_nombre_snapshot")
-                lineas_df.at[indice, "coste_total_menu"] = relacion.get("coste_total_menu", 0)
-                lineas_df.at[indice, "coste_linea_menu_documento"] = relacion.get(
-                    "coste_linea_menu_factura",
-                    0,
-                )
-                lineas_df.at[indice, "precio_total_menu"] = relacion.get("precio_total_menu", 0)
-                lineas_df.at[indice, "precio_linea_menu_documento"] = relacion.get(
-                    "precio_linea_menu_factura",
-                    0,
-                )
-                lineas_df.at[indice, "observaciones"] = relacion.get("observaciones")
+        # factura_menus (migración 019, no aplicada) se omite.
+        # Las líneas de menú se guardan como factura_lineas ordinarias.
 
         mensaje = "Documento cargado correctamente."
         if not factura_user_id:
@@ -4174,10 +4134,6 @@ def guardar_factura_supabase(factura, lineas):
                 .insert(lineas_guardar)
                 .execute()
             )
-        try:
-            guardar_relaciones_factura_supabase(factura_id, lineas_validas)
-        except Exception:
-            pass
         return True, "Documento guardado correctamente.", preparar_factura_compatibilidad(factura_guardada)
     except Exception as e:
         if error_tabla_facturacion_no_activada(e):
@@ -4324,14 +4280,6 @@ def actualizar_factura_supabase(factura_id, factura, lineas):
                 .insert(lineas_guardar)
                 .execute()
             )
-        try:
-            supabase.table("factura_menus").delete().eq(
-                "factura_id",
-                factura_id,
-            ).execute()
-            guardar_relaciones_factura_supabase(factura_id, lineas_validas)
-        except Exception:
-            pass
         return True, "Documento actualizado correctamente.", preparar_factura_compatibilidad(factura_actualizada)
     except Exception as e:
         if error_tabla_facturacion_no_activada(e):
