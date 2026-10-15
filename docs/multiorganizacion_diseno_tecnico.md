@@ -268,6 +268,13 @@ migración correspondiente.
 | `sql/023_fase2_organizacion_id_rls.sql` | 2 | `organizacion_id` en tablas + RLS nueva + invitaciones |
 | `sql/024_fase3_catalogo_global_precios_org.sql` | 3 | `inventario_org` + separar catálogo |
 | `sql/025_fase4_comparticiones_copia.sql` | 4 | Comparticiones + columna `copiada_de` |
+| `sql/023a_fase2_columnas_nullable_backfill.sql` | 2A | Columnas nullable + backfill Samirarte + invitaciones |
+| `sql/023c_fase2_not_null_rls.sql` | 2C | NOT NULL + swap de políticas RLS |
+| `sql/023c_rollback.sql` | 2C | Rollback del paso C |
+| `sql/023d_admin_solo_por_invitacion.sql` | 2D | ⚠️ OBLIGATORIO antes de primera org externa |
+| `sql/023d_rollback.sql` | 2D | Rollback de 023d |
+| `sql/024_fase3_catalogo_global_precios_org.sql` | 3 | `inventario_org` + separar catálogo |
+| `sql/025_fase4_comparticiones_copia.sql` | 4 | Comparticiones + columna `copiada_de` |
 | `sql/026_fase5_facturacion_por_org.sql` | 5 | `organizacion_config` + numeración propia |
 
 ---
@@ -283,6 +290,20 @@ podría empezar a rellenar `organizacion_miembros` pero no es obligatorio en F1.
 - Todas las funciones de carga añaden `.eq("organizacion_id", org_activa)`.
 - Nueva pantalla "Gerente": gestión de miembros e invitaciones.
 - Nueva pantalla "Administrador": gestión de organizaciones.
+
+> ⚠️ **Paso 023d — OBLIGATORIO antes de dar de alta la primera organización externa**
+>
+> Las políticas `*_admin_all` de la Fase 2C dan acceso total a los admins de plataforma
+> sobre todas las tablas operativas. Esto es aceptable mientras solo existe Samirarte,
+> pero **antes de invitar a usuarios de cualquier otra organización** hay que ejecutar
+> `sql/023d_admin_solo_por_invitacion.sql` para que los admins solo accedan a los datos
+> de las organizaciones de las que sean miembros (igual que cualquier usuario).
+>
+> Si se ejecuta después de dar acceso a una org externa, los admins ya habrán podido
+> ver sus datos. El script tiene su propio rollback (`023d_rollback.sql`).
+>
+> La pantalla de administración de plataforma mostrará un aviso al crear cualquier
+> organización que no sea Samirarte.
 
 ### Fase 3 — Precios propios
 - La pantalla de inventario muestra el catálogo global en solo lectura.

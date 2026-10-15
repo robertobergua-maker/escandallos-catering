@@ -8,3 +8,7 @@
   cambiar permisos o abrir puertos.
 - Los datos de alérgenos son de seguridad alimentaria: cualquier cambio que les afecte se
   señala explícitamente.
+- ⚠️ ANTES de dar de alta la primera organización externa (que no sea Samirarte),
+  ejecutar sql/023d_admin_solo_por_invitacion.sql para retirar el acceso total de los
+  admins de plataforma a los datos de otras organizaciones.
+  Ver docs/multiorganizacion_diseno_tecnico.md §11 Fase 2.
