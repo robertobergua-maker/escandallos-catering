@@ -1,2 +1,11 @@
+# Redirección temporal 302 hacia la VM de Oracle.
+# 302 (no 301): evita que el navegador guarde el salto en caché mientras el DNS
+# de escandallos.samirarte.com propaga el cambio de Hostalia a la VM.
+# Cuando el DNS haya propagado y ya no haga falta este alojamiento, se puede
+# cambiar a 301 o retirar el registro.
+
 RewriteEngine On
-RewriteRule ^$ https://escandallos.streamlit.app/ [R=302,L]
+
+# Redirige cualquier ruta al equivalente en el nuevo servidor, conservando
+# el path y la query string (si los hubiera).
+RewriteRule ^(.*)$ https://nuevo-escandallos.escandallos.samirarte.com/$1 [R=302,L,NE]

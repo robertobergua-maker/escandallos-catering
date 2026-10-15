@@ -1,35 +1,28 @@
-name: Keep Streamlit and Supabase alive
+name: Supabase keepalive
 
 on:
   schedule:
-    # Se dispara cada 15 minutos; la espera aleatoria de abajo evita un
-    # intervalo fijo y mantiene los pings aproximadamente entre 15 y 60 min.
-    - cron: '*/15 * * * *'
-  workflow_dispatch: {}
+    # Una vez al día a las 07:00 UTC (09:00 hora de Madrid en verano).
+    # Suficiente para mantener el proyecto activo en el plan gratuito de Supabase
+    # (se pausa tras 7 días de inactividad).
+    - cron: '0 7 * * *'
+  workflow_dispatch: {}   # permite lanzarlo manualmente desde GitHub Actions
 
 jobs:
   keepalive:
     runs-on: ubuntu-latest
     steps:
-      - name: Wait a random interval
-        run: |
-          delay=$((RANDOM % 2701))
-          echo "Waiting $delay seconds before keepalive ping"
-          sleep "$delay"
-
-      - name: Ping Streamlit app
-        run: |
-          curl -sS -o /dev/null -w "Streamlit status: %{http_code}\n" \
-            -L -c cookies.txt -b cookies.txt \
-            -A "Mozilla/5.0 (compatible; keepalive-bot)" \
-            https://escandallos.streamlit.app/
-
       - name: Ping Supabase
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: |
-          curl -sS -o /dev/null -w "Supabase status: %{http_code}\n" \
-            "$SUPABASE_URL/rest/v1/alergenos?select=*&limit=1" \
+          STATUS=$(curl -sS -o /dev/null -w "%{http_code}" \
+            "$SUPABASE_URL/rest/v1/alergenos?select=id&limit=1" \
             -H "apikey: $SUPABASE_ANON_KEY" \
-            -H "Authorization: Bearer $SUPABASE_ANON_KEY"
+            -H "Authorization: Bearer $SUPABASE_ANON_KEY")
+          echo "Supabase status: $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "ERROR: respuesta inesperada de Supabase ($STATUS)"
+            exit 1
+          fi
