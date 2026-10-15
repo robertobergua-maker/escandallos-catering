@@ -432,12 +432,32 @@ order by tablename, cmd;
 -- ===========================================================================
 -- PRUEBA DE AISLAMIENTO (ejecutar DESPUÉS del commit, manualmente)
 -- ===========================================================================
--- Requisitos:
---   a) Organización "Pruebas" (slug 'pruebas') creada desde la app.
---   b) Un usuario de prueba miembro de "Pruebas" (no de Samirarte).
---   c) Ese usuario ha creado al menos una receta y un cliente.
---   d) Un usuario chef de Samirarte para el test inverso.
--- Sustituir UUIDs reales antes de ejecutar.
+-- ⚠️  IMPORTANTE: usar ÚNICAMENTE usuarios que NO sean admin de plataforma
+--    (usuarios_app.rol = 'usuario'). Los admins tienen *_admin_all y verían
+--    todo, lo que haría la prueba inútil.
+--
+-- Usuarios concretos para esta prueba:
+--   • Chef de Samirarte:  roberto.bergua@gmail.com  (rol 'usuario', NO admin)
+--   • Usuario de Pruebas: cuenta de prueba creada en la org "Pruebas"
+--
+-- Requisitos previos:
+--   a) Organización "Pruebas" (slug 'pruebas') creada desde la pantalla
+--      de administración de plataforma.
+--   b) El usuario de prueba es miembro de "Pruebas" y NO de Samirarte.
+--   c) El usuario de prueba ha creado al menos una receta y un cliente
+--      desde la app (para que haya datos de "Pruebas" que verificar).
+--   d) roberto.bergua@gmail.com tiene rol 'usuario' en usuarios_app
+--      (confirmado antes de ejecutar con:
+--       SELECT rol FROM usuarios_app WHERE email='roberto.bergua@gmail.com';
+--       Debe devolver 'usuario', no 'admin').
+--
+-- Obtener los UUIDs reales:
+--   SELECT id FROM auth.users WHERE email = 'roberto.bergua@gmail.com';
+--   SELECT id FROM auth.users WHERE email = '<email_usuario_pruebas>';
+--   SELECT id FROM organizaciones WHERE slug = 'samirarte';
+--   SELECT id FROM organizaciones WHERE slug = 'pruebas';
+--
+-- Sustituir en los SET LOCAL antes de ejecutar.
 -- ===========================================================================
 /*
 -- ── TEST 1: usuario de Pruebas no ve datos de Samirarte ──────────────────
@@ -445,44 +465,59 @@ set local role authenticated;
 set local "request.jwt.claims" to
   '{"sub":"<uid_usuario_pruebas>","role":"authenticated"}';
 
-select count(*) from public.recetas;    -- 0
+select count(*) from public.recetas;    -- 0 (no es miembro de Samirarte)
 select count(*) from public.menus;      -- 0
 select count(*) from public.clientes;   -- 0
 select count(*) from public.facturas;   -- 0
 
--- Intento de insertar en Samirarte → policy violation:
+-- Intento de insertar en Samirarte → debe fallar con policy violation:
 insert into public.recetas (organizacion_id, nombre, raciones_base)
 values (
   (select id from public.organizaciones where slug='samirarte'),
   'Receta trampa', 1
 );
 
--- ── TEST 2: usuario de Samirarte no ve datos de Pruebas ──────────────────
+-- ── TEST 2: roberto.bergua@gmail.com (chef Samirarte) no ve datos de Pruebas
 set local "request.jwt.claims" to
-  '{"sub":"<uid_chef_samirarte>","role":"authenticated"}';
+  '{"sub":"<uid_roberto_bergua>","role":"authenticated"}';
 
 select count(*) from public.recetas
 where organizacion_id = (select id from public.organizaciones where slug='pruebas');
 -- Debe devolver 0.
 
--- ── TEST 3: chef de Samirarte ve TODO lo de Samirarte ────────────────────
-set local "request.jwt.claims" to
-  '{"sub":"<uid_chef_samirarte>","role":"authenticated"}';
+-- Intento de insertar en Pruebas → debe fallar con policy violation:
+insert into public.recetas (organizacion_id, nombre, raciones_base)
+values (
+  (select id from public.organizaciones where slug='pruebas'),
+  'Receta trampa 2', 1
+);
 
-select count(*) from public.recetas;    -- total recetas de Samirarte
+-- ── TEST 3: roberto.bergua@gmail.com ve TODO lo de Samirarte ─────────────
+set local "request.jwt.claims" to
+  '{"sub":"<uid_roberto_bergua>","role":"authenticated"}';
+
+-- Deben devolver el total real de Samirarte (> 0):
+select count(*) from public.recetas;
 select count(*) from public.menus;
 select count(*) from public.clientes;
 select count(*) from public.facturas;
 
+-- Confirmar que son filas de Samirarte:
+select distinct organizacion_id from public.recetas;
+-- Debe mostrar solo el id de Samirarte.
+
 -- ── TEST 4: inventario global visible para ambas organizaciones ──────────
+-- Como usuario de Pruebas:
 set local "request.jwt.claims" to
   '{"sub":"<uid_usuario_pruebas>","role":"authenticated"}';
-select count(*) from public.inventario;   -- total catálogo (> 0)
+select count(*) from public.inventario where organizacion_id is null;
+-- Debe devolver el total del catálogo global (> 0).
 
 -- ── TEST 5: anon solo ve inventario ──────────────────────────────────────
 set local role anon;
-select count(*) from public.inventario;   -- > 0
+select count(*) from public.inventario;   -- > 0 (catálogo global)
 select count(*) from public.recetas;      -- 0 (sin política para anon)
+select count(*) from public.clientes;     -- 0
 */
 
 commit;
