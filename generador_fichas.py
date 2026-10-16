@@ -7480,7 +7480,7 @@ def _renderizar_miembros_e_invitaciones(org_id, org_nombre):
         if not invitaciones:
             st.info("No hay invitaciones generadas.")
         else:
-            _ahora = pd.Timestamp.utcnow().tz_localize("UTC")
+            _ahora = pd.Timestamp.now(tz="UTC")
             for inv in invitaciones:
                 col1, col2, col3, col4 = st.columns([3, 1, 2, 1])
                 with col1:
