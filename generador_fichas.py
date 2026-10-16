@@ -817,7 +817,6 @@ def vaciar_caches_datos_org():
     except Exception:
         pass
 
-
 def usuario_es_gerente_org_activa():
     """True si el usuario tiene rol gerente en la organización activa."""
     org_id = obtener_org_activa_id()
@@ -1318,10 +1317,12 @@ if 'factura_presupuesto_origen_id' not in st.session_state:
 # 📥 FUNCIÓN CACHÉ PARA CARGAR INVENTARIO
 # =============================================================================
 @st.cache_data(ttl=600)
-def cargar_inventario_supabase(trigger):
+def cargar_inventario_supabase(trigger, organizacion_activa_id=None):
     """
     Trae el listado de ingredientes del inventario de forma segura.
-    Se invalida automáticamente al cambiar el 'trigger'.
+    Si hay org activa (Fase 3+) usa obtener_inventario_para_org (RPC) para
+    obtener catálogo global + privados con precios efectivos resueltos.
+    En caso contrario cae al SELECT directo (compatibilidad Fase 1-2).
     """
     cols_deseadas = [
         "codigo", "familia", "descripcion", "unidad_medida", "merma", "precio_unidad",
@@ -1335,6 +1336,31 @@ def cargar_inventario_supabase(trigger):
     if not supabase_disponible or supabase is None:
         return pd.DataFrame(columns=cols_deseadas)
 
+    # ── Fase 3+: obtener catálogo + precios propios vía RPC ──────────────
+    if organizacion_activa_id:
+        try:
+            respuesta = supabase.rpc(
+                "obtener_inventario_para_org",
+                {"p_organizacion_id": organizacion_activa_id},
+            ).execute()
+            df = pd.DataFrame(respuesta.data or [])
+            if df.empty:
+                return pd.DataFrame(columns=cols_deseadas)
+            # Normalizar columnas (la RPC devuelve columnas distintas de las del SELECT)
+            for col in cols_deseadas:
+                if col not in df.columns:
+                    df[col] = 0.0 if col in (
+                        "merma", "precio_unidad",
+                        "cantidad_formato_compra", "precio_formato_compra",
+                    ) else ""
+            df["merma"]         = pd.to_numeric(df["merma"], errors="coerce").fillna(0.0)
+            df["precio_unidad"] = pd.to_numeric(df["precio_unidad"], errors="coerce").fillna(0.0)
+            df = df.sort_values(by="descripcion")
+            return df
+        except Exception:
+            pass   # fallback al SELECT directo si la RPC no existe aún (antes de 024)
+
+    # ── Fase 1-2 / fallback: SELECT directo ──────────────────────────────
     try:
         try:
             respuesta = (
@@ -1344,8 +1370,6 @@ def cargar_inventario_supabase(trigger):
                 .execute()
             )
         except Exception:
-            # Compatibilidad con instalaciones cuyo inventario todavía no
-            # incluye proveedor, formato, URL u otras columnas avanzadas.
             respuesta = (
                 supabase
                 .table("inventario")
@@ -1353,24 +1377,24 @@ def cargar_inventario_supabase(trigger):
                 .execute()
             )
         df = pd.DataFrame(respuesta.data)
-
         if df.empty:
             return pd.DataFrame(columns=cols_deseadas)
-
         df = df.loc[:, ~df.columns.duplicated()].copy()
         for col in cols_deseadas:
             if col not in df.columns:
-                df[col] = 0.0 if col in ["merma", "precio_unidad", "cantidad_formato_compra", "precio_formato_compra"] else ""
-
+                df[col] = 0.0 if col in (
+                    "merma", "precio_unidad",
+                    "cantidad_formato_compra", "precio_formato_compra",
+                ) else ""
         df = df[cols_deseadas].copy()
-        df["codigo"] = df["codigo"].fillna("").astype(str).str.strip().str.upper()
-        df["familia"] = df["familia"].fillna("").astype(str).str.strip()
-        df["descripcion"] = df["descripcion"].fillna("").astype(str).str.strip()
+        df["codigo"]       = df["codigo"].fillna("").astype(str).str.strip().str.upper()
+        df["familia"]      = df["familia"].fillna("").astype(str).str.strip()
+        df["descripcion"]  = df["descripcion"].fillna("").astype(str).str.strip()
         df["unidad_medida"] = df["unidad_medida"].fillna("").astype(str).str.strip()
-        df["merma"] = pd.to_numeric(df["merma"], errors="coerce").fillna(0.0)
+        df["merma"]         = pd.to_numeric(df["merma"], errors="coerce").fillna(0.0)
         df["precio_unidad"] = pd.to_numeric(df["precio_unidad"], errors="coerce").fillna(0.0)
         df["cantidad_formato_compra"] = pd.to_numeric(df["cantidad_formato_compra"], errors="coerce")
-        df["precio_formato_compra"] = pd.to_numeric(df["precio_formato_compra"], errors="coerce")
+        df["precio_formato_compra"]   = pd.to_numeric(df["precio_formato_compra"], errors="coerce")
         df = df.sort_values(by="descripcion")
         return df
     except Exception as e:
@@ -1378,7 +1402,7 @@ def cargar_inventario_supabase(trigger):
         return pd.DataFrame(columns=cols_deseadas)
 
 # Cargar inventario actual para autocompletado y contexto IA
-inventario_df = cargar_inventario_supabase(st.session_state['db_trigger'])
+inventario_df = cargar_inventario_supabase(st.session_state['db_trigger'], obtener_org_activa_id())
 
 # Convertir inventario a diccionario seguro para búsquedas rápidas en milisegundos sin KeyError
 inventario_dict = {}
@@ -2057,9 +2081,81 @@ def validar_datos_ficha_ingrediente(datos, requiere_cantidad=False):
 
 
 def guardar_ficha_en_inventario(datos):
+    """
+    Guarda un ingrediente en el inventario.
+    Fase 3+: si hay organización activa y el usuario es gerente, crea un
+    ingrediente PRIVADO vía la función security definer crear_ingrediente_privado.
+    Los chefs no pueden guardar en el inventario.
+    Fase 1-2 / fallback: escribe directamente en la tabla inventario (catálogo global).
+    """
     if not supabase_disponible or supabase is None:
         return False, "El inventario no está conectado.", None
 
+    org_id = obtener_org_activa_id()
+
+    # ── Fase 3+: ingrediente privado vía RPC ──────────────────────────────
+    if org_id:
+        if not usuario_es_gerente_org_activa():
+            return False, (
+                "Solo los gerentes pueden guardar ingredientes en el inventario. "
+                "Pide a tu gerente que lo añada."
+            ), None
+
+        descripcion = str(datos.get("descripcion", "") or "").strip()
+        if not descripcion:
+            return False, "Introduce una descripción para el ingrediente.", None
+
+        alergeno_ids       = datos.get("alergeno_ids", [])
+        sin_alergenos_flag = bool(datos.get("sin_alergenos", False))
+
+        if not alergeno_ids and not sin_alergenos_flag:
+            return False, (
+                "⚠️ Declara los alérgenos de este ingrediente antes de guardarlo, "
+                "o marca explícitamente 'No contiene ninguno de los 14 alérgenos'."
+            ), None
+
+        try:
+            codigo = supabase.rpc("crear_ingrediente_privado", {
+                "p_org_id":       org_id,
+                "p_descripcion":  descripcion,
+                "p_familia":      str(datos.get("familia") or "").strip() or None,
+                "p_unidad_medida": str(datos.get("unidad_medida") or "kg").strip(),
+            }).execute().data
+
+            # Guardar alérgenos
+            if alergeno_ids:
+                ok_a, msg_a = guardar_alergenos_ingrediente(codigo, alergeno_ids)
+                if not ok_a:
+                    return False, msg_a, None
+            else:
+                # sin_alergenos_flag=True: marcar revisado sin alérgenos
+                pass  # alergenos_revisados lo actualiza marcar_alergenos_revisados
+
+            # Marcar alérgenos como revisados
+            supabase.table("inventario").update({
+                "alergenos_revisados":    True,
+                "alergenos_revisados_por": obtener_user_id_actual(),
+                "alergenos_revisados_at":  "now()",
+            }).eq("codigo", codigo).execute()
+
+            # Guardar precio propio si se indicó
+            precio = datos.get("precio_unidad")
+            merma  = datos.get("merma")
+            if precio or merma:
+                supabase.table("inventario_org").insert({
+                    "organizacion_id":  org_id,
+                    "codigo_ingrediente": codigo,
+                    "precio_unidad":    precio or None,
+                    "merma":            merma or None,
+                }).execute()
+
+            st.session_state["db_trigger"] += 1
+            return True, f"Ingrediente privado '{descripcion}' creado con código {codigo}.", codigo
+
+        except Exception as exc:
+            return False, f"Error al crear el ingrediente privado: {exc}", None
+
+    # ── Fase 1-2 / fallback: escribir directamente (catálogo global) ──────
     codigo = str(datos.get("codigo", "") or "").strip().upper()
     if not codigo_ingrediente_valido(codigo):
         codigo = generar_codigo_ingrediente_nuevo(
@@ -2071,18 +2167,11 @@ def guardar_ficha_en_inventario(datos):
     try:
         codigo_existente = codigo in inventario_dict
         if codigo_existente:
-            (
-                supabase
-                .table("inventario")
-                .update(fila)
-                .eq("codigo", codigo)
-                .execute()
-            )
+            supabase.table("inventario").update(fila).eq("codigo", codigo).execute()
         else:
             supabase.table("inventario").insert(fila).execute()
         ok_alergenos, mensaje_alergenos = guardar_alergenos_ingrediente(
-            codigo,
-            datos.get("alergeno_ids", []),
+            codigo, datos.get("alergeno_ids", []),
         )
         if not ok_alergenos:
             return False, mensaje_alergenos, None
@@ -4803,6 +4892,33 @@ def calcular_alergenos_ficha_receta(ingredientes):
     return calcular_alergenos_desde_ingredientes(ingredientes)
 
 
+def receta_tiene_privados_sin_revisar(ingredientes):
+    """
+    True si algún ingrediente de la receta es privado (código empieza por 'P-')
+    y su entrada en inventario_org o inventario tiene alergenos_revisados = false.
+    La comprobación se hace contra el inventario cargado en sesión (sin query extra).
+    """
+    org_id = obtener_org_activa_id()
+    if not org_id or not inventario_df.empty:
+        # Comprobación rápida: si el código empieza por 'P-' y no está en el
+        # inventario cargado con alergenos_revisados=true, avisar.
+        codigos_privados = [
+            str(ing.get("codigo_ingrediente") or "").strip().upper()
+            for ing in (ingredientes or [])
+            if str(ing.get("codigo_ingrediente") or "").strip().upper().startswith("P-")
+        ]
+        if not codigos_privados:
+            return False
+        # inventario_df no incluye alergenos_revisados en Fase 1-2; en Fase 3+ sí.
+        if "alergenos_revisados" in inventario_df.columns:
+            sin_revisar = inventario_df[
+                inventario_df["codigo"].isin(codigos_privados)
+                & (inventario_df["alergenos_revisados"] == False)  # noqa: E712
+            ]
+            return not sin_revisar.empty
+    return False
+
+
 def calcular_alergenos_menu(fichas):
     vistos = set()
     resultado = []
@@ -5731,13 +5847,14 @@ if _codigo_url and obtener_usuario_actual():
     st.query_params.pop("invitacion", None)
     try:
         _org_inv = supabase.rpc(
-            "canjear_invitacion", {"p_codigo": _codigo_url}
+            "canjear_invitacion", {"p_codigo": _codigo_url.strip()}
         ).execute().data
         st.session_state["auth_feedback"] = (
             "success",
             f"✅ ¡Te has unido a {_org_inv}! Ya puedes empezar a trabajar.",
         )
         cargar_organizaciones_usuario()
+        _inicializar_org_activa()
     except Exception as _e_inv:
         st.session_state["auth_feedback"] = (
             "error",
@@ -7071,6 +7188,152 @@ def guardar_cambios_tabla_admin(nombre_tabla, df_original, editor_state, lookups
     return cambios
 
 
+def _renderizar_inventario_propio(org_id):
+    """
+    Pantalla del gerente para gestionar precios propios e ingredientes privados.
+    Requiere que la Fase 3 (024) esté aplicada en Supabase.
+    """
+    st.caption("Precios propios sobre el catálogo global e ingredientes privados de tu organización.")
+
+    # Cargar inventario con precios resueltos vía RPC
+    try:
+        resp = supabase.rpc(
+            "obtener_inventario_para_org",
+            {"p_organizacion_id": org_id},
+        ).execute()
+        inv_data = resp.data or []
+    except Exception as e_inv:
+        st.warning(
+            f"El inventario propio no está disponible aún (¿se ha aplicado la Fase 3?): {e_inv}"
+        )
+        return
+
+    inv_privados = [r for r in inv_data if r.get("es_privado")]
+    inv_globales = [r for r in inv_data if not r.get("es_privado")]
+
+    # ── Ingredientes privados ─────────────────────────────────────────────
+    st.markdown("#### Ingredientes privados")
+    if inv_privados:
+        _sin_revisar = [r for r in inv_privados if not r.get("alergenos_revisados")]
+        if _sin_revisar:
+            st.error(
+                f"⚠️ **{len(_sin_revisar)} ingrediente(s) privado(s) sin alérgenos revisados.** "
+                "Completa la declaración de alérgenos antes de usarlos en recetas."
+            )
+        for row in inv_privados:
+            revisado = row.get("alergenos_revisados", False)
+            icono    = "✅" if revisado else "⚠️"
+            with st.expander(f"{icono} {row['codigo']} — {row['descripcion']}"):
+                st.write(f"Familia: {row.get('familia') or '—'}  |  Unidad: {row.get('unidad_medida') or '—'}")
+                st.write(f"Precio: {row.get('precio_unidad') or '—'}  |  Merma: {row.get('merma') or '—'}")
+                if not revisado:
+                    st.warning("Alérgenos pendientes de declarar.")
+                    # Botón para marcar como revisado (sin alérgenos)
+                    if st.button(
+                        "Marcar como 'Sin alérgenos de los 14'",
+                        key=f"sin_alerg_{row['codigo'][:12]}",
+                    ):
+                        try:
+                            supabase.table("inventario").update({
+                                "alergenos_revisados":     True,
+                                "alergenos_revisados_por": obtener_user_id_actual(),
+                                "alergenos_revisados_at":  "now()",
+                            }).eq("codigo", row["codigo"]).execute()
+                            cargar_inventario_supabase.clear()
+                            st.success("Marcado como sin alérgenos.")
+                            st.rerun()
+                        except Exception as e_rev:
+                            st.error(f"Error: {e_rev}")
+    else:
+        st.info("No hay ingredientes privados todavía.")
+
+    st.divider()
+
+    # ── Crear ingrediente privado ──────────────────────────────────────────
+    st.markdown("#### Añadir ingrediente privado")
+    with st.form("form_ingrediente_privado"):
+        new_desc    = st.text_input("Descripción *", key="priv_desc")
+        new_familia = st.text_input("Familia", key="priv_familia")
+        new_unidad  = st.selectbox("Unidad de medida", ["kg", "l", "ud", "g", "ml"], key="priv_unidad")
+        new_sin_alerg = st.checkbox(
+            "No contiene ninguno de los 14 alérgenos de la UE",
+            key="priv_sin_alerg",
+        )
+        submitted = st.form_submit_button("Crear ingrediente privado")
+
+    if submitted:
+        if not new_desc:
+            st.error("Introduce una descripción.")
+        else:
+            ok, msg, codigo_nuevo = guardar_ficha_en_inventario({
+                "descripcion":  new_desc,
+                "familia":      new_familia,
+                "unidad_medida": new_unidad,
+                "sin_alergenos": new_sin_alerg,
+                "alergeno_ids": [],
+            })
+            if ok:
+                st.success(msg)
+                cargar_inventario_supabase.clear()
+                st.rerun()
+            else:
+                st.error(msg)
+
+    st.divider()
+
+    # ── Precios propios sobre el catálogo global ───────────────────────────
+    st.markdown("#### Precios propios sobre el catálogo global")
+    st.caption("Aquí puedes definir el precio y merma que tu organización usa para ingredientes del catálogo común.")
+
+    _busqueda_precio = st.text_input(
+        "Buscar ingrediente del catálogo",
+        key="busq_precio_propio",
+        placeholder="Escribe nombre o código",
+    )
+    _globales_filtrados = [
+        r for r in inv_globales
+        if _busqueda_precio.lower() in r.get("descripcion", "").lower()
+        or _busqueda_precio.upper() in r.get("codigo", "").upper()
+    ] if _busqueda_precio else inv_globales[:20]
+
+    if not _globales_filtrados:
+        st.info("No se encontraron ingredientes.")
+    else:
+        for row in _globales_filtrados:
+            with st.expander(
+                f"{row['codigo']} — {row['descripcion']} "
+                f"({'precio propio' if row.get('precio_es_propio') else 'precio catálogo'})"
+            ):
+                col_p, col_m = st.columns(2)
+                with col_p:
+                    nuevo_precio = st.number_input(
+                        "Precio/unidad (€)",
+                        value=float(row.get("precio_unidad") or 0.0),
+                        min_value=0.0, step=0.01, format="%.4f",
+                        key=f"precio_{row['codigo'][:12]}",
+                    )
+                with col_m:
+                    nuevo_merma = st.number_input(
+                        "Merma (0-1)",
+                        value=float(row.get("merma") or 0.0),
+                        min_value=0.0, max_value=0.99, step=0.01, format="%.2f",
+                        key=f"merma_{row['codigo'][:12]}",
+                    )
+                if st.button("Guardar precio propio", key=f"save_precio_{row['codigo'][:12]}"):
+                    try:
+                        supabase.table("inventario_org").upsert({
+                            "organizacion_id":   org_id,
+                            "codigo_ingrediente": row["codigo"],
+                            "precio_unidad":     nuevo_precio if nuevo_precio > 0 else None,
+                            "merma":             nuevo_merma if nuevo_merma > 0 else None,
+                        }, on_conflict="organizacion_id,codigo_ingrediente").execute()
+                        cargar_inventario_supabase.clear()
+                        st.success(f"Precio propio guardado para {row['codigo']}.")
+                        st.rerun()
+                    except Exception as e_p:
+                        st.error(f"Error: {e_p}")
+
+
 def _renderizar_miembros_e_invitaciones(org_id, org_nombre):
     """
     Componente reutilizable: lista miembros y gestiona invitaciones de una org.
@@ -7243,7 +7506,14 @@ def render_pagina_gerente():
         return
 
     st.subheader(f"Gestión de {org_nombre}")
-    _renderizar_miembros_e_invitaciones(org_id, org_nombre)
+
+    ger_tab_miembros_inv, ger_tab_inv = st.tabs(["Miembros e invitaciones", "Inventario propio"])
+
+    with ger_tab_miembros_inv:
+        _renderizar_miembros_e_invitaciones(org_id, org_nombre)
+
+    with ger_tab_inv:
+        _renderizar_inventario_propio(org_id)
 
 
 def render_pagina_administracion():
@@ -7550,7 +7820,7 @@ if _usuario_nav and len(_orgs_nav) == 0:
         if _codigo_inv:
             try:
                 _org_nombre_inv = supabase.rpc(
-                    "canjear_invitacion", {"p_codigo": _codigo_inv}
+                    "canjear_invitacion", {"p_codigo": _codigo_inv.strip()}
                 ).execute().data
                 st.success(f"✅ ¡Te has unido a {_org_nombre_inv}! Recargando…")
                 cargar_organizaciones_usuario()
@@ -8022,6 +8292,15 @@ with main_tab_recetas:
         st.warning(formatear_alergenos(alergenos_receta_actual))
     else:
         st.info("Sin alérgenos declarados")
+
+    # ⚠️ SEGURIDAD ALIMENTARIA: aviso si algún ingrediente privado no tiene
+    # alérgenos revisados (solo visible en Fase 3+ cuando alergenos_revisados existe)
+    if receta_tiene_privados_sin_revisar(st.session_state.get("ingredientes", [])):
+        st.error(
+            "⚠️ Esta receta contiene ingredientes privados cuyos alérgenos aún no "
+            "han sido revisados. Ve a **Gerente → Inventario propio** para completarlos "
+            "antes de usar esta receta en producción."
+        )
 
     with st.expander("IA: Generar receta con IA", expanded=False):
         texto_tab, imagen_tab = st.tabs(["Texto", "Imagen"])
