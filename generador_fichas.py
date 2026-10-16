@@ -7208,9 +7208,14 @@ def _renderizar_inventario_propio(org_id):
         ).execute()
         inv_data = resp.data or []
     except Exception as e_inv:
-        st.warning(
-            f"El inventario propio no está disponible aún (¿se ha aplicado la Fase 3?): {e_inv}"
-        )
+        _msg = str(e_inv).lower()
+        if "could not find" in _msg or "does not exist" in _msg or "pgrst202" in _msg:
+            st.info(
+                "ℹ️ La pantalla de inventario propio estará disponible cuando se aplique "
+                "la **Fase 3** de la migración multiorganización (sql/024)."
+            )
+        else:
+            st.warning(f"No se pudo cargar el inventario propio: {e_inv}")
         return
 
     inv_privados = [r for r in inv_data if r.get("es_privado")]
@@ -7845,6 +7850,7 @@ if _usuario_nav and len(_orgs_nav) == 0:
                 ).execute().data
                 st.success(f"✅ ¡Te has unido a {_org_nombre_inv}! Recargando…")
                 cargar_organizaciones_usuario()
+                _inicializar_org_activa()
                 st.rerun()
             except Exception as _e:
                 st.error(f"No se pudo canjear la invitación: {_e}")
@@ -9862,6 +9868,7 @@ with main_tab_menus:
                 if ok:
                     st.session_state["menu_id"] = menu_guardado.get("id")
                     st.success(f"{mensaje}: {menu_guardado.get('nombre', nombre_menu_limpio)}.")
+                    st.rerun()
                 else:
                     st.error(mensaje)
     with accion_menu_col2:
