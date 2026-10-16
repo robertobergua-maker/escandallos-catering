@@ -939,6 +939,7 @@ def restaurar_sesion_supabase():
 
         _guardar_sesion_supabase(usuario, sesion)
         st.session_state["_auth_cookie_retry_done"] = False
+        _aplicar_sesion_al_cliente()   # aplicar JWT al cliente antes de cargar orgs
         asegurar_usuario_app_supabase()
         return True
     except Exception:
@@ -6064,11 +6065,20 @@ with st.sidebar:
     if _usuario_autenticado:
         _orgs = st.session_state.get("organizaciones_usuario", [])
         if len(_orgs) == 0:
-            # Sin organización: bloquear el acceso a datos
-            st.warning(
-                "⚠️ Aún no perteneces a ninguna organización. "
-                "Pide a tu gerente una invitación."
-            )
+            # Intentar recargar una vez automáticamente (cubre restauración de sesión)
+            _orgs_recargadas = cargar_organizaciones_usuario()
+            if _orgs_recargadas:
+                st.session_state["organizaciones_usuario"] = _orgs_recargadas
+                _orgs = _orgs_recargadas
+            else:
+                # Sin organización: bloquear el acceso a datos
+                st.warning(
+                    "⚠️ Aún no perteneces a ninguna organización. "
+                    "Pide a tu gerente una invitación."
+                )
+                if st.button("🔄 Recargar permisos", key="btn_recargar_permisos_sidebar"):
+                    cargar_organizaciones_usuario()
+                    st.rerun()
         elif len(_orgs) == 1:
             st.caption(f"🏢 {_orgs[0]['nombre']}")
         else:
@@ -7054,50 +7064,53 @@ def guardar_cambios_tabla_admin(nombre_tabla, df_original, editor_state, lookups
     return cambios
 
 
-def render_pagina_gerente():
+def _renderizar_miembros_e_invitaciones(org_id, org_nombre):
     """
-    Pantalla de gestión de la organización activa para gerentes.
-    Secciones: miembros, invitaciones.
+    Componente reutilizable: lista miembros y gestiona invitaciones de una org.
+    Usado tanto en render_pagina_gerente como en render_pagina_administracion.
+    Usa dos queries para evitar el join PGRST200 (no hay FK directa entre
+    organizacion_miembros y usuarios_app, ambas apuntan a auth.users).
     """
-    org_id     = obtener_org_activa_id()
-    org_nombre = obtener_org_activa_nombre()
+    tab_m, tab_i = st.tabs(["Miembros", "Invitaciones"])
 
-    if not org_id:
-        st.warning("No hay organización activa seleccionada.")
-        return
-    if not (usuario_es_gerente_org_activa() or usuario_actual_es_admin()):
-        st.warning("Esta pantalla solo está disponible para gerentes.")
-        return
-
-    st.subheader(f"Gestión de {org_nombre}")
-
-    ger_tab_miembros, ger_tab_invitaciones = st.tabs(["Miembros", "Invitaciones"])
-
-    # ── Miembros ─────────────────────────────────────────────────────────
-    with ger_tab_miembros:
+    with tab_m:
         try:
-            resp = (
+            resp_m = (
                 supabase
                 .table("organizacion_miembros")
-                .select("id, user_id, rol, activo, joined_at, usuarios_app(email, nombre)")
+                .select("id, user_id, rol, activo, joined_at")
                 .eq("organizacion_id", org_id)
                 .order("joined_at")
                 .execute()
             )
-            miembros = resp.data or []
-        except Exception as e:
-            st.error(f"Error al cargar miembros: {e}")
+            miembros = resp_m.data or []
+        except Exception as e_m:
+            st.error(f"Error al cargar miembros: {e_m}")
             miembros = []
+
+        _emails_uid = {}
+        if miembros:
+            try:
+                _uids = [m["user_id"] for m in miembros if m.get("user_id")]
+                resp_ua = (
+                    supabase.table("usuarios_app")
+                    .select("user_id, email, nombre")
+                    .in_("user_id", _uids)
+                    .execute()
+                )
+                _emails_uid = {r["user_id"]: r for r in (resp_ua.data or [])}
+            except Exception:
+                pass
 
         if not miembros:
             st.info("No hay miembros en esta organización todavía.")
         else:
             for m in miembros:
-                ua      = m.get("usuarios_app") or {}
-                email   = ua.get("email") or m.get("user_id", "")
-                nombre  = ua.get("nombre") or ""
-                rol     = m.get("rol", "chef")
-                activo  = m.get("activo", True)
+                ua     = _emails_uid.get(m.get("user_id"), {})
+                email  = ua.get("email") or m.get("user_id", "")
+                nombre = ua.get("nombre") or ""
+                rol    = m.get("rol", "chef")
+                activo = m.get("activo", True)
                 col1, col2, col3, col4 = st.columns([3, 2, 1, 1])
                 with col1:
                     st.write(f"**{email}**" + (f" ({nombre})" if nombre else ""))
@@ -7107,37 +7120,29 @@ def render_pagina_gerente():
                     st.write("✅ activo" if activo else "❌ inactivo")
                 with col4:
                     if activo and m.get("user_id") != obtener_user_id_actual():
-                        if st.button("Desactivar", key=f"desact_{m['id']}"):
+                        if st.button("Desactivar", key=f"desact_m_{org_id[:8]}_{m['id'][:8]}"):
                             try:
                                 supabase.table("organizacion_miembros").update(
                                     {"activo": False}
                                 ).eq("id", m["id"]).execute()
                                 st.success(f"Miembro {email} desactivado.")
                                 st.rerun()
-                            except Exception as e_desact:
-                                st.error(f"Error: {e_desact}")
+                            except Exception as e_d:
+                                st.error(f"Error: {e_d}")
 
-    # ── Invitaciones ─────────────────────────────────────────────────────
-    with ger_tab_invitaciones:
+    with tab_i:
         st.write("**Crear nueva invitación**")
         inv_email = st.text_input(
             "Email del invitado",
-            key="inv_email",
+            key=f"inv_email_{org_id[:8]}",
             placeholder="chef@ejemplo.com",
         )
-        inv_rol = st.selectbox(
-            "Rol",
-            ["chef", "gerente"],
-            key="inv_rol",
-        )
+        inv_rol  = st.selectbox("Rol", ["chef", "gerente"], key=f"inv_rol_{org_id[:8]}")
         inv_dias = st.number_input(
-            "Días de validez",
-            min_value=1,
-            max_value=30,
-            value=7,
-            key="inv_dias",
+            "Días de validez", min_value=1, max_value=30, value=7,
+            key=f"inv_dias_{org_id[:8]}",
         )
-        if st.button("Generar invitación", key="btn_crear_inv"):
+        if st.button("Generar invitación", key=f"btn_inv_{org_id[:8]}"):
             if not inv_email:
                 st.warning("Introduce el email del invitado.")
             else:
@@ -7154,8 +7159,8 @@ def render_pagina_gerente():
                     )
                     st.code(codigo, language=None)
                     st.caption(
-                        f"El invitado debe abrir la app, iniciar sesión con {inv_email} "
-                        "y canjear este código en 'Tengo una invitación'."
+                        f"El invitado abre la app, inicia sesión con {inv_email} "
+                        "y pega este código en 'Tengo una invitación'."
                     )
                 except Exception as e_inv:
                     st.error(f"Error al crear la invitación: {e_inv}")
@@ -7164,8 +7169,7 @@ def render_pagina_gerente():
         st.write("**Invitaciones activas**")
         try:
             resp_inv = (
-                supabase
-                .table("invitaciones")
+                supabase.table("invitaciones")
                 .select("id, email, rol, canjeada, expires_at, created_at")
                 .eq("organizacion_id", org_id)
                 .order("created_at", desc=True)
@@ -7173,13 +7177,14 @@ def render_pagina_gerente():
                 .execute()
             )
             invitaciones = resp_inv.data or []
-        except Exception as e_list:
-            st.error(f"Error al cargar invitaciones: {e_list}")
+        except Exception as e_li:
+            st.error(f"Error al cargar invitaciones: {e_li}")
             invitaciones = []
 
         if not invitaciones:
             st.info("No hay invitaciones generadas.")
         else:
+            _ahora = str(pd.Timestamp.utcnow())
             for inv in invitaciones:
                 col1, col2, col3, col4 = st.columns([3, 1, 2, 1])
                 with col1:
@@ -7187,22 +7192,42 @@ def render_pagina_gerente():
                 with col2:
                     st.write(inv.get("rol", ""))
                 with col3:
-                    estado_inv = "✅ Canjeada" if inv.get("canjeada") else (
-                        "⏰ Pendiente" if inv.get("expires_at", "") > str(pd.Timestamp.now(tz="UTC"))
-                        else "❌ Caducada"
-                    )
-                    st.write(estado_inv)
+                    if inv.get("canjeada"):
+                        st.write("✅ Canjeada")
+                    elif (inv.get("expires_at") or "") > _ahora:
+                        st.write("⏰ Pendiente")
+                    else:
+                        st.write("❌ Caducada")
                 with col4:
                     if not inv.get("canjeada"):
-                        if st.button("Revocar", key=f"rev_inv_{inv['id']}"):
+                        if st.button("Revocar", key=f"rev_{org_id[:8]}_{inv['id'][:8]}"):
                             try:
                                 supabase.table("invitaciones").update(
                                     {"canjeada": True}
                                 ).eq("id", inv["id"]).execute()
                                 st.success("Invitación revocada.")
                                 st.rerun()
-                            except Exception as e_rev:
-                                st.error(f"Error: {e_rev}")
+                            except Exception as e_rv:
+                                st.error(f"Error: {e_rv}")
+
+
+def render_pagina_gerente():
+    """
+    Pantalla de gestión de la organización activa para gerentes.
+    Delega en _renderizar_miembros_e_invitaciones.
+    """
+    org_id     = obtener_org_activa_id()
+    org_nombre = obtener_org_activa_nombre()
+
+    if not org_id:
+        st.warning("No hay organización activa seleccionada.")
+        return
+    if not (usuario_es_gerente_org_activa() or usuario_actual_es_admin()):
+        st.warning("Esta pantalla solo está disponible para gerentes.")
+        return
+
+    st.subheader(f"Gestión de {org_nombre}")
+    _renderizar_miembros_e_invitaciones(org_id, org_nombre)
 
 
 def render_pagina_administracion():
@@ -7216,12 +7241,17 @@ def render_pagina_administracion():
             st.caption(error_perfil)
         return
 
-    admin_tab_orgs, admin_tab_bbdd, admin_tab_estado = st.tabs(
-        ["Organizaciones", "BBDD", "Configuración"]
+    admin_tab_orgs, admin_tab_miembros_admin, admin_tab_bbdd, admin_tab_estado = st.tabs(
+        ["Organizaciones", "Miembros", "BBDD", "Configuración"]
     )
 
     # ── Organizaciones ────────────────────────────────────────────────────
     with admin_tab_orgs:
+        # Mostrar aviso 023d si viene de crear una organización externa
+        _aviso_023d = st.session_state.pop("_aviso_023d", None)
+        if _aviso_023d:
+            st.warning(_aviso_023d)
+
         st.write("**Organizaciones registradas**")
         try:
             resp_orgs = (
@@ -7282,9 +7312,10 @@ def render_pagina_administracion():
                     }).execute()
                     st.success(f"Organización '{new_org_nombre}' creada.")
 
-                    # ⚠️ Aviso obligatorio si la organización no es Samirarte
+                    # ⚠️ Guardar aviso 023d en session_state ANTES del rerun,
+                    # porque st.rerun() descarta cualquier widget no persistido.
                     if new_org_slug.strip().lower() != "samirarte":
-                        st.warning(
+                        st.session_state["_aviso_023d"] = (
                             "⚠️ **Antes de dar acceso a usuarios de esta organización**, "
                             "ejecuta `sql/023d_admin_solo_por_invitacion.sql` en Supabase "
                             "para que los administradores de plataforma no puedan ver los "
@@ -7294,6 +7325,35 @@ def render_pagina_administracion():
                     st.rerun()
                 except Exception as e_cre:
                     st.error(f"Error al crear la organización: {e_cre}")
+
+    with admin_tab_miembros_admin:
+        st.write("**Gestión de miembros por organización**")
+        try:
+            resp_orgs_admin = (
+                supabase.table("organizaciones")
+                .select("id, nombre, slug")
+                .eq("activa", True)
+                .order("nombre")
+                .execute()
+            )
+            orgs_admin = resp_orgs_admin.data or []
+        except Exception as e_oa:
+            st.error(f"Error al cargar organizaciones: {e_oa}")
+            orgs_admin = []
+
+        if not orgs_admin:
+            st.info("No hay organizaciones activas.")
+        else:
+            _nombres_admin = [o["nombre"] for o in orgs_admin]
+            _sel_org_admin = st.selectbox(
+                "Organización",
+                _nombres_admin,
+                key="admin_sel_org_miembros",
+            )
+            _org_sel = next((o for o in orgs_admin if o["nombre"] == _sel_org_admin), None)
+            if _org_sel:
+                _org_id_admin = _org_sel["id"]
+                _renderizar_miembros_e_invitaciones(_org_id_admin, _sel_org_admin)
 
     with admin_tab_bbdd:
         tabla_opciones = list(ADMIN_TABLAS_BBDD.keys())
