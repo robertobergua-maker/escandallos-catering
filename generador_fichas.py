@@ -4894,29 +4894,34 @@ def calcular_alergenos_ficha_receta(ingredientes):
 
 def receta_tiene_privados_sin_revisar(ingredientes):
     """
-    True si algún ingrediente de la receta es privado (código empieza por 'P-')
-    y su entrada en inventario_org o inventario tiene alergenos_revisados = false.
-    La comprobación se hace contra el inventario cargado en sesión (sin query extra).
+    True si algún ingrediente de la receta es privado (código empieza por 'P-',
+    en minúsculas como los genera crear_ingrediente_privado) y tiene
+    alergenos_revisados = false según el inventario cargado en sesión.
     """
     org_id = obtener_org_activa_id()
-    if not org_id or not inventario_df.empty:
-        # Comprobación rápida: si el código empieza por 'P-' y no está en el
-        # inventario cargado con alergenos_revisados=true, avisar.
-        codigos_privados = [
-            str(ing.get("codigo_ingrediente") or "").strip().upper()
-            for ing in (ingredientes or [])
-            if str(ing.get("codigo_ingrediente") or "").strip().upper().startswith("P-")
-        ]
-        if not codigos_privados:
-            return False
-        # inventario_df no incluye alergenos_revisados en Fase 1-2; en Fase 3+ sí.
-        if "alergenos_revisados" in inventario_df.columns:
-            sin_revisar = inventario_df[
-                inventario_df["codigo"].isin(codigos_privados)
-                & (inventario_df["alergenos_revisados"] == False)  # noqa: E712
-            ]
-            return not sin_revisar.empty
-    return False
+    # Sin org activa o sin inventario cargado no podemos comprobar nada
+    if not org_id or inventario_df.empty:
+        return False
+
+    # inventario_df no incluye alergenos_revisados en Fase 1-2; en Fase 3+ sí
+    if "alergenos_revisados" not in inventario_df.columns:
+        return False
+
+    # Normalizar a minúsculas en ambos lados para que coincidan con los códigos
+    # generados por crear_ingrediente_privado ('P-<slug>-NNNN', slug en minúsculas)
+    codigos_privados = [
+        str(ing.get("codigo_ingrediente") or "").strip().lower()
+        for ing in (ingredientes or [])
+        if str(ing.get("codigo_ingrediente") or "").strip().lower().startswith("p-")
+    ]
+    if not codigos_privados:
+        return False
+
+    sin_revisar = inventario_df[
+        inventario_df["codigo"].str.lower().isin(codigos_privados)
+        & (inventario_df["alergenos_revisados"] == False)  # noqa: E712
+    ]
+    return not sin_revisar.empty
 
 
 def calcular_alergenos_menu(fichas):

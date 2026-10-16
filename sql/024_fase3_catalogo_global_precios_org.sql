@@ -390,10 +390,10 @@ declare
   v_flag text := current_setting('escandallos.revisando_alergenos', true);
 begin
   if tg_op = 'INSERT' then
-    -- Cualquier INSERT desde roles de usuario fuerza alergenos_revisados=false,
-    -- independientemente de lo que envíe el cliente.
+    -- Solo para ingredientes privados (organizacion_id NOT NULL).
+    -- Los ingredientes globales que cree el admin no se ven afectados.
     -- crear_ingrediente_privado (SECURITY DEFINER, current_user=postgres) no entra aquí.
-    if current_user in ('anon', 'authenticated') then
+    if current_user in ('anon', 'authenticated') and new.organizacion_id is not null then
       new.alergenos_revisados     := false;
       new.alergenos_revisados_por := null;
       new.alergenos_revisados_at  := null;
