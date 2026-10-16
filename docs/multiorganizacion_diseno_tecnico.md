@@ -310,7 +310,36 @@ podría empezar a rellenar `organizacion_miembros` pero no es obligatorio en F1.
 - Una pestaña "Mis precios" carga/guarda `inventario_org`.
 - El cálculo de recetas resuelve precio: `inventario_org` → fallback `inventario`.
 
+> ⚠️ **Decisiones OBLIGATORIAS antes de la primera organización externa (Fase 3)**
+>
+> **(a) Bloque G — vaciar precios del catálogo global**: el catálogo global actualmente
+> contiene los precios de Samirarte. Si no se vacía, otras organizaciones podrán ver
+> esos precios a través de `obtener_inventario_para_org`. El bloque G de `sql/024` está
+> comentado; hay que decidir y ejecutarlo **antes** de que entre la primera org externa.
+> Es IRREVERSIBLE sin la copia de seguridad previa.
+>
+> **(b) SMTP propio**: configurar en Supabase → Authentication → SMTP Settings el servidor
+> de correo propio antes de que usuarios de otras organizaciones reciban invitaciones.
+> El SMTP gratuito de Supabase tiene límites bajos y el dominio remitente no es el del proyecto.
+
 ### Fase 4 — Compartir
+
+> ⚠️ **Ingredientes privados en recetas compartidas**
+>
+> Si una receta de la org A contiene ingredientes privados (código `P-<slug>-NNNN`),
+> al copiarla a la org B mediante `copiar_receta_a_org` (sql/025) **no se pueden perder
+> los alérgenos**. Las opciones son:
+>
+> 1. **Bloquear la copia** si la receta contiene privados de la org origen que no existen
+>    en el catálogo global ni en la org destino.
+> 2. **Copiar también el ingrediente privado** a la org destino con sus alérgenos, marcando
+>    `alergenos_revisados = true` (ya que vienen declarados de origen).
+>
+> La opción 2 es preferible para no bloquear comparticiones válidas. La función
+> `copiar_receta_a_org` del 025 debe detectar privados y copiarlos antes de copiar la receta.
+> Esto requiere que el gerente destino tenga permiso para crear privados (lo tiene).
+> Ver `sql/025_fase4_comparticiones_copia.sql` para implementar este comportamiento.
+
 - Botón "Compartir" en receta/menú propio (solo gerente).
 - Sección "Recetas y menús compartidos conmigo" en modo lectura.
 - Botón "Copiar a mi organización".

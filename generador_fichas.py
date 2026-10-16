@@ -2127,16 +2127,16 @@ def guardar_ficha_en_inventario(datos):
                 ok_a, msg_a = guardar_alergenos_ingrediente(codigo, alergeno_ids)
                 if not ok_a:
                     return False, msg_a, None
-            else:
-                # sin_alergenos_flag=True: marcar revisado sin alérgenos
-                pass  # alergenos_revisados lo actualiza marcar_alergenos_revisados
 
-            # Marcar alérgenos como revisados
-            supabase.table("inventario").update({
-                "alergenos_revisados":    True,
-                "alergenos_revisados_por": obtener_user_id_actual(),
-                "alergenos_revisados_at":  "now()",
-            }).eq("codigo", codigo).execute()
+            # Marcar alérgenos revisados vía función SECURITY DEFINER
+            # (el trigger bloquea el UPDATE directo de estas columnas)
+            try:
+                supabase.rpc("marcar_alergenos_revisados", {
+                    "p_codigo":        codigo,
+                    "p_sin_alergenos": sin_alergenos_flag and not alergeno_ids,
+                }).execute()
+            except Exception as e_rev:
+                return False, f"Error al marcar alérgenos como revisados: {e_rev}", None
 
             # Guardar precio propio si se indicó
             precio = datos.get("precio_unidad")
@@ -7228,22 +7228,38 @@ def _renderizar_inventario_propio(org_id):
                 st.write(f"Precio: {row.get('precio_unidad') or '—'}  |  Merma: {row.get('merma') or '—'}")
                 if not revisado:
                     st.warning("Alérgenos pendientes de declarar.")
-                    # Botón para marcar como revisado (sin alérgenos)
                     if st.button(
                         "Marcar como 'Sin alérgenos de los 14'",
                         key=f"sin_alerg_{row['codigo'][:12]}",
                     ):
                         try:
-                            supabase.table("inventario").update({
-                                "alergenos_revisados":     True,
-                                "alergenos_revisados_por": obtener_user_id_actual(),
-                                "alergenos_revisados_at":  "now()",
-                            }).eq("codigo", row["codigo"]).execute()
+                            # Llamar a marcar_alergenos_revisados vía RPC:
+                            # el trigger bloquea el UPDATE directo de estas columnas
+                            supabase.rpc("marcar_alergenos_revisados", {
+                                "p_codigo":        row["codigo"],
+                                "p_sin_alergenos": True,
+                            }).execute()
                             cargar_inventario_supabase.clear()
-                            st.success("Marcado como sin alérgenos.")
+                            st.success("Marcado como sin alérgenos de los 14.")
                             st.rerun()
                         except Exception as e_rev:
                             st.error(f"Error: {e_rev}")
+                # Eliminar: el trigger de BD rechaza si está en uso en alguna receta
+                if st.button(
+                    "🗑️ Eliminar ingrediente",
+                    key=f"del_priv_{row['codigo'][:12]}",
+                    type="secondary",
+                ):
+                    try:
+                        supabase.table("inventario").delete().eq(
+                            "codigo", row["codigo"]
+                        ).execute()
+                        cargar_inventario_supabase.clear()
+                        st.success(f"Ingrediente {row['codigo']} eliminado.")
+                        st.rerun()
+                    except Exception as e_del:
+                        # El trigger del 024 lanza la excepción si está en uso
+                        st.error(f"{e_del}")
     else:
         st.info("No hay ingredientes privados todavía.")
 
