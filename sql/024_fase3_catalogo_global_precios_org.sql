@@ -76,16 +76,13 @@ create policy inventario_select_invitado
   using (organizacion_id is null);
 
 -- INSERT privado: SOLO via crear_ingrediente_privado (SECURITY DEFINER).
--- La política RLS permite al gerente insertar, pero un trigger adicional
--- (_trg_inventario_privado_solo_via_funcion) bloquea inserciones directas
--- con código que no sea el formato P-<slug>-NNNN.
--- INSERT global: solo admin.
+-- La política solo permite INSERT global al admin. Los privados no son
+-- alcanzables desde un INSERT directo de autenticados; crear_ingrediente_privado
+-- es SECURITY DEFINER y no depende de esta política.
 create policy inventario_insert_gerente_o_admin
   on public.inventario for insert to authenticated
   with check (
-    (organizacion_id is null     and public.es_admin_app(auth.uid()))
-    or
-    (organizacion_id is not null and public.es_gerente_org(organizacion_id))
+    organizacion_id is null and public.es_admin_app(auth.uid())
   );
 
 create policy inventario_update_gerente_o_admin
@@ -392,16 +389,32 @@ as $$
 declare
   v_flag text := current_setting('escandallos.revisando_alergenos', true);
 begin
-  -- Bloquear cambio directo de las columnas de revisión desde roles de usuario
-  if current_user in ('anon', 'authenticated') then
-    if (new.alergenos_revisados    is distinct from old.alergenos_revisados    or
-        new.alergenos_revisados_por is distinct from old.alergenos_revisados_por or
-        new.alergenos_revisados_at  is distinct from old.alergenos_revisados_at)
-       and coalesce(v_flag, '') <> '1' then
-      raise exception
-        'alergenos_revisados solo puede modificarse vía marcar_alergenos_revisados().';
+  if tg_op = 'INSERT' then
+    -- Cualquier INSERT desde roles de usuario fuerza alergenos_revisados=false,
+    -- independientemente de lo que envíe el cliente.
+    -- crear_ingrediente_privado (SECURITY DEFINER, current_user=postgres) no entra aquí.
+    if current_user in ('anon', 'authenticated') then
+      new.alergenos_revisados     := false;
+      new.alergenos_revisados_por := null;
+      new.alergenos_revisados_at  := null;
     end if;
+    return new;
   end if;
+
+  -- UPDATE: bloquear cambio directo de las columnas de revisión
+  if tg_op = 'UPDATE' then
+    if current_user in ('anon', 'authenticated') then
+      if (new.alergenos_revisados    is distinct from old.alergenos_revisados    or
+          new.alergenos_revisados_por is distinct from old.alergenos_revisados_por or
+          new.alergenos_revisados_at  is distinct from old.alergenos_revisados_at)
+         and coalesce(v_flag, '') <> '1' then
+        raise exception
+          'alergenos_revisados solo puede modificarse vía marcar_alergenos_revisados().';
+      end if;
+    end if;
+    return new;
+  end if;
+
   return new;
 end;
 $$;
@@ -410,7 +423,7 @@ revoke execute on function public._trg_inventario_protect_revisado() from public
 
 drop trigger if exists trg_inventario_protect_revisado on public.inventario;
 create trigger trg_inventario_protect_revisado
-  before update on public.inventario
+  before insert or update on public.inventario
   for each row execute function public._trg_inventario_protect_revisado();
 
 
@@ -563,7 +576,7 @@ begin
   if v_en_uso > 0 then
     raise exception
       'No se puede borrar el ingrediente privado "%" (código %): '
-      'aparece en % receta(s). Desactívalo en su lugar.',
+      'aparece en % receta(s). Quítalo primero de las recetas que lo usan.',
       old.descripcion, old.codigo, v_en_uso;
   end if;
 
