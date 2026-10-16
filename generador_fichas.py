@@ -742,6 +742,7 @@ def _limpiar_sesion_autenticacion():
     st.session_state["organizacion_activa_id"] = None
     st.session_state["organizacion_activa_nombre"] = None
     st.session_state["organizaciones_usuario"] = []
+    st.session_state["_orgs_carga_intentada"] = False
 
 
 # =============================================================================
@@ -6065,18 +6066,24 @@ with st.sidebar:
     if _usuario_autenticado:
         _orgs = st.session_state.get("organizaciones_usuario", [])
         if len(_orgs) == 0:
-            # Intentar recargar una vez automáticamente (cubre restauración de sesión)
-            _orgs_recargadas = cargar_organizaciones_usuario()
-            if _orgs_recargadas:
-                st.session_state["organizaciones_usuario"] = _orgs_recargadas
-                _orgs = _orgs_recargadas
-            else:
-                # Sin organización: bloquear el acceso a datos
+            # Intentar recargar UNA sola vez por sesión (flag evita llamadas en cada rerun).
+            # Se resetea al hacer logout (_limpiar_sesion_autenticacion lo limpia).
+            if not st.session_state.get("_orgs_carga_intentada"):
+                st.session_state["_orgs_carga_intentada"] = True
+                _orgs_recargadas = cargar_organizaciones_usuario()
+                if _orgs_recargadas:
+                    st.session_state["organizaciones_usuario"] = _orgs_recargadas
+                    _orgs = _orgs_recargadas
+
+            if len(_orgs) == 0:
+                # Tras el intento automático, si sigue vacío mostrar aviso
                 st.warning(
                     "⚠️ Aún no perteneces a ninguna organización. "
                     "Pide a tu gerente una invitación."
                 )
                 if st.button("🔄 Recargar permisos", key="btn_recargar_permisos_sidebar"):
+                    # El botón manual resetea el flag para permitir un nuevo intento
+                    st.session_state["_orgs_carga_intentada"] = False
                     cargar_organizaciones_usuario()
                     st.rerun()
         elif len(_orgs) == 1:
@@ -7184,7 +7191,7 @@ def _renderizar_miembros_e_invitaciones(org_id, org_nombre):
         if not invitaciones:
             st.info("No hay invitaciones generadas.")
         else:
-            _ahora = str(pd.Timestamp.utcnow())
+            _ahora = pd.Timestamp.utcnow().tz_localize("UTC")
             for inv in invitaciones:
                 col1, col2, col3, col4 = st.columns([3, 1, 2, 1])
                 with col1:
@@ -7192,19 +7199,28 @@ def _renderizar_miembros_e_invitaciones(org_id, org_nombre):
                 with col2:
                     st.write(inv.get("rol", ""))
                 with col3:
-                    if inv.get("canjeada"):
+                    _canjeada   = inv.get("canjeada", False)
+                    _expires_raw = inv.get("expires_at")
+                    _expires    = pd.to_datetime(_expires_raw, utc=True) if _expires_raw else None
+                    if _canjeada and _expires is not None and _expires <= _ahora:
+                        # Revocada manualmente: canjeada=True + expires_at retroactivo
+                        st.write("🚫 Revocada")
+                    elif _canjeada:
+                        # Canjeada legítimamente por el invitado
                         st.write("✅ Canjeada")
-                    elif (inv.get("expires_at") or "") > _ahora:
-                        st.write("⏰ Pendiente")
-                    else:
+                    elif _expires is not None and _expires <= _ahora:
                         st.write("❌ Caducada")
+                    else:
+                        st.write("⏰ Pendiente")
                 with col4:
-                    if not inv.get("canjeada"):
+                    if not _canjeada:
                         if st.button("Revocar", key=f"rev_{org_id[:8]}_{inv['id'][:8]}"):
                             try:
-                                supabase.table("invitaciones").update(
-                                    {"canjeada": True}
-                                ).eq("id", inv["id"]).execute()
+                                # Marcar como revocada: canjeada=True + expires_at al pasado
+                                supabase.table("invitaciones").update({
+                                    "canjeada":   True,
+                                    "expires_at": "1970-01-01T00:00:00+00:00",
+                                }).eq("id", inv["id"]).execute()
                                 st.success("Invitación revocada.")
                                 st.rerun()
                             except Exception as e_rv:
