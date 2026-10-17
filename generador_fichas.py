@@ -467,6 +467,20 @@ def obtener_url_recuperacion_password():
     return urlunsplit((partes.scheme, partes.netloc, partes.path or "/", "", ""))
 
 
+def obtener_app_base_url():
+    """
+    Devuelve la URL base de la app para OAuth redirect.
+    Usa APP_BASE_URL de secrets (recomendado en producción/pruebas).
+    Fallback: misma lógica que obtener_url_recuperacion_password.
+    """
+    url = str(st.secrets.get("APP_BASE_URL", "") or "").strip()
+    if url:
+        partes = urlsplit(url)
+        if partes.scheme in {"http", "https"} and partes.netloc:
+            return urlunsplit((partes.scheme, partes.netloc, partes.path or "/", "", ""))
+    return obtener_url_recuperacion_password()
+
+
 def login_supabase(email, password):
     """
     Inicia sesion y guarda los datos basicos en session_state.
@@ -578,11 +592,208 @@ def enviar_recuperacion_password(email):
         return False, f"No se pudo enviar el correo de recuperación: {e}"
 
 
+# =============================================================================
+# Login con Google (OAuth 2.0 + PKCE)
+# =============================================================================
+# Flujo:
+#   1. iniciar_login_google() genera la URL OAuth con PKCE, guarda el
+#      code_verifier en una cookie HttpOnly de corta duración y redirige al
+#      navegador a Google.
+#   2. Google redirige de vuelta a APP_BASE_URL con ?code=... (y opcionalmente
+#      ?invitacion=... si venía en la URL original).
+#   3. procesar_callback_google() detecta ?code= al inicio de cada ejecución,
+#      recupera el code_verifier de la cookie, intercambia el código por sesión
+#      con exchange_code_for_session, guarda la sesión y limpia la URL.
+#   4. Si el usuario cancela en Google, la URL trae ?error=access_denied.
+#
+# El code_verifier sobrevive a la redirección en una cookie porque Streamlit
+# pierde session_state al salir del dominio y volver.
+# =============================================================================
+
+_GOOGLE_VERIFIER_COOKIE = "escandallos_google_verifier"
+_GOOGLE_VERIFIER_COOKIE_SEGUNDOS = 300   # 5 min; suficiente para el ida y vuelta
+
+
+def iniciar_login_google():
+    """
+    Prepara el flujo OAuth 2.0 con PKCE para Google.
+
+    Mecánica con supabase-py 2.x:
+      1. Se crea un cliente temporal con ClientOptions(flow_type="pkce").
+         El cliente principal (global) NO se modifica para no romper el
+         login con contraseña ni verify_otp (token_hash).
+      2. sign_in_with_oauth devuelve solo {url, provider}; el code_verifier
+         queda guardado en _storage del cliente temporal bajo la clave
+         "{storage_key}-code-verifier".
+      3. Se extrae el verifier del _storage y se guarda en session_state.
+         La cookie se escribe en el mismo render; en el siguiente render
+         (tras el st.rerun) se muestra st.link_button con la URL de Google.
+         Así CookieManager tiene tiempo de hidratarse antes de la redirección.
+
+    Devuelve (True, url) o (False, mensaje_error).
+    """
+    if not supabase_disponible or supabase is None:
+        return False, "El inventario no está conectado correctamente."
+
+    redirect_to = obtener_app_base_url()
+    if not redirect_to:
+        return False, (
+            "No se pudo determinar la URL de retorno. "
+            "Configura APP_BASE_URL en los secrets de Streamlit."
+        )
+
+    try:
+        from supabase import ClientOptions
+        # Cliente temporal solo para generar la URL OAuth con PKCE
+        cliente_pkce = __import__("supabase").create_client(
+            st.secrets.get("SUPABASE_URL", ""),
+            st.secrets.get("SUPABASE_KEY", ""),
+            ClientOptions(flow_type="pkce"),
+        )
+        respuesta = cliente_pkce.auth.sign_in_with_oauth({
+            "provider": "google",
+            "options":  {"redirect_to": redirect_to},
+        })
+        url = getattr(respuesta, "url", None)
+        if not url:
+            return False, "No se recibió URL de autorización de Google."
+
+        # Extraer code_verifier del storage interno del cliente temporal
+        storage     = cliente_pkce.auth._storage
+        storage_key = cliente_pkce.auth._storage_key
+        cv_key      = f"{storage_key}-code-verifier"
+        code_verifier = None
+        if hasattr(storage, "get_item"):
+            code_verifier = storage.get_item(cv_key)
+
+        # Guardar en session_state para el siguiente render (punto 3)
+        st.session_state["_google_oauth_url"]           = url
+        st.session_state["_google_oauth_code_verifier"] = code_verifier or ""
+
+        return True, url
+
+    except Exception as e:
+        return False, f"No se pudo iniciar el login con Google: {e}"
+
+
+def procesar_callback_google():
+    """
+    Detecta el retorno de Google (?code=... o ?error=...) al inicio de cada
+    ejecución de Streamlit y completa el intercambio de código por sesión.
+    Llama a esta función UNA VEZ antes de renderizar cualquier UI.
+    """
+    try:
+        code        = st.query_params.get("code")
+        error_oauth = st.query_params.get("error") or st.query_params.get("error_description")
+        # Preservar ?invitacion= si venía en la URL original
+        invitacion  = st.query_params.get("invitacion")
+    except Exception:
+        return
+
+    if error_oauth:
+        st.query_params.clear()
+        st.session_state["portal_entrado"] = True
+        if "access_denied" in str(error_oauth).lower():
+            st.session_state["auth_feedback"] = (
+                "info", "Login con Google cancelado. Puedes acceder con email y contraseña."
+            )
+        else:
+            st.session_state["auth_feedback"] = (
+                "error", "No se pudo completar el login con Google. Inténtalo de nuevo."
+            )
+        st.rerun()
+        return
+
+    if not code:
+        return   # No hay callback de Google; ejecución normal
+
+    if not supabase_disponible or supabase is None:
+        st.query_params.clear()
+        st.session_state["portal_entrado"] = True
+        st.session_state["auth_feedback"] = ("error", "El inventario no está conectado.")
+        st.rerun()
+        return
+
+    # Recuperar code_verifier: primero session_state (mismo render o siguiente),
+    # luego cookie (sobrevive al redirect a Google)
+    code_verifier = (
+        st.session_state.pop("_google_oauth_code_verifier", None)
+        or None
+    )
+    if not code_verifier:
+        gestor = obtener_cookie_manager()
+        if gestor is not None:
+            try:
+                todas = gestor.get_all()
+                if isinstance(todas, dict):
+                    code_verifier = todas.get(_GOOGLE_VERIFIER_COOKIE)
+                if not code_verifier:
+                    code_verifier = gestor.get(cookie=_GOOGLE_VERIFIER_COOKIE)
+            except Exception:
+                pass
+    if not code_verifier:
+        try:
+            code_verifier = st.context.cookies.get(_GOOGLE_VERIFIER_COOKIE)
+        except Exception:
+            pass
+
+    # Limpiar URL antes del intercambio (evita reintento en siguiente rerun)
+    st.query_params.clear()
+    if invitacion:
+        st.query_params["invitacion"] = invitacion
+
+    try:
+        if code_verifier:
+            respuesta = supabase.auth.exchange_code_for_session({
+                "auth_code":     code,
+                "code_verifier": code_verifier,
+            })
+        else:
+            # Sin verifier intentamos igualmente (algunos setups no usan PKCE estricto)
+            respuesta = supabase.auth.exchange_code_for_session({"auth_code": code})
+
+        usuario = _obtener_campo_auth(respuesta, "user")
+        sesion  = _obtener_campo_auth(respuesta, "session")
+
+        if not usuario or not sesion:
+            raise ValueError("Respuesta incompleta del servidor.")
+
+    except Exception as e:
+        _msg = str(e).lower()
+        if "expired" in _msg or "invalid" in _msg or "used" in _msg:
+            mensaje = "El enlace de Google ha caducado o ya fue usado. Inicia sesión de nuevo."
+        else:
+            mensaje = "No se pudo completar el login con Google. Inténtalo de nuevo."
+        st.session_state["portal_entrado"] = True
+        st.session_state["auth_feedback"]  = ("error", mensaje)
+        # Borrar cookie de verifier caducada
+        if gestor is not None:
+            try:
+                gestor.delete(_GOOGLE_VERIFIER_COOKIE, key="del_google_verifier_err")
+            except Exception:
+                pass
+        st.rerun()
+        return
+
+    # Éxito: guardar sesión exactamente igual que el login con contraseña
+    _guardar_sesion_supabase(usuario, sesion)
+    asegurar_usuario_app_supabase()
+
+    # Borrar cookie de verifier
+    if gestor is not None:
+        try:
+            gestor.delete(_GOOGLE_VERIFIER_COOKIE, key="del_google_verifier_ok")
+        except Exception:
+            pass
+
+    st.session_state["portal_entrado"] = True
+    st.session_state["auth_feedback"]  = ("success", "Sesión iniciada con Google.")
+    st.rerun()
+
+
 def procesar_enlace_recuperacion():
     """
     Valida el enlace del correo de recuperación y abre la sesión del usuario.
-
-    La plantilla "Reset Password" de Supabase debe enlazar a
     {{ .RedirectTo }}?token_hash={{ .TokenHash }}&type=recovery. Se usa
     token_hash y no el flujo PKCE porque el cliente se crea en cada ejecución
     y perdería el code_verifier guardado al pedir el correo.
@@ -5839,6 +6050,8 @@ def generar_excel(
 
 
 # --- INTERFAZ GRÁFICA DE STREAMLIT ---
+# Retorno de Google OAuth: va antes de cualquier otra lógica de URL.
+procesar_callback_google()
 # Vuelta desde el correo de recuperación: va antes de la portada.
 procesar_enlace_recuperacion()
 if st.session_state.get("recuperacion_password_activa") and obtener_usuario_actual():
@@ -6275,6 +6488,52 @@ with st.sidebar:
                     else:
                         st.error(mensaje_password)
     else:
+        # ── Botón Google (flujo de dos renders para que la cookie se hidrate) ──
+        _google_url_pendiente = st.session_state.get("_google_oauth_url")
+        _google_cv_pendiente  = st.session_state.get("_google_oauth_code_verifier")
+
+        if _google_url_pendiente:
+            # Render 2: URL lista → escribir cookie y mostrar enlace
+            _gestor_g = obtener_cookie_manager()
+            if _google_cv_pendiente and _gestor_g is not None:
+                try:
+                    _gestor_g.set(
+                        _GOOGLE_VERIFIER_COOKIE,
+                        _google_cv_pendiente,
+                        expires_at=datetime.now() + timedelta(seconds=_GOOGLE_VERIFIER_COOKIE_SEGUNDOS),
+                        key="set_google_verifier_cookie",
+                        secure=True,
+                        samesite="Lax",
+                    )
+                except Exception:
+                    pass
+
+            st.link_button(
+                "🔗 Continuar con Google",
+                url=_google_url_pendiente,
+                use_container_width=True,
+            )
+            st.caption("Serás redirigido a Google para autenticarte.")
+            if st.button("Cancelar", key="btn_cancelar_google"):
+                st.session_state.pop("_google_oauth_url", None)
+                st.session_state.pop("_google_oauth_code_verifier", None)
+                st.rerun()
+        else:
+            # Botón para iniciar el flujo OAuth (render 1)
+            if supabase_disponible and st.button(
+                "Entrar con Google",
+                use_container_width=True,
+                key="btn_google_login",
+                help="Login con tu cuenta de Google",
+            ):
+                ok_g, resultado_g = iniciar_login_google()
+                if ok_g:
+                    st.rerun()   # Render 2 mostrará el link_button
+                else:
+                    st.error(resultado_g)
+
+            st.divider()
+
         with st.form("form_acceso_supabase"):
             acceso_email = st.text_input("Email")
             acceso_password = st.text_input("Contraseña", type="password")
