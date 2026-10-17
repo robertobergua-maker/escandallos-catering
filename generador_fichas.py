@@ -714,26 +714,26 @@ def procesar_callback_google():
         st.rerun()
         return
 
-    # Recuperar code_verifier: primero session_state (mismo render o siguiente),
-    # luego cookie (sobrevive al redirect a Google)
-    code_verifier = (
-        st.session_state.pop("_google_oauth_code_verifier", None)
-        or None
-    )
-    if not code_verifier:
-        gestor = obtener_cookie_manager()
-        if gestor is not None:
-            try:
-                todas = gestor.get_all()
-                if isinstance(todas, dict):
-                    code_verifier = todas.get(_GOOGLE_VERIFIER_COOKIE)
-                if not code_verifier:
-                    code_verifier = gestor.get(cookie=_GOOGLE_VERIFIER_COOKIE)
-            except Exception:
-                pass
+    # ── Definir gestor aquí para usarlo en todos los bloques siguientes ──
+    gestor = obtener_cookie_manager()
+
+    # Recuperar code_verifier: primero session_state (mismo render),
+    # luego cookie (sobrevive al redirect a Google), luego st.context.cookies
+    code_verifier = st.session_state.pop("_google_oauth_code_verifier", None) or None
+
+    if not code_verifier and gestor is not None:
+        try:
+            todas = gestor.get_all()
+            if isinstance(todas, dict):
+                code_verifier = todas.get(_GOOGLE_VERIFIER_COOKIE) or None
+            if not code_verifier:
+                code_verifier = gestor.get(cookie=_GOOGLE_VERIFIER_COOKIE) or None
+        except Exception:
+            pass
+
     if not code_verifier:
         try:
-            code_verifier = st.context.cookies.get(_GOOGLE_VERIFIER_COOKIE)
+            code_verifier = st.context.cookies.get(_GOOGLE_VERIFIER_COOKIE) or None
         except Exception:
             pass
 
@@ -742,19 +742,24 @@ def procesar_callback_google():
     if invitacion:
         st.query_params["invitacion"] = invitacion
 
-    try:
-        if code_verifier:
-            respuesta = supabase.auth.exchange_code_for_session({
-                "auth_code":     code,
-                "code_verifier": code_verifier,
-            })
-        else:
-            # Sin verifier intentamos igualmente (algunos setups no usan PKCE estricto)
-            respuesta = supabase.auth.exchange_code_for_session({"auth_code": code})
+    # Sin verifier no podemos hacer el intercambio PKCE de forma segura
+    if not code_verifier:
+        st.session_state["portal_entrado"] = True
+        st.session_state["auth_feedback"]  = (
+            "error",
+            "No se pudo completar el login con Google: el código de verificación no está disponible. "
+            "Inténtalo de nuevo."
+        )
+        st.rerun()
+        return
 
+    try:
+        respuesta = supabase.auth.exchange_code_for_session({
+            "auth_code":     code,
+            "code_verifier": code_verifier,
+        })
         usuario = _obtener_campo_auth(respuesta, "user")
         sesion  = _obtener_campo_auth(respuesta, "session")
-
         if not usuario or not sesion:
             raise ValueError("Respuesta incompleta del servidor.")
 
@@ -6493,17 +6498,40 @@ with st.sidebar:
         _google_cv_pendiente  = st.session_state.get("_google_oauth_code_verifier")
 
         if _google_url_pendiente:
-            # Render 2: URL lista → escribir cookie y mostrar enlace
-            _gestor_g = obtener_cookie_manager()
-            if _google_cv_pendiente and _gestor_g is not None:
+            # Render 2: URL lista → escribir cookie con el patrón de _guardar_cookie_refresh_token
+            if _google_cv_pendiente:
+                # CookieManager (mismo patrón que la cookie de sesión)
+                _gestor_g = obtener_cookie_manager()
                 try:
-                    _gestor_g.set(
-                        _GOOGLE_VERIFIER_COOKIE,
-                        _google_cv_pendiente,
-                        expires_at=datetime.now() + timedelta(seconds=_GOOGLE_VERIFIER_COOKIE_SEGUNDOS),
-                        key="set_google_verifier_cookie",
-                        secure=True,
-                        samesite="Lax",
+                    if _gestor_g is not None:
+                        _gestor_g.set(
+                            _GOOGLE_VERIFIER_COOKIE,
+                            _google_cv_pendiente,
+                            expires_at=datetime.now() + timedelta(seconds=_GOOGLE_VERIFIER_COOKIE_SEGUNDOS),
+                            key="set_google_verifier_cookie",
+                            secure=True,
+                            same_site="lax",
+                        )
+                except Exception:
+                    pass
+
+                # Respaldo JS: escribe la cookie desde el navegador
+                try:
+                    _nombre_js   = json.dumps(_GOOGLE_VERIFIER_COOKIE)
+                    _verifier_js = json.dumps(_google_cv_pendiente)
+                    components.html(
+                        f"""
+                        <script>
+                        (function() {{
+                          const name  = {_nombre_js};
+                          const value = encodeURIComponent({_verifier_js});
+                          const secure = window.location.protocol === "https:" ? "; Secure" : "";
+                          document.cookie = name + "=" + value
+                            + "; Max-Age={_GOOGLE_VERIFIER_COOKIE_SEGUNDOS}; Path=/; SameSite=Lax" + secure;
+                        }})();
+                        </script>
+                        """,
+                        height=0,
                     )
                 except Exception:
                     pass
