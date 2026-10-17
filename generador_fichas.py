@@ -742,7 +742,12 @@ def procesar_callback_google():
         except Exception:
             pass
 
-    print(f"[google-callback] code presente: {bool(code)} | verifier presente: {bool(code_verifier)} | fuente verifier: {_cv_source}")
+    # Logging mínimo para diagnóstico (sin valores sensibles)
+    import sys
+    print(
+        f"[google-cb] code={bool(code)} verifier={bool(code_verifier)} src={_cv_source}",
+        file=sys.stderr, flush=True,
+    )
 
     # Limpiar URL antes del intercambio (evita reintento en siguiente rerun)
     st.query_params.clear()
@@ -769,11 +774,11 @@ def procesar_callback_google():
         sesion  = _obtener_campo_auth(respuesta, "session")
         if not usuario or not sesion:
             raise ValueError("Respuesta incompleta del servidor.")
-        print(f"[google-callback] exchange OK | user_id: {str(getattr(usuario, 'id', '') or '')[:8]}...")
+        print(f"[google-cb] exchange OK | uid={str(getattr(usuario, 'id', '') or '')[:8]}", file=__import__('sys').stderr, flush=True)
 
     except Exception as e:
         _msg = str(e).lower()
-        print(f"[google-callback] exchange FALLO | tipo: {type(e).__name__} | mensaje: {_msg[:80]}")
+        print(f"[google-cb] exchange ERR type={type(e).__name__} msg={_msg[:60]}", file=__import__('sys').stderr, flush=True)
         if "expired" in _msg or "invalid" in _msg or "used" in _msg:
             mensaje = "El enlace de Google ha caducado o ya fue usado. Inicia sesión de nuevo."
         else:
@@ -798,12 +803,28 @@ def procesar_callback_google():
     _aplicar_sesion_al_cliente()
     asegurar_usuario_app_supabase()
 
-    # Borrar cookie de verifier
+    # Borrar cookie de verifier: via CookieManager y via JS
     if gestor is not None:
         try:
             gestor.delete(_GOOGLE_VERIFIER_COOKIE, key="del_google_verifier_ok")
         except Exception:
             pass
+    try:
+        _nombre_js_gv = json.dumps(_GOOGLE_VERIFIER_COOKIE)
+        components.html(
+            f"""
+            <script>
+            (function() {{
+              const name = {_nombre_js_gv};
+              const secure = window.location.protocol === "https:" ? "; Secure" : "";
+              document.cookie = name + "=; Max-Age=0; Path=/; SameSite=Lax" + secure;
+            }})();
+            </script>
+            """,
+            height=0,
+        )
+    except Exception:
+        pass
 
     st.session_state["portal_entrado"] = True
     st.session_state["auth_feedback"]  = ("success", "Sesión iniciada con Google.")
@@ -811,7 +832,6 @@ def procesar_callback_google():
     # sin necesidad de rerun (el rerun ocurrirá de forma natural al
     # final del script cuando Streamlit detecte el cambio de sesión).
     st.session_state["_google_login_ok"] = True
-    print(f"[google-callback] sesion guardada | portal_entrado=True")
 
 
 def procesar_enlace_recuperacion():
@@ -977,6 +997,9 @@ def _limpiar_sesion_autenticacion():
     st.session_state["organizacion_activa_nombre"] = None
     st.session_state["organizaciones_usuario"] = []
     st.session_state["_orgs_carga_intentada"] = False
+    # Resetear el radio de navegación para evitar desincronización si el
+    # siguiente usuario tiene opciones distintas (admin vs gerente vs chef)
+    st.session_state.pop("pagina_principal", None)
 
 
 # =============================================================================
@@ -1117,7 +1140,13 @@ def _aplicar_sesion_al_cliente():
         sesion = _obtener_campo_auth(respuesta, "session")
         if not usuario or not sesion:
             return False
+        _rt_anterior = refresh_token
         _guardar_sesion_supabase(usuario, sesion)
+        # Si el refresh_token rotó, reescribir la cookie para que el
+        # siguiente F5 no use un token ya invalidado.
+        _rt_nuevo = st.session_state.get("refresh_token")
+        if _rt_nuevo and _rt_nuevo != _rt_anterior:
+            _guardar_cookie_refresh_token(_rt_nuevo)
         access_token = st.session_state.get("access_token")
 
     supabase.postgrest.auth(access_token)
@@ -1171,9 +1200,14 @@ def restaurar_sesion_supabase():
             _limpiar_sesion_autenticacion()
             return False
 
+        _rt_cookie = refresh_token   # el que venía de la cookie
         _guardar_sesion_supabase(usuario, sesion)
         st.session_state["_auth_cookie_retry_done"] = False
         _aplicar_sesion_al_cliente()   # aplicar JWT al cliente antes de cargar orgs
+        # Si el token rotó respecto al que estaba en la cookie, reescribirla
+        _rt_nuevo = st.session_state.get("refresh_token")
+        if _rt_nuevo and _rt_nuevo != _rt_cookie:
+            _guardar_cookie_refresh_token(_rt_nuevo)
         asegurar_usuario_app_supabase()
         return True
     except Exception:
@@ -7521,8 +7555,8 @@ def _renderizar_inventario_propio(org_id):
         _msg = str(e_inv).lower()
         if "could not find" in _msg or "does not exist" in _msg or "pgrst202" in _msg:
             st.info(
-                "ℹ️ La pantalla de inventario propio estará disponible cuando se aplique "
-                "la **Fase 3** de la migración multiorganización (sql/024)."
+                "ℹ️ La pantalla de inventario propio estará disponible "
+                "cuando se aplique la Fase 3 (sql/024)."
             )
         else:
             st.warning(f"No se pudo cargar el inventario propio: {e_inv}")
@@ -7589,7 +7623,16 @@ def _renderizar_inventario_propio(org_id):
     st.markdown("#### Añadir ingrediente privado")
     with st.form("form_ingrediente_privado"):
         new_desc    = st.text_input("Descripción *", key="priv_desc")
-        new_familia = st.text_input("Familia", key="priv_familia")
+        # Familia obligatoria: selectbox con opciones comunes + libre
+        _familias_opciones = [
+            "", "Carnes", "Pescados y mariscos", "Verduras y hortalizas",
+            "Frutas", "Lácteos y huevos", "Cereales y harinas",
+            "Legumbres y frutos secos", "Aceites y grasas", "Especias y hierbas",
+            "Salsas y condimentos", "Bebidas", "Pastelería y panadería", "Otro",
+        ]
+        new_familia = st.selectbox("Familia *", _familias_opciones, key="priv_familia")
+        if new_familia == "Otro":
+            new_familia = st.text_input("Familia (escribe la tuya)", key="priv_familia_libre")
         new_unidad  = st.selectbox("Unidad de medida", ["kg", "l", "ud", "g", "ml"], key="priv_unidad")
         new_sin_alerg = st.checkbox(
             "No contiene ninguno de los 14 alérgenos de la UE",
@@ -7600,6 +7643,8 @@ def _renderizar_inventario_propio(org_id):
     if submitted:
         if not new_desc:
             st.error("Introduce una descripción.")
+        elif not new_familia:
+            st.error("Selecciona una familia antes de guardar.")
         else:
             ok, msg, codigo_nuevo = guardar_ficha_en_inventario({
                 "descripcion":  new_desc,
