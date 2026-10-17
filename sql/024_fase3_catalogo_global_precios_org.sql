@@ -140,7 +140,7 @@ create table if not exists public.inventario_org (
   constraint inventario_org_precio_no_negativo
     check (precio_unidad is null or precio_unidad >= 0),
   constraint inventario_org_merma_rango
-    check (merma is null or (merma >= 0 and merma < 1))
+    check (merma is null or (merma >= 0 and merma < 100))
 );
 
 comment on table public.inventario_org
