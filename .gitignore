@@ -9,3 +9,6 @@ venv/
 ~$*.xlsx
 
 deploy/secrets.toml
+
+# Exportaciones de pg_policies para revisión local — no subir al repo
+politicas_actuales.csv

@@ -738,6 +738,92 @@ def _limpiar_sesion_autenticacion():
     st.session_state["usuario_app"] = None
     st.session_state["usuario_app_error"] = None
     st.session_state["usuario_app_user_id"] = None
+    # Limpiar estado de organización activa
+    st.session_state["organizacion_activa_id"] = None
+    st.session_state["organizacion_activa_nombre"] = None
+    st.session_state["organizaciones_usuario"] = []
+    st.session_state["_orgs_carga_intentada"] = False
+
+
+# =============================================================================
+# Gestión de organización activa
+# =============================================================================
+
+def cargar_organizaciones_usuario():
+    """
+    Lee las organizaciones activas a las que pertenece el usuario conectado
+    y las guarda en session_state. Devuelve la lista de dicts con id y nombre.
+    """
+    if not supabase_disponible or supabase is None:
+        return []
+    user_id = obtener_user_id_actual()
+    if not user_id:
+        return []
+    try:
+        respuesta = (
+            supabase
+            .table("organizacion_miembros")
+            .select("organizacion_id, rol, organizaciones(id, nombre, slug, activa)")
+            .eq("user_id", user_id)
+            .eq("activo", True)
+            .execute()
+        )
+        orgs = []
+        for fila in (respuesta.data or []):
+            org = fila.get("organizaciones") or {}
+            if org.get("activa"):
+                orgs.append({
+                    "id":     org["id"],
+                    "nombre": org["nombre"],
+                    "slug":   org.get("slug", ""),
+                    "rol":    fila.get("rol", "chef"),
+                })
+        st.session_state["organizaciones_usuario"] = orgs
+        return orgs
+    except Exception:
+        st.session_state["organizaciones_usuario"] = []
+        return []
+
+
+def obtener_org_activa_id():
+    """Devuelve el organizacion_id activo de la sesión, o None."""
+    return st.session_state.get("organizacion_activa_id")
+
+
+def obtener_org_activa_nombre():
+    """Devuelve el nombre de la organización activa, o cadena vacía."""
+    return st.session_state.get("organizacion_activa_nombre") or ""
+
+
+def establecer_org_activa(org_id, org_nombre):
+    """Cambia la organización activa y vacía las cachés de datos."""
+    st.session_state["organizacion_activa_id"] = org_id
+    st.session_state["organizacion_activa_nombre"] = org_nombre
+    vaciar_caches_datos_org()
+
+
+def vaciar_caches_datos_org():
+    """Invalida todas las cachés de datos que dependen de la organización activa."""
+    try:
+        cargar_recetas_supabase.clear()
+    except Exception:
+        pass
+    try:
+        cargar_menus_supabase.clear()
+    except Exception:
+        pass
+    try:
+        cargar_inventario_supabase.clear()
+    except Exception:
+        pass
+
+def usuario_es_gerente_org_activa():
+    """True si el usuario tiene rol gerente en la organización activa."""
+    org_id = obtener_org_activa_id()
+    if not org_id:
+        return False
+    orgs = st.session_state.get("organizaciones_usuario", [])
+    return any(o["id"] == org_id and o["rol"] == "gerente" for o in orgs)
 
 
 def _guardar_sesion_supabase(usuario, sesion):
@@ -853,6 +939,7 @@ def restaurar_sesion_supabase():
 
         _guardar_sesion_supabase(usuario, sesion)
         st.session_state["_auth_cookie_retry_done"] = False
+        _aplicar_sesion_al_cliente()   # aplicar JWT al cliente antes de cargar orgs
         asegurar_usuario_app_supabase()
         return True
     except Exception:
@@ -916,6 +1003,8 @@ def asegurar_usuario_app_supabase():
         st.session_state["usuario_app"] = perfil
         st.session_state["usuario_app_error"] = None
         st.session_state["usuario_app_user_id"] = usuario.get("id")
+        # Cargar organizaciones y establecer la activa si aún no hay ninguna
+        _inicializar_org_activa()
         return True, mensaje, perfil
 
     mensaje_lower = str(mensaje).lower()
@@ -934,6 +1023,7 @@ def asegurar_usuario_app_supabase():
                 st.session_state["usuario_app"] = perfil_creado
                 st.session_state["usuario_app_error"] = None
                 st.session_state["usuario_app_user_id"] = usuario.get("id")
+                _inicializar_org_activa()
                 return True, "Perfil interno creado.", perfil_creado
         except Exception as e:
             mensaje = f"No se pudo crear el perfil interno: {e}"
@@ -942,6 +1032,19 @@ def asegurar_usuario_app_supabase():
     st.session_state["usuario_app_error"] = mensaje
     st.session_state["usuario_app_user_id"] = usuario.get("id")
     return False, mensaje, None
+
+
+def _inicializar_org_activa():
+    """
+    Carga las organizaciones del usuario y establece la organización activa
+    si aún no hay ninguna seleccionada.
+    - Si pertenece a exactamente una: se selecciona automáticamente.
+    - Si pertenece a varias: se deja None; el selector del sidebar lo resolverá.
+    - Si no pertenece a ninguna: se deja None y se mostrará aviso.
+    """
+    orgs = cargar_organizaciones_usuario()
+    if obtener_org_activa_id() is None and len(orgs) == 1:
+        establecer_org_activa(orgs[0]["id"], orgs[0]["nombre"])
 
 
 def obtener_perfil_usuario_app():
@@ -1214,10 +1317,12 @@ if 'factura_presupuesto_origen_id' not in st.session_state:
 # 📥 FUNCIÓN CACHÉ PARA CARGAR INVENTARIO
 # =============================================================================
 @st.cache_data(ttl=600)
-def cargar_inventario_supabase(trigger):
+def cargar_inventario_supabase(trigger, organizacion_activa_id=None):
     """
     Trae el listado de ingredientes del inventario de forma segura.
-    Se invalida automáticamente al cambiar el 'trigger'.
+    Si hay org activa (Fase 3+) usa obtener_inventario_para_org (RPC) para
+    obtener catálogo global + privados con precios efectivos resueltos.
+    En caso contrario cae al SELECT directo (compatibilidad Fase 1-2).
     """
     cols_deseadas = [
         "codigo", "familia", "descripcion", "unidad_medida", "merma", "precio_unidad",
@@ -1231,6 +1336,31 @@ def cargar_inventario_supabase(trigger):
     if not supabase_disponible or supabase is None:
         return pd.DataFrame(columns=cols_deseadas)
 
+    # ── Fase 3+: obtener catálogo + precios propios vía RPC ──────────────
+    if organizacion_activa_id:
+        try:
+            respuesta = supabase.rpc(
+                "obtener_inventario_para_org",
+                {"p_organizacion_id": organizacion_activa_id},
+            ).execute()
+            df = pd.DataFrame(respuesta.data or [])
+            if df.empty:
+                return pd.DataFrame(columns=cols_deseadas)
+            # Normalizar columnas (la RPC devuelve columnas distintas de las del SELECT)
+            for col in cols_deseadas:
+                if col not in df.columns:
+                    df[col] = 0.0 if col in (
+                        "merma", "precio_unidad",
+                        "cantidad_formato_compra", "precio_formato_compra",
+                    ) else ""
+            df["merma"]         = pd.to_numeric(df["merma"], errors="coerce").fillna(0.0)
+            df["precio_unidad"] = pd.to_numeric(df["precio_unidad"], errors="coerce").fillna(0.0)
+            df = df.sort_values(by="descripcion")
+            return df
+        except Exception:
+            pass   # fallback al SELECT directo si la RPC no existe aún (antes de 024)
+
+    # ── Fase 1-2 / fallback: SELECT directo ──────────────────────────────
     try:
         try:
             respuesta = (
@@ -1240,8 +1370,6 @@ def cargar_inventario_supabase(trigger):
                 .execute()
             )
         except Exception:
-            # Compatibilidad con instalaciones cuyo inventario todavía no
-            # incluye proveedor, formato, URL u otras columnas avanzadas.
             respuesta = (
                 supabase
                 .table("inventario")
@@ -1249,24 +1377,24 @@ def cargar_inventario_supabase(trigger):
                 .execute()
             )
         df = pd.DataFrame(respuesta.data)
-
         if df.empty:
             return pd.DataFrame(columns=cols_deseadas)
-
         df = df.loc[:, ~df.columns.duplicated()].copy()
         for col in cols_deseadas:
             if col not in df.columns:
-                df[col] = 0.0 if col in ["merma", "precio_unidad", "cantidad_formato_compra", "precio_formato_compra"] else ""
-
+                df[col] = 0.0 if col in (
+                    "merma", "precio_unidad",
+                    "cantidad_formato_compra", "precio_formato_compra",
+                ) else ""
         df = df[cols_deseadas].copy()
-        df["codigo"] = df["codigo"].fillna("").astype(str).str.strip().str.upper()
-        df["familia"] = df["familia"].fillna("").astype(str).str.strip()
-        df["descripcion"] = df["descripcion"].fillna("").astype(str).str.strip()
+        df["codigo"]       = df["codigo"].fillna("").astype(str).str.strip().str.upper()
+        df["familia"]      = df["familia"].fillna("").astype(str).str.strip()
+        df["descripcion"]  = df["descripcion"].fillna("").astype(str).str.strip()
         df["unidad_medida"] = df["unidad_medida"].fillna("").astype(str).str.strip()
-        df["merma"] = pd.to_numeric(df["merma"], errors="coerce").fillna(0.0)
+        df["merma"]         = pd.to_numeric(df["merma"], errors="coerce").fillna(0.0)
         df["precio_unidad"] = pd.to_numeric(df["precio_unidad"], errors="coerce").fillna(0.0)
         df["cantidad_formato_compra"] = pd.to_numeric(df["cantidad_formato_compra"], errors="coerce")
-        df["precio_formato_compra"] = pd.to_numeric(df["precio_formato_compra"], errors="coerce")
+        df["precio_formato_compra"]   = pd.to_numeric(df["precio_formato_compra"], errors="coerce")
         df = df.sort_values(by="descripcion")
         return df
     except Exception as e:
@@ -1274,7 +1402,7 @@ def cargar_inventario_supabase(trigger):
         return pd.DataFrame(columns=cols_deseadas)
 
 # Cargar inventario actual para autocompletado y contexto IA
-inventario_df = cargar_inventario_supabase(st.session_state['db_trigger'])
+inventario_df = cargar_inventario_supabase(st.session_state['db_trigger'], obtener_org_activa_id())
 
 # Convertir inventario a diccionario seguro para búsquedas rápidas en milisegundos sin KeyError
 inventario_dict = {}
@@ -1953,9 +2081,81 @@ def validar_datos_ficha_ingrediente(datos, requiere_cantidad=False):
 
 
 def guardar_ficha_en_inventario(datos):
+    """
+    Guarda un ingrediente en el inventario.
+    Fase 3+: si hay organización activa y el usuario es gerente, crea un
+    ingrediente PRIVADO vía la función security definer crear_ingrediente_privado.
+    Los chefs no pueden guardar en el inventario.
+    Fase 1-2 / fallback: escribe directamente en la tabla inventario (catálogo global).
+    """
     if not supabase_disponible or supabase is None:
         return False, "El inventario no está conectado.", None
 
+    org_id = obtener_org_activa_id()
+
+    # ── Fase 3+: ingrediente privado vía RPC ──────────────────────────────
+    if org_id:
+        if not usuario_es_gerente_org_activa():
+            return False, (
+                "Solo los gerentes pueden guardar ingredientes en el inventario. "
+                "Pide a tu gerente que lo añada."
+            ), None
+
+        descripcion = str(datos.get("descripcion", "") or "").strip()
+        if not descripcion:
+            return False, "Introduce una descripción para el ingrediente.", None
+
+        alergeno_ids       = datos.get("alergeno_ids", [])
+        sin_alergenos_flag = bool(datos.get("sin_alergenos", False))
+
+        if not alergeno_ids and not sin_alergenos_flag:
+            return False, (
+                "⚠️ Declara los alérgenos de este ingrediente antes de guardarlo, "
+                "o marca explícitamente 'No contiene ninguno de los 14 alérgenos'."
+            ), None
+
+        try:
+            codigo = supabase.rpc("crear_ingrediente_privado", {
+                "p_org_id":       org_id,
+                "p_descripcion":  descripcion,
+                "p_familia":      str(datos.get("familia") or "").strip() or None,
+                "p_unidad_medida": str(datos.get("unidad_medida") or "kg").strip(),
+            }).execute().data
+
+            # Guardar alérgenos
+            if alergeno_ids:
+                ok_a, msg_a = guardar_alergenos_ingrediente(codigo, alergeno_ids)
+                if not ok_a:
+                    return False, msg_a, None
+
+            # Marcar alérgenos revisados vía función SECURITY DEFINER
+            # (el trigger bloquea el UPDATE directo de estas columnas)
+            try:
+                supabase.rpc("marcar_alergenos_revisados", {
+                    "p_codigo":        codigo,
+                    "p_sin_alergenos": sin_alergenos_flag and not alergeno_ids,
+                }).execute()
+            except Exception as e_rev:
+                return False, f"Error al marcar alérgenos como revisados: {e_rev}", None
+
+            # Guardar precio propio si se indicó
+            precio = datos.get("precio_unidad")
+            merma  = datos.get("merma")
+            if precio or merma:
+                supabase.table("inventario_org").insert({
+                    "organizacion_id":  org_id,
+                    "codigo_ingrediente": codigo,
+                    "precio_unidad":    precio or None,
+                    "merma":            merma or None,
+                }).execute()
+
+            st.session_state["db_trigger"] += 1
+            return True, f"Ingrediente privado '{descripcion}' creado con código {codigo}.", codigo
+
+        except Exception as exc:
+            return False, f"Error al crear el ingrediente privado: {exc}", None
+
+    # ── Fase 1-2 / fallback: escribir directamente (catálogo global) ──────
     codigo = str(datos.get("codigo", "") or "").strip().upper()
     if not codigo_ingrediente_valido(codigo):
         codigo = generar_codigo_ingrediente_nuevo(
@@ -1967,18 +2167,11 @@ def guardar_ficha_en_inventario(datos):
     try:
         codigo_existente = codigo in inventario_dict
         if codigo_existente:
-            (
-                supabase
-                .table("inventario")
-                .update(fila)
-                .eq("codigo", codigo)
-                .execute()
-            )
+            supabase.table("inventario").update(fila).eq("codigo", codigo).execute()
         else:
             supabase.table("inventario").insert(fila).execute()
         ok_alergenos, mensaje_alergenos = guardar_alergenos_ingrediente(
-            codigo,
-            datos.get("alergeno_ids", []),
+            codigo, datos.get("alergeno_ids", []),
         )
         if not ok_alergenos:
             return False, mensaje_alergenos, None
@@ -2080,7 +2273,7 @@ def actualizar_fila_receta_desde_ficha(datos):
 
 
 RECETAS_COLUMNAS = [
-    "id", "user_id", "codigo_receta", "nombre", "categoria", "tipo_plato",
+    "id", "user_id", "organizacion_id", "codigo_receta", "nombre", "categoria", "tipo_plato",
     "raciones_base", "unidad_servicio", "descripcion", "elaboracion",
     "observaciones", "costes_indirectos_pct", "margen_beneficio_pct",
     "iva_pct", "coste_total", "precio_venta_sin_iva",
@@ -2095,7 +2288,7 @@ RECETA_INGREDIENTES_COLUMNAS = [
 ]
 
 MENUS_COLUMNAS = [
-    "id", "user_id", "nombre", "tipo_menu", "descripcion",
+    "id", "user_id", "organizacion_id", "nombre", "tipo_menu", "descripcion",
     "numero_comensales", "coste_total", "precio_total",
     "created_at", "updated_at"
 ]
@@ -2105,13 +2298,13 @@ MENU_RECETAS_COLUMNAS = [
 ]
 
 CLIENTES_COLUMNAS = [
-    "id", "user_id", "nombre", "tipo_cliente", "nif_cif", "email", "telefono",
+    "id", "user_id", "organizacion_id", "nombre", "tipo_cliente", "nif_cif", "email", "telefono",
     "direccion", "codigo_postal", "ciudad", "provincia", "pais",
     "observaciones", "created_at", "updated_at"
 ]
 
 FACTURAS_COLUMNAS = [
-    "id", "user_id", "cliente_id", "numero_factura", "tipo_documento", "estado",
+    "id", "user_id", "organizacion_id", "cliente_id", "numero_factura", "tipo_documento", "estado",
     "fecha_emision", "fecha_vencimiento", "concepto", "base_imponible",
     "iva_pct", "iva_importe", "retencion_pct", "retencion_importe", "total",
     "metodo_pago", "estado_cobro", "notas", "created_at", "updated_at"
@@ -2209,6 +2402,9 @@ def datos_factura_para_supabase(factura, totales, user_id_actual):
     ]
     datos = {col: factura.get(col) for col in campos_escritura if col in factura}
     datos["user_id"] = user_id_actual
+    org_id = obtener_org_activa_id()
+    if org_id:
+        datos["organizacion_id"] = org_id
     datos["tipo_documento"] = str(datos.get("tipo_documento") or "factura").strip().lower() or "factura"
     datos["base_imponible"] = totales["base_imponible"]
     datos["iva_importe"] = totales["iva_importe"]
@@ -2322,7 +2518,7 @@ def generar_nombre_copia_receta(nombre_original):
         return f"{nombre_base} copia"
 
     try:
-        recetas_df = cargar_recetas_supabase(obtener_user_id_actual())
+        recetas_df = cargar_recetas_supabase(obtener_user_id_actual(), obtener_org_activa_id())
         nombres_existentes = {
             str(nombre).strip().lower()
             for nombre in recetas_df.get("nombre", [])
@@ -2351,7 +2547,7 @@ def generar_nombre_copia_menu(nombre_original):
         return f"{nombre_base} copia"
 
     try:
-        menus_df = cargar_menus_supabase(obtener_user_id_actual())
+        menus_df = cargar_menus_supabase(obtener_user_id_actual(), obtener_org_activa_id())
         nombres_existentes = {
             str(nombre).strip().lower()
             for nombre in menus_df.get("nombre", [])
@@ -2409,21 +2605,28 @@ def validar_receta_para_guardar(ingredientes, raciones_base_receta):
 
 
 @st.cache_data(ttl=600)
-def cargar_recetas_supabase(user_id_actual=None):
+def cargar_recetas_supabase(user_id_actual=None, organizacion_activa_id=None):
     """
     Lee public.recetas y devuelve un DataFrame seguro.
+    Si organizacion_activa_id está definido (Fase 2+) filtra por organización;
+    en caso contrario mantiene el filtro legacy por user_id para compatibilidad
+    durante la transición del paso A al paso C.
     """
     if not supabase_disponible or supabase is None:
         return pd.DataFrame(columns=RECETAS_COLUMNAS)
 
     try:
-        respuesta = (
+        consulta = (
             supabase
             .table("recetas")
             .select(",".join(RECETAS_COLUMNAS))
             .order("created_at", desc=True)
-            .execute()
         )
+        if organizacion_activa_id:
+            # Fase 2: filtro por organización en la query (RLS también lo garantiza)
+            consulta = consulta.eq("organizacion_id", organizacion_activa_id)
+
+        respuesta = consulta.execute()
         df = pd.DataFrame(respuesta.data or [])
         if df.empty:
             return pd.DataFrame(columns=RECETAS_COLUMNAS)
@@ -2432,11 +2635,18 @@ def cargar_recetas_supabase(user_id_actual=None):
             if col not in df.columns:
                 df[col] = None
         df = df[RECETAS_COLUMNAS].copy()
-        user_id_actual = str(user_id_actual).strip() if user_id_actual else None
-        user_ids = df["user_id"].apply(lambda valor: valor_user_id_receta({"user_id": valor}))
-        if user_id_actual:
-            return df[user_ids.isin([user_id_actual, None])].copy()
-        return df[user_ids.isna()].copy()
+
+        if not organizacion_activa_id:
+            # Filtro legacy por user_id (solo durante transición paso A → C)
+            user_id_limpio = str(user_id_actual).strip() if user_id_actual else None
+            user_ids = df["user_id"].apply(
+                lambda v: valor_user_id_receta({"user_id": v})
+            )
+            if user_id_limpio:
+                return df[user_ids.isin([user_id_limpio, None])].copy()
+            return df[user_ids.isna()].copy()
+
+        return df
     except Exception:
         return pd.DataFrame(columns=RECETAS_COLUMNAS)
 
@@ -2516,6 +2726,9 @@ def guardar_receta_nueva_supabase(datos_receta, ingredientes):
         user_id_actual = obtener_user_id_actual()
         datos_guardar = dict(datos_receta)
         datos_guardar["user_id"] = user_id_actual
+        org_id = obtener_org_activa_id()
+        if org_id:
+            datos_guardar["organizacion_id"] = org_id
         respuesta_receta = (
             supabase
             .table("recetas")
@@ -2894,21 +3107,26 @@ def eliminar_menu_supabase(menu_id):
 
 
 @st.cache_data(ttl=600)
-def cargar_menus_supabase(user_id_actual=None):
+def cargar_menus_supabase(user_id_actual=None, organizacion_activa_id=None):
     """
     Lee public.menus y devuelve un DataFrame seguro.
+    Si organizacion_activa_id está definido (Fase 2+) filtra por organización;
+    en caso contrario mantiene el filtro legacy por user_id.
     """
     if not supabase_disponible or supabase is None:
         return pd.DataFrame(columns=MENUS_COLUMNAS)
 
     try:
-        respuesta = (
+        consulta = (
             supabase
             .table("menus")
             .select(",".join(MENUS_COLUMNAS))
             .order("created_at", desc=True)
-            .execute()
         )
+        if organizacion_activa_id:
+            consulta = consulta.eq("organizacion_id", organizacion_activa_id)
+
+        respuesta = consulta.execute()
         df = pd.DataFrame(respuesta.data or [])
         if df.empty:
             return pd.DataFrame(columns=MENUS_COLUMNAS)
@@ -2917,11 +3135,17 @@ def cargar_menus_supabase(user_id_actual=None):
             if col not in df.columns:
                 df[col] = None
         df = df[MENUS_COLUMNAS].copy()
-        user_id_actual = str(user_id_actual).strip() if user_id_actual else None
-        user_ids = df["user_id"].apply(lambda valor: valor_user_id_menu({"user_id": valor}))
-        if user_id_actual:
-            return df[user_ids.isin([user_id_actual, None])].copy()
-        return df[user_ids.isna()].copy()
+
+        if not organizacion_activa_id:
+            user_id_limpio = str(user_id_actual).strip() if user_id_actual else None
+            user_ids = df["user_id"].apply(
+                lambda v: valor_user_id_menu({"user_id": v})
+            )
+            if user_id_limpio:
+                return df[user_ids.isin([user_id_limpio, None])].copy()
+            return df[user_ids.isna()].copy()
+
+        return df
     except Exception:
         return pd.DataFrame(columns=MENUS_COLUMNAS)
 
@@ -3059,24 +3283,30 @@ def datos_cliente_desde_formulario(
 
 def cargar_clientes_supabase():
     """
-    Lee los clientes del usuario conectado.
+    Lee los clientes de la organización activa (Fase 2+) o del usuario (legacy).
     """
     if not supabase_disponible or supabase is None:
         return False, "El inventario no está conectado correctamente.", pd.DataFrame(columns=CLIENTES_COLUMNAS)
 
+    org_id = obtener_org_activa_id()
     user_id_actual = obtener_user_id_actual()
-    if not user_id_actual:
-        return False, "Inicia sesión para guardar clientes en tu cuenta", pd.DataFrame(columns=CLIENTES_COLUMNAS)
+
+    if not org_id and not user_id_actual:
+        return False, "Inicia sesión para cargar clientes.", pd.DataFrame(columns=CLIENTES_COLUMNAS)
 
     try:
-        respuesta = (
+        consulta = (
             supabase
             .table("clientes")
             .select(",".join(CLIENTES_COLUMNAS))
-            .eq("user_id", user_id_actual)
             .order("nombre")
-            .execute()
         )
+        if org_id:
+            consulta = consulta.eq("organizacion_id", org_id)
+        else:
+            consulta = consulta.eq("user_id", user_id_actual)
+
+        respuesta = consulta.execute()
         df = pd.DataFrame(respuesta.data or [])
         if df.empty:
             return True, "", pd.DataFrame(columns=CLIENTES_COLUMNAS)
@@ -3103,6 +3333,9 @@ def guardar_cliente_supabase(cliente):
 
     datos_guardar = dict(cliente)
     datos_guardar["user_id"] = user_id_actual
+    org_id = obtener_org_activa_id()
+    if org_id:
+        datos_guardar["organizacion_id"] = org_id
     if not datos_guardar.get("nombre"):
         return False, "Indica un nombre de cliente antes de guardar.", None
 
@@ -3144,7 +3377,6 @@ def actualizar_cliente_supabase(cliente_id, cliente):
             .table("clientes")
             .update(dict(cliente))
             .eq("id", cliente_id_limpio)
-            .eq("user_id", user_id_actual)
             .execute()
         )
         return True, "Cliente actualizado correctamente."
@@ -3175,7 +3407,6 @@ def eliminar_cliente_supabase(cliente_id):
             .table("clientes")
             .delete()
             .eq("id", cliente_id_limpio)
-            .eq("user_id", user_id_actual)
             .execute()
         )
         return True, "Cliente eliminado correctamente."
@@ -3194,6 +3425,8 @@ def error_tabla_facturacion_no_activada(error):
         (
             "facturas" in mensaje
             or "factura_lineas" in mensaje
+            # presupuestos/presupuesto_menus/factura_menus son de la 019 (no aplicada);
+            # se mantienen en el detector por si quedan referencias legacy en caché.
             or "presupuestos" in mensaje
             or "presupuesto_menus" in mensaje
             or "factura_menus" in mensaje
@@ -3332,7 +3565,7 @@ def obtener_nombre_menu_por_id(menu_id):
     menu_id_limpio = str(menu_id or "").strip()
     if not menu_id_limpio:
         return None
-    menus_df = cargar_menus_supabase(obtener_user_id_actual())
+    menus_df = cargar_menus_supabase(obtener_user_id_actual(), obtener_org_activa_id())
     if menus_df.empty:
         return None
     coincidencias = menus_df[menus_df["id"].astype(str) == menu_id_limpio]
@@ -3694,14 +3927,18 @@ def generar_numero_factura(tipo_documento):
         return f"{prefijo}-{fecha_codigo}-0001"
 
     try:
-        respuesta = (
+        consulta_num = (
             supabase
             .table("facturas")
             .select("numero_factura")
-            .eq("user_id", obtener_user_id_actual())
             .ilike("numero_factura", patron)
-            .execute()
         )
+        org_id = obtener_org_activa_id()
+        if org_id:
+            consulta_num = consulta_num.eq("organizacion_id", org_id)
+        else:
+            consulta_num = consulta_num.eq("user_id", obtener_user_id_actual())
+        respuesta = consulta_num.execute()
         ultimo = 0
         regex = re.compile(rf"^{re.escape(prefijo)}-{re.escape(fecha_codigo)}-(\d{{4,}})$")
         for fila in respuesta.data or []:
@@ -3742,7 +3979,43 @@ def preparar_relaciones_menu_documento(lineas, tipo_documento, documento_id):
     return relaciones
 
 
+def _construir_lineas_factura(factura_id, lineas):
+    """
+    Construye la lista de dicts para insertar en factura_lineas.
+    Extrae solo líneas con descripción válida.
+    """
+    lineas_validas = [
+        calcular_linea_factura(l)
+        for l in (lineas or [])
+        if str(l.get("descripcion", "") or "").strip()
+    ]
+    resultado = []
+    for orden, linea in enumerate(lineas_validas, start=1):
+        resultado.append({
+            "factura_id":     factura_id,
+            "origen_tipo":    linea.get("origen_tipo", "manual") or "manual",
+            "origen_id":      linea.get("origen_id"),
+            "descripcion":    linea["descripcion"],
+            "cantidad":       linea["cantidad"],
+            "unidad":         linea["unidad"],
+            "precio_unitario": linea["precio_unitario"],
+            "descuento_pct":  linea["descuento_pct"],
+            "base_linea":     linea["base_linea"],
+            "iva_pct":        linea["iva_pct"],
+            "iva_linea":      linea["iva_linea"],
+            "total_linea":    linea["total_linea"],
+            "orden":          orden,
+        })
+    return resultado
+
+
 def guardar_presupuesto_supabase(presupuesto, lineas):
+    """
+    Guarda un presupuesto como fila de public.facturas con
+    tipo_documento='presupuesto' y número en numero_factura.
+    Las tablas presupuestos/presupuesto_menus (migración 019) no están
+    disponibles en producción y no se usan aquí.
+    """
     user_id_actual = obtener_user_id_actual()
     documento_valido, mensaje_validacion = validar_documento_con_menus(
         presupuesto,
@@ -3752,65 +4025,76 @@ def guardar_presupuesto_supabase(presupuesto, lineas):
         return False, mensaje_validacion, None
 
     lineas_menu = extraer_lineas_menu_documento(lineas)
-    coste_total = calcular_coste_presupuesto(lineas_menu)
-    precio_total = sum(
-        numero_seguro(linea.get("precio_linea_menu_documento"), 0.0)
-        for linea in lineas_menu
+    totales = calcular_totales_factura(
+        [calcular_linea_factura(l) for l in (lineas or []) if str(l.get("descripcion", "") or "").strip()],
+        presupuesto.get("iva_pct", 21),
+        presupuesto.get("retencion_pct", 0),
     )
+
     datos = {
-        "user_id": user_id_actual,
-        "cliente_id": presupuesto.get("cliente_id"),
-        "numero_presupuesto": presupuesto.get("numero_factura"),
-        "estado": presupuesto.get("estado", "borrador"),
-        "fecha_emision": presupuesto.get("fecha_emision"),
+        "user_id":        user_id_actual,
+        "cliente_id":     presupuesto.get("cliente_id"),
+        "numero_factura": presupuesto.get("numero_factura"),
+        "tipo_documento": "presupuesto",
+        "estado":         presupuesto.get("estado", "borrador"),
+        "fecha_emision":  presupuesto.get("fecha_emision"),
         "fecha_vencimiento": presupuesto.get("fecha_vencimiento"),
-        "concepto": presupuesto.get("concepto"),
-        "coste_total": coste_total,
-        "precio_total": precio_total,
-        "notas": presupuesto.get("notas"),
+        "concepto":       presupuesto.get("concepto"),
+        "base_imponible": totales["base_imponible"],
+        "iva_pct":        presupuesto.get("iva_pct", 21),
+        "iva_importe":    totales["iva_importe"],
+        "retencion_pct":  presupuesto.get("retencion_pct", 0),
+        "retencion_importe": totales["retencion_importe"],
+        "total":          totales["total"],
+        "notas":          presupuesto.get("notas"),
     }
-    respuesta = supabase.table("presupuestos").insert(datos).execute()
-    guardado = (respuesta.data or [{}])[0]
-    presupuesto_id = guardado.get("id")
-    if not presupuesto_id:
-        return False, "No se pudo obtener el identificador del presupuesto.", None
-    relaciones = preparar_relaciones_menu_documento(
-        lineas,
-        "presupuesto",
-        presupuesto_id,
-    )
-    supabase.table("presupuesto_menus").insert(relaciones).execute()
-    guardado["numero_factura"] = guardado.get("numero_presupuesto")
-    guardado["tipo_documento"] = "presupuesto"
-    guardado["total"] = guardado.get("precio_total", precio_total)
-    guardado["_origen_almacen"] = "presupuestos"
-    return True, "Presupuesto guardado correctamente.", guardado
+    org_id = obtener_org_activa_id()
+    if org_id:
+        datos["organizacion_id"] = org_id
 
+    try:
+        respuesta = supabase.table("facturas").insert(datos).execute()
+        guardado = (respuesta.data or [{}])[0]
+        factura_id = guardado.get("id")
+        if not factura_id:
+            return False, "No se pudo obtener el identificador del presupuesto.", None
 
-def guardar_relaciones_factura_supabase(factura_id, lineas):
-    relaciones = preparar_relaciones_menu_documento(lineas, "factura", factura_id)
-    if relaciones:
-        supabase.table("factura_menus").insert(relaciones).execute()
+        # Guardar líneas en factura_lineas (no en presupuesto_menus, que no existe)
+        lineas_guardar = _construir_lineas_factura(factura_id, lineas)
+        if lineas_guardar:
+            supabase.table("factura_lineas").insert(lineas_guardar).execute()
+
+        guardado["_origen_almacen"] = "facturas"
+        return True, "Presupuesto guardado correctamente.", preparar_factura_compatibilidad(guardado)
+    except Exception as e:
+        if error_tabla_facturacion_no_activada(e):
+            return False, MENSAJE_FACTURACION_NO_ACTIVADA, None
+        return False, f"Error al guardar presupuesto: {e}", None
 
 
 def cargar_facturas_supabase():
     if not supabase_disponible or supabase is None:
         return False, "El inventario no está conectado correctamente.", preparar_facturas_df_compatibilidad(pd.DataFrame())
 
+    org_id = obtener_org_activa_id()
     user_id_actual = obtener_user_id_actual()
-    if not user_id_actual:
+    if not org_id and not user_id_actual:
         return False, "Inicia sesión para cargar documentos.", preparar_facturas_df_compatibilidad(pd.DataFrame())
 
     try:
-        respuesta = (
+        consulta = (
             supabase
             .table("facturas")
             .select(",".join(FACTURAS_COLUMNAS))
-            .eq("user_id", user_id_actual)
             .order("created_at", desc=True)
             .limit(50)
-            .execute()
         )
+        if org_id:
+            consulta = consulta.eq("organizacion_id", org_id)
+        else:
+            consulta = consulta.eq("user_id", user_id_actual)
+
+        respuesta = consulta.execute()
         df = preparar_facturas_df_compatibilidad(pd.DataFrame(respuesta.data or []))
         return True, "", df
     except Exception as e:
@@ -3862,42 +4146,8 @@ def cargar_factura_detalle_supabase(factura_id):
             if col not in lineas_df.columns:
                 lineas_df[col] = None
 
-        try:
-            respuesta_menus_factura = (
-                supabase
-                .table("factura_menus")
-                .select(",".join(FACTURA_MENUS_COLUMNAS))
-                .eq("factura_id", factura_id_limpio)
-                .order("orden")
-                .execute()
-            )
-            relaciones_factura = respuesta_menus_factura.data or []
-        except Exception:
-            relaciones_factura = []
-
-        if relaciones_factura and not lineas_df.empty:
-            relaciones_por_menu = {
-                str(relacion.get("menu_id")): relacion
-                for relacion in relaciones_factura
-            }
-            for indice, linea in lineas_df.iterrows():
-                relacion = relaciones_por_menu.get(str(linea.get("origen_id")))
-                if not relacion:
-                    continue
-                lineas_df.at[indice, "cantidad_menu"] = relacion.get("cantidad_menu", 1)
-                lineas_df.at[indice, "menu_origen_id"] = relacion.get("menu_id")
-                lineas_df.at[indice, "menu_nombre_snapshot"] = relacion.get("menu_nombre_snapshot")
-                lineas_df.at[indice, "coste_total_menu"] = relacion.get("coste_total_menu", 0)
-                lineas_df.at[indice, "coste_linea_menu_documento"] = relacion.get(
-                    "coste_linea_menu_factura",
-                    0,
-                )
-                lineas_df.at[indice, "precio_total_menu"] = relacion.get("precio_total_menu", 0)
-                lineas_df.at[indice, "precio_linea_menu_documento"] = relacion.get(
-                    "precio_linea_menu_factura",
-                    0,
-                )
-                lineas_df.at[indice, "observaciones"] = relacion.get("observaciones")
+        # factura_menus (migración 019, no aplicada) se omite.
+        # Las líneas de menú se guardan como factura_lineas ordinarias.
 
         mensaje = "Documento cargado correctamente."
         if not factura_user_id:
@@ -3975,10 +4225,6 @@ def guardar_factura_supabase(factura, lineas):
                 .insert(lineas_guardar)
                 .execute()
             )
-        try:
-            guardar_relaciones_factura_supabase(factura_id, lineas_validas)
-        except Exception:
-            pass
         return True, "Documento guardado correctamente.", preparar_factura_compatibilidad(factura_guardada)
     except Exception as e:
         if error_tabla_facturacion_no_activada(e):
@@ -3987,50 +4233,62 @@ def guardar_factura_supabase(factura, lineas):
 
 
 def actualizar_presupuesto_supabase(presupuesto_id, presupuesto, lineas):
+    """
+    Actualiza un presupuesto guardado en public.facturas
+    (tipo_documento='presupuesto').
+    Las tablas presupuestos/presupuesto_menus (migración 019) no se usan.
+    """
     documento_valido, mensaje_validacion = validar_documento_con_menus(
-        presupuesto,
-        lineas,
+        presupuesto, lineas,
     )
     if not documento_valido:
         return False, mensaje_validacion, None
-    lineas_menu = extraer_lineas_menu_documento(lineas)
-    coste_total = calcular_coste_presupuesto(lineas_menu)
-    precio_total = sum(
-        numero_seguro(linea.get("precio_linea_menu_documento"), 0.0)
-        for linea in lineas_menu
+
+    totales = calcular_totales_factura(
+        [calcular_linea_factura(l) for l in (lineas or [])
+         if str(l.get("descripcion", "") or "").strip()],
+        presupuesto.get("iva_pct", 21),
+        presupuesto.get("retencion_pct", 0),
     )
     datos = {
-        "cliente_id": presupuesto.get("cliente_id"),
-        "numero_presupuesto": presupuesto.get("numero_factura"),
-        "estado": presupuesto.get("estado", "borrador"),
-        "fecha_emision": presupuesto.get("fecha_emision"),
+        "cliente_id":        presupuesto.get("cliente_id"),
+        "numero_factura":    presupuesto.get("numero_factura"),
+        "tipo_documento":    "presupuesto",
+        "estado":            presupuesto.get("estado", "borrador"),
+        "fecha_emision":     presupuesto.get("fecha_emision"),
         "fecha_vencimiento": presupuesto.get("fecha_vencimiento"),
-        "concepto": presupuesto.get("concepto"),
-        "coste_total": coste_total,
-        "precio_total": precio_total,
-        "notas": presupuesto.get("notas"),
+        "concepto":          presupuesto.get("concepto"),
+        "base_imponible":    totales["base_imponible"],
+        "iva_pct":           presupuesto.get("iva_pct", 21),
+        "iva_importe":       totales["iva_importe"],
+        "retencion_pct":     presupuesto.get("retencion_pct", 0),
+        "retencion_importe": totales["retencion_importe"],
+        "total":             totales["total"],
+        "notas":             presupuesto.get("notas"),
     }
-    respuesta = (
-        supabase
-        .table("presupuestos")
-        .update(datos)
-        .eq("id", presupuesto_id)
-        .eq("user_id", obtener_user_id_actual())
-        .execute()
-    )
-    supabase.table("presupuesto_menus").delete().eq(
-        "presupuesto_id",
-        presupuesto_id,
-    ).execute()
-    relaciones = preparar_relaciones_menu_documento(
-        lineas,
-        "presupuesto",
-        presupuesto_id,
-    )
-    supabase.table("presupuesto_menus").insert(relaciones).execute()
-    actualizado = (respuesta.data or [{}])[0]
-    actualizado["numero_factura"] = actualizado.get("numero_presupuesto")
-    return True, "Presupuesto actualizado correctamente.", actualizado
+    try:
+        respuesta = (
+            supabase
+            .table("facturas")
+            .update(datos)
+            .eq("id", presupuesto_id)
+            .execute()
+        )
+        actualizado = (respuesta.data or [{}])[0]
+
+        # Reemplazar líneas en factura_lineas
+        supabase.table("factura_lineas").delete().eq(
+            "factura_id", presupuesto_id
+        ).execute()
+        lineas_nuevas = _construir_lineas_factura(presupuesto_id, lineas)
+        if lineas_nuevas:
+            supabase.table("factura_lineas").insert(lineas_nuevas).execute()
+
+        return True, "Presupuesto actualizado correctamente.", preparar_factura_compatibilidad(actualizado)
+    except Exception as e:
+        if error_tabla_facturacion_no_activada(e):
+            return False, MENSAJE_FACTURACION_NO_ACTIVADA, None
+        return False, f"Error al actualizar presupuesto: {e}", None
 
 
 def actualizar_factura_supabase(factura_id, factura, lineas):
@@ -4076,7 +4334,6 @@ def actualizar_factura_supabase(factura_id, factura, lineas):
             .table("facturas")
             .update(datos_factura)
             .eq("id", factura_id)
-            .eq("user_id", user_id_actual)
             .execute()
         )
         factura_actualizada = (respuesta_factura.data or [{}])[0]
@@ -4114,14 +4371,6 @@ def actualizar_factura_supabase(factura_id, factura, lineas):
                 .insert(lineas_guardar)
                 .execute()
             )
-        try:
-            supabase.table("factura_menus").delete().eq(
-                "factura_id",
-                factura_id,
-            ).execute()
-            guardar_relaciones_factura_supabase(factura_id, lineas_validas)
-        except Exception:
-            pass
         return True, "Documento actualizado correctamente.", preparar_factura_compatibilidad(factura_actualizada)
     except Exception as e:
         if error_tabla_facturacion_no_activada(e):
@@ -4510,6 +4759,9 @@ def guardar_menu_supabase(datos_menu, lineas_menu):
         user_id_actual = obtener_user_id_actual()
         datos_guardar = dict(datos_menu)
         datos_guardar["user_id"] = user_id_actual
+        org_id = obtener_org_activa_id()
+        if org_id:
+            datos_guardar["organizacion_id"] = org_id
         if datos_guardar.get("coste_total") is None:
             datos_guardar["coste_total"] = totales["coste_total"]
         datos_guardar["coste_total"] = numero_seguro(datos_guardar.get("coste_total", 0.0))
@@ -4638,6 +4890,38 @@ def calcular_ingredientes_ajustados_para_menu(ingredientes, raciones_menu, racio
 
 def calcular_alergenos_ficha_receta(ingredientes):
     return calcular_alergenos_desde_ingredientes(ingredientes)
+
+
+def receta_tiene_privados_sin_revisar(ingredientes):
+    """
+    True si algún ingrediente de la receta es privado (código empieza por 'P-',
+    en minúsculas como los genera crear_ingrediente_privado) y tiene
+    alergenos_revisados = false según el inventario cargado en sesión.
+    """
+    org_id = obtener_org_activa_id()
+    # Sin org activa o sin inventario cargado no podemos comprobar nada
+    if not org_id or inventario_df.empty:
+        return False
+
+    # inventario_df no incluye alergenos_revisados en Fase 1-2; en Fase 3+ sí
+    if "alergenos_revisados" not in inventario_df.columns:
+        return False
+
+    # Normalizar a minúsculas en ambos lados para que coincidan con los códigos
+    # generados por crear_ingrediente_privado ('P-<slug>-NNNN', slug en minúsculas)
+    codigos_privados = [
+        str(ing.get("codigo_ingrediente") or "").strip().lower()
+        for ing in (ingredientes or [])
+        if str(ing.get("codigo_ingrediente") or "").strip().lower().startswith("p-")
+    ]
+    if not codigos_privados:
+        return False
+
+    sin_revisar = inventario_df[
+        inventario_df["codigo"].str.lower().isin(codigos_privados)
+        & (inventario_df["alergenos_revisados"] == False)  # noqa: E712
+    ]
+    return not sin_revisar.empty
 
 
 def calcular_alergenos_menu(fichas):
@@ -5561,6 +5845,28 @@ if st.session_state.get("recuperacion_password_activa") and obtener_usuario_actu
     mostrar_formulario_nueva_password()
     st.stop()
 
+# Canje de invitación desde enlace (?invitacion=<codigo>)
+# Se procesa tanto si el usuario ya está autenticado como si acaba de registrarse.
+_codigo_url = st.query_params.get("invitacion")
+if _codigo_url and obtener_usuario_actual():
+    st.query_params.pop("invitacion", None)
+    try:
+        _org_inv = supabase.rpc(
+            "canjear_invitacion", {"p_codigo": _codigo_url.strip()}
+        ).execute().data
+        st.session_state["auth_feedback"] = (
+            "success",
+            f"✅ ¡Te has unido a {_org_inv}! Ya puedes empezar a trabajar.",
+        )
+        cargar_organizaciones_usuario()
+        _inicializar_org_activa()
+    except Exception as _e_inv:
+        st.session_state["auth_feedback"] = (
+            "error",
+            f"No se pudo canjear la invitación: {_e_inv}",
+        )
+    st.rerun()
+
 if not st.session_state.get("portal_entrado"):
     mostrar_portal_acceso()
     st.stop()
@@ -5869,11 +6175,57 @@ with st.sidebar:
         st.success("⚡ Inventario: Conectado")
     else:
         st.warning("⚠️ Inventario: Desconectado. Configura las credenciales en los secrets.")
-        
+
     if api_key:
         st.success("🤖 CIA: Activo")
     else:
         st.warning("⚠️ CIA: Desconectado. Configura la clave de IA en los secrets.")
+
+    st.divider()
+
+    # ── Selector de organización (Fase 2) ────────────────────────────────
+    _usuario_autenticado = obtener_usuario_actual()
+    if _usuario_autenticado:
+        _orgs = st.session_state.get("organizaciones_usuario", [])
+        if len(_orgs) == 0:
+            # Intentar recargar UNA sola vez por sesión (flag evita llamadas en cada rerun).
+            # Se resetea al hacer logout (_limpiar_sesion_autenticacion lo limpia).
+            if not st.session_state.get("_orgs_carga_intentada"):
+                st.session_state["_orgs_carga_intentada"] = True
+                _orgs_recargadas = cargar_organizaciones_usuario()
+                if _orgs_recargadas:
+                    st.session_state["organizaciones_usuario"] = _orgs_recargadas
+                    _orgs = _orgs_recargadas
+
+            if len(_orgs) == 0:
+                # Tras el intento automático, si sigue vacío mostrar aviso
+                st.warning(
+                    "⚠️ Aún no perteneces a ninguna organización. "
+                    "Pide a tu gerente una invitación."
+                )
+                if st.button("🔄 Recargar permisos", key="btn_recargar_permisos_sidebar"):
+                    # El botón manual resetea el flag para permitir un nuevo intento
+                    st.session_state["_orgs_carga_intentada"] = False
+                    cargar_organizaciones_usuario()
+                    st.rerun()
+        elif len(_orgs) == 1:
+            st.caption(f"🏢 {_orgs[0]['nombre']}")
+        else:
+            # Más de una organización: mostrar selector
+            _nombres = [o["nombre"] for o in _orgs]
+            _ids     = [o["id"]     for o in _orgs]
+            _org_actual_nombre = obtener_org_activa_nombre()
+            _idx_actual = _nombres.index(_org_actual_nombre) if _org_actual_nombre in _nombres else 0
+            _seleccion = st.selectbox(
+                "Organización activa",
+                _nombres,
+                index=_idx_actual,
+                key="selector_organizacion_sidebar",
+            )
+            if _seleccion != _org_actual_nombre:
+                _nuevo_id = _ids[_nombres.index(_seleccion)]
+                establecer_org_activa(_nuevo_id, _seleccion)
+                st.rerun()
 
     st.divider()
     st.subheader("Acceso")
@@ -6841,6 +7193,355 @@ def guardar_cambios_tabla_admin(nombre_tabla, df_original, editor_state, lookups
     return cambios
 
 
+def _renderizar_inventario_propio(org_id):
+    """
+    Pantalla del gerente para gestionar precios propios e ingredientes privados.
+    Requiere que la Fase 3 (024) esté aplicada en Supabase.
+    """
+    st.caption("Precios propios sobre el catálogo global e ingredientes privados de tu organización.")
+
+    # Cargar inventario con precios resueltos vía RPC
+    try:
+        resp = supabase.rpc(
+            "obtener_inventario_para_org",
+            {"p_organizacion_id": org_id},
+        ).execute()
+        inv_data = resp.data or []
+    except Exception as e_inv:
+        _msg = str(e_inv).lower()
+        if "could not find" in _msg or "does not exist" in _msg or "pgrst202" in _msg:
+            st.info(
+                "ℹ️ La pantalla de inventario propio estará disponible cuando se aplique "
+                "la **Fase 3** de la migración multiorganización (sql/024)."
+            )
+        else:
+            st.warning(f"No se pudo cargar el inventario propio: {e_inv}")
+        return
+
+    inv_privados = [r for r in inv_data if r.get("es_privado")]
+    inv_globales = [r for r in inv_data if not r.get("es_privado")]
+
+    # ── Ingredientes privados ─────────────────────────────────────────────
+    st.markdown("#### Ingredientes privados")
+    if inv_privados:
+        _sin_revisar = [r for r in inv_privados if not r.get("alergenos_revisados")]
+        if _sin_revisar:
+            st.error(
+                f"⚠️ **{len(_sin_revisar)} ingrediente(s) privado(s) sin alérgenos revisados.** "
+                "Completa la declaración de alérgenos antes de usarlos en recetas."
+            )
+        for row in inv_privados:
+            revisado = row.get("alergenos_revisados", False)
+            icono    = "✅" if revisado else "⚠️"
+            with st.expander(f"{icono} {row['codigo']} — {row['descripcion']}"):
+                st.write(f"Familia: {row.get('familia') or '—'}  |  Unidad: {row.get('unidad_medida') or '—'}")
+                st.write(f"Precio: {row.get('precio_unidad') or '—'}  |  Merma: {row.get('merma') or '—'}")
+                if not revisado:
+                    st.warning("Alérgenos pendientes de declarar.")
+                    if st.button(
+                        "Marcar como 'Sin alérgenos de los 14'",
+                        key=f"sin_alerg_{row['codigo'][:12]}",
+                    ):
+                        try:
+                            # Llamar a marcar_alergenos_revisados vía RPC:
+                            # el trigger bloquea el UPDATE directo de estas columnas
+                            supabase.rpc("marcar_alergenos_revisados", {
+                                "p_codigo":        row["codigo"],
+                                "p_sin_alergenos": True,
+                            }).execute()
+                            cargar_inventario_supabase.clear()
+                            st.success("Marcado como sin alérgenos de los 14.")
+                            st.rerun()
+                        except Exception as e_rev:
+                            st.error(f"Error: {e_rev}")
+                # Eliminar: el trigger de BD rechaza si está en uso en alguna receta
+                if st.button(
+                    "🗑️ Eliminar ingrediente",
+                    key=f"del_priv_{row['codigo'][:12]}",
+                    type="secondary",
+                ):
+                    try:
+                        supabase.table("inventario").delete().eq(
+                            "codigo", row["codigo"]
+                        ).execute()
+                        cargar_inventario_supabase.clear()
+                        st.success(f"Ingrediente {row['codigo']} eliminado.")
+                        st.rerun()
+                    except Exception as e_del:
+                        # El trigger del 024 lanza la excepción si está en uso
+                        st.error(f"{e_del}")
+    else:
+        st.info("No hay ingredientes privados todavía.")
+
+    st.divider()
+
+    # ── Crear ingrediente privado ──────────────────────────────────────────
+    st.markdown("#### Añadir ingrediente privado")
+    with st.form("form_ingrediente_privado"):
+        new_desc    = st.text_input("Descripción *", key="priv_desc")
+        new_familia = st.text_input("Familia", key="priv_familia")
+        new_unidad  = st.selectbox("Unidad de medida", ["kg", "l", "ud", "g", "ml"], key="priv_unidad")
+        new_sin_alerg = st.checkbox(
+            "No contiene ninguno de los 14 alérgenos de la UE",
+            key="priv_sin_alerg",
+        )
+        submitted = st.form_submit_button("Crear ingrediente privado")
+
+    if submitted:
+        if not new_desc:
+            st.error("Introduce una descripción.")
+        else:
+            ok, msg, codigo_nuevo = guardar_ficha_en_inventario({
+                "descripcion":  new_desc,
+                "familia":      new_familia,
+                "unidad_medida": new_unidad,
+                "sin_alergenos": new_sin_alerg,
+                "alergeno_ids": [],
+            })
+            if ok:
+                st.success(msg)
+                cargar_inventario_supabase.clear()
+                st.rerun()
+            else:
+                st.error(msg)
+
+    st.divider()
+
+    # ── Precios propios sobre el catálogo global ───────────────────────────
+    st.markdown("#### Precios propios sobre el catálogo global")
+    st.caption("Aquí puedes definir el precio y merma que tu organización usa para ingredientes del catálogo común.")
+
+    _busqueda_precio = st.text_input(
+        "Buscar ingrediente del catálogo",
+        key="busq_precio_propio",
+        placeholder="Escribe nombre o código",
+    )
+    _globales_filtrados = [
+        r for r in inv_globales
+        if _busqueda_precio.lower() in r.get("descripcion", "").lower()
+        or _busqueda_precio.upper() in r.get("codigo", "").upper()
+    ] if _busqueda_precio else inv_globales[:20]
+
+    if not _globales_filtrados:
+        st.info("No se encontraron ingredientes.")
+    else:
+        for row in _globales_filtrados:
+            with st.expander(
+                f"{row['codigo']} — {row['descripcion']} "
+                f"({'precio propio' if row.get('precio_es_propio') else 'precio catálogo'})"
+            ):
+                col_p, col_m = st.columns(2)
+                with col_p:
+                    nuevo_precio = st.number_input(
+                        "Precio/unidad (€)",
+                        value=float(row.get("precio_unidad") or 0.0),
+                        min_value=0.0, step=0.01, format="%.4f",
+                        key=f"precio_{row['codigo'][:12]}",
+                    )
+                with col_m:
+                    nuevo_merma = st.number_input(
+                        "Merma (0-1)",
+                        value=float(row.get("merma") or 0.0),
+                        min_value=0.0, max_value=0.99, step=0.01, format="%.2f",
+                        key=f"merma_{row['codigo'][:12]}",
+                    )
+                if st.button("Guardar precio propio", key=f"save_precio_{row['codigo'][:12]}"):
+                    try:
+                        supabase.table("inventario_org").upsert({
+                            "organizacion_id":   org_id,
+                            "codigo_ingrediente": row["codigo"],
+                            "precio_unidad":     nuevo_precio if nuevo_precio > 0 else None,
+                            "merma":             nuevo_merma if nuevo_merma > 0 else None,
+                        }, on_conflict="organizacion_id,codigo_ingrediente").execute()
+                        cargar_inventario_supabase.clear()
+                        st.success(f"Precio propio guardado para {row['codigo']}.")
+                        st.rerun()
+                    except Exception as e_p:
+                        st.error(f"Error: {e_p}")
+
+
+def _renderizar_miembros_e_invitaciones(org_id, org_nombre):
+    """
+    Componente reutilizable: lista miembros y gestiona invitaciones de una org.
+    Usado tanto en render_pagina_gerente como en render_pagina_administracion.
+    Usa dos queries para evitar el join PGRST200 (no hay FK directa entre
+    organizacion_miembros y usuarios_app, ambas apuntan a auth.users).
+    """
+    tab_m, tab_i = st.tabs(["Miembros", "Invitaciones"])
+
+    with tab_m:
+        try:
+            resp_m = (
+                supabase
+                .table("organizacion_miembros")
+                .select("id, user_id, rol, activo, joined_at")
+                .eq("organizacion_id", org_id)
+                .order("joined_at")
+                .execute()
+            )
+            miembros = resp_m.data or []
+        except Exception as e_m:
+            st.error(f"Error al cargar miembros: {e_m}")
+            miembros = []
+
+        _emails_uid = {}
+        if miembros:
+            try:
+                _uids = [m["user_id"] for m in miembros if m.get("user_id")]
+                resp_ua = (
+                    supabase.table("usuarios_app")
+                    .select("user_id, email, nombre")
+                    .in_("user_id", _uids)
+                    .execute()
+                )
+                _emails_uid = {r["user_id"]: r for r in (resp_ua.data or [])}
+            except Exception:
+                pass
+
+        if not miembros:
+            st.info("No hay miembros en esta organización todavía.")
+        else:
+            for m in miembros:
+                ua     = _emails_uid.get(m.get("user_id"), {})
+                email  = ua.get("email") or m.get("user_id", "")
+                nombre = ua.get("nombre") or ""
+                rol    = m.get("rol", "chef")
+                activo = m.get("activo", True)
+                col1, col2, col3, col4 = st.columns([3, 2, 1, 1])
+                with col1:
+                    st.write(f"**{email}**" + (f" ({nombre})" if nombre else ""))
+                with col2:
+                    st.write(rol)
+                with col3:
+                    st.write("✅ activo" if activo else "❌ inactivo")
+                with col4:
+                    if activo and m.get("user_id") != obtener_user_id_actual():
+                        if st.button("Desactivar", key=f"desact_m_{org_id[:8]}_{m['id'][:8]}"):
+                            try:
+                                supabase.table("organizacion_miembros").update(
+                                    {"activo": False}
+                                ).eq("id", m["id"]).execute()
+                                st.success(f"Miembro {email} desactivado.")
+                                st.rerun()
+                            except Exception as e_d:
+                                st.error(f"Error: {e_d}")
+
+    with tab_i:
+        st.write("**Crear nueva invitación**")
+        inv_email = st.text_input(
+            "Email del invitado",
+            key=f"inv_email_{org_id[:8]}",
+            placeholder="chef@ejemplo.com",
+        )
+        inv_rol  = st.selectbox("Rol", ["chef", "gerente"], key=f"inv_rol_{org_id[:8]}")
+        inv_dias = st.number_input(
+            "Días de validez", min_value=1, max_value=30, value=7,
+            key=f"inv_dias_{org_id[:8]}",
+        )
+        if st.button("Generar invitación", key=f"btn_inv_{org_id[:8]}"):
+            if not inv_email:
+                st.warning("Introduce el email del invitado.")
+            else:
+                try:
+                    codigo = supabase.rpc("crear_invitacion", {
+                        "p_organizacion_id": org_id,
+                        "p_email":          inv_email.strip().lower(),
+                        "p_rol":            inv_rol,
+                        "p_dias_validez":   int(inv_dias),
+                    }).execute().data
+                    st.success(
+                        f"Invitación creada para {inv_email}. "
+                        "**Copia el código ahora** — no se vuelve a mostrar."
+                    )
+                    st.code(codigo, language=None)
+                    st.caption(
+                        f"El invitado abre la app, inicia sesión con {inv_email} "
+                        "y pega este código en 'Tengo una invitación'."
+                    )
+                except Exception as e_inv:
+                    st.error(f"Error al crear la invitación: {e_inv}")
+
+        st.divider()
+        st.write("**Invitaciones activas**")
+        try:
+            resp_inv = (
+                supabase.table("invitaciones")
+                .select("id, email, rol, canjeada, expires_at, created_at")
+                .eq("organizacion_id", org_id)
+                .order("created_at", desc=True)
+                .limit(50)
+                .execute()
+            )
+            invitaciones = resp_inv.data or []
+        except Exception as e_li:
+            st.error(f"Error al cargar invitaciones: {e_li}")
+            invitaciones = []
+
+        if not invitaciones:
+            st.info("No hay invitaciones generadas.")
+        else:
+            _ahora = pd.Timestamp.now(tz="UTC")
+            for inv in invitaciones:
+                col1, col2, col3, col4 = st.columns([3, 1, 2, 1])
+                with col1:
+                    st.write(inv.get("email", ""))
+                with col2:
+                    st.write(inv.get("rol", ""))
+                with col3:
+                    _canjeada   = inv.get("canjeada", False)
+                    _expires_raw = inv.get("expires_at")
+                    _expires    = pd.to_datetime(_expires_raw, utc=True) if _expires_raw else None
+                    if _canjeada and _expires is not None and _expires <= _ahora:
+                        # Revocada manualmente: canjeada=True + expires_at retroactivo
+                        st.write("🚫 Revocada")
+                    elif _canjeada:
+                        # Canjeada legítimamente por el invitado
+                        st.write("✅ Canjeada")
+                    elif _expires is not None and _expires <= _ahora:
+                        st.write("❌ Caducada")
+                    else:
+                        st.write("⏰ Pendiente")
+                with col4:
+                    if not _canjeada:
+                        if st.button("Revocar", key=f"rev_{org_id[:8]}_{inv['id'][:8]}"):
+                            try:
+                                # Marcar como revocada: canjeada=True + expires_at al pasado
+                                supabase.table("invitaciones").update({
+                                    "canjeada":   True,
+                                    "expires_at": "1970-01-01T00:00:00+00:00",
+                                }).eq("id", inv["id"]).execute()
+                                st.success("Invitación revocada.")
+                                st.rerun()
+                            except Exception as e_rv:
+                                st.error(f"Error: {e_rv}")
+
+
+def render_pagina_gerente():
+    """
+    Pantalla de gestión de la organización activa para gerentes.
+    Delega en _renderizar_miembros_e_invitaciones.
+    """
+    org_id     = obtener_org_activa_id()
+    org_nombre = obtener_org_activa_nombre()
+
+    if not org_id:
+        st.warning("No hay organización activa seleccionada.")
+        return
+    if not (usuario_es_gerente_org_activa() or usuario_actual_es_admin()):
+        st.warning("Esta pantalla solo está disponible para gerentes.")
+        return
+
+    st.subheader(f"Gestión de {org_nombre}")
+
+    ger_tab_miembros_inv, ger_tab_inv = st.tabs(["Miembros e invitaciones", "Inventario propio"])
+
+    with ger_tab_miembros_inv:
+        _renderizar_miembros_e_invitaciones(org_id, org_nombre)
+
+    with ger_tab_inv:
+        _renderizar_inventario_propio(org_id)
+
+
 def render_pagina_administracion():
     st.subheader("Administración del entorno")
     st.caption("Gestión restringida de inventario, usuarios internos y estado de configuración.")
@@ -6852,7 +7553,119 @@ def render_pagina_administracion():
             st.caption(error_perfil)
         return
 
-    admin_tab_bbdd, admin_tab_estado = st.tabs(["BBDD", "Configuración"])
+    admin_tab_orgs, admin_tab_miembros_admin, admin_tab_bbdd, admin_tab_estado = st.tabs(
+        ["Organizaciones", "Miembros", "BBDD", "Configuración"]
+    )
+
+    # ── Organizaciones ────────────────────────────────────────────────────
+    with admin_tab_orgs:
+        # Mostrar aviso 023d si viene de crear una organización externa
+        _aviso_023d = st.session_state.pop("_aviso_023d", None)
+        if _aviso_023d:
+            st.warning(_aviso_023d)
+
+        st.write("**Organizaciones registradas**")
+        try:
+            resp_orgs = (
+                supabase
+                .table("organizaciones")
+                .select("id, nombre, slug, activa, created_at")
+                .order("nombre")
+                .execute()
+            )
+            orgs_data = resp_orgs.data or []
+        except Exception as e_orgs:
+            st.error(f"Error al cargar organizaciones: {e_orgs}")
+            orgs_data = []
+
+        for org in orgs_data:
+            col1, col2, col3 = st.columns([4, 1, 1])
+            with col1:
+                st.write(f"**{org['nombre']}** (`{org['slug']}`)")
+            with col2:
+                st.write("✅ activa" if org.get("activa") else "❌ inactiva")
+            with col3:
+                if org.get("activa"):
+                    if st.button("Desactivar", key=f"desact_org_{org['id']}"):
+                        try:
+                            supabase.table("organizaciones").update(
+                                {"activa": False}
+                            ).eq("id", org["id"]).execute()
+                            st.success(f"Organización {org['nombre']} desactivada.")
+                            st.rerun()
+                        except Exception as e_des:
+                            st.error(f"Error: {e_des}")
+
+        st.divider()
+        st.write("**Crear nueva organización**")
+
+        new_org_nombre = st.text_input(
+            "Nombre",
+            key="admin_new_org_nombre",
+            placeholder="Obrador El Pinar",
+        )
+        new_org_slug = st.text_input(
+            "Slug (letras minúsculas, números y guiones)",
+            key="admin_new_org_slug",
+            placeholder="obrador-el-pinar",
+        )
+
+        if st.button("Crear organización", key="btn_admin_crear_org"):
+            if not new_org_nombre or not new_org_slug:
+                st.warning("Introduce nombre y slug.")
+            elif not __import__("re").match(r"^[a-z0-9\-]+$", new_org_slug):
+                st.error("El slug solo puede contener minúsculas, números y guiones.")
+            else:
+                try:
+                    supabase.table("organizaciones").insert({
+                        "nombre": new_org_nombre.strip(),
+                        "slug":   new_org_slug.strip(),
+                        "activa": True,
+                    }).execute()
+                    st.success(f"Organización '{new_org_nombre}' creada.")
+
+                    # ⚠️ Guardar aviso 023d en session_state ANTES del rerun,
+                    # porque st.rerun() descarta cualquier widget no persistido.
+                    if new_org_slug.strip().lower() != "samirarte":
+                        st.session_state["_aviso_023d"] = (
+                            "⚠️ **Antes de dar acceso a usuarios de esta organización**, "
+                            "ejecuta `sql/023d_admin_solo_por_invitacion.sql` en Supabase "
+                            "para que los administradores de plataforma no puedan ver los "
+                            "datos de organizaciones externas. "
+                            "Ver `docs/multiorganizacion_diseno_tecnico.md` §11 Fase 2."
+                        )
+                    st.rerun()
+                except Exception as e_cre:
+                    st.error(f"Error al crear la organización: {e_cre}")
+
+    with admin_tab_miembros_admin:
+        st.write("**Gestión de miembros por organización**")
+        try:
+            resp_orgs_admin = (
+                supabase.table("organizaciones")
+                .select("id, nombre, slug")
+                .eq("activa", True)
+                .order("nombre")
+                .execute()
+            )
+            orgs_admin = resp_orgs_admin.data or []
+        except Exception as e_oa:
+            st.error(f"Error al cargar organizaciones: {e_oa}")
+            orgs_admin = []
+
+        if not orgs_admin:
+            st.info("No hay organizaciones activas.")
+        else:
+            _nombres_admin = [o["nombre"] for o in orgs_admin]
+            _sel_org_admin = st.selectbox(
+                "Organización",
+                _nombres_admin,
+                key="admin_sel_org_miembros",
+            )
+            _org_sel = next((o for o in orgs_admin if o["nombre"] == _sel_org_admin), None)
+            if _org_sel:
+                _org_id_admin = _org_sel["id"]
+                _renderizar_miembros_e_invitaciones(_org_id_admin, _sel_org_admin)
 
     with admin_tab_bbdd:
         tabla_opciones = list(ADMIN_TABLAS_BBDD.keys())
@@ -7012,18 +7825,65 @@ def render_pagina_administracion():
         )
 
 pagina_actual = "App"
+_usuario_nav = obtener_usuario_actual()
+_org_id_nav  = obtener_org_activa_id()
+_orgs_nav    = st.session_state.get("organizaciones_usuario", [])
+
+if _usuario_nav and len(_orgs_nav) == 0:
+    # Usuario autenticado pero sin organización: solo mostrar aviso, nada más
+    st.info(
+        "👋 Bienvenido. Aún no perteneces a ninguna organización.\n\n"
+        "Pide a tu gerente que te envíe una invitación. "
+        "Si tienes un código de invitación, inicia sesión y úsalo desde el menú."
+    )
+    # Mostrar campo de canje de invitación
+    _codigo_inv = st.text_input(
+        "Código de invitación",
+        placeholder="Pega aquí el código que te enviaron",
+        key="input_canje_invitacion_main",
+    )
+    if st.button("Canjear invitación", key="btn_canjear_invitacion_main"):
+        if _codigo_inv:
+            try:
+                _org_nombre_inv = supabase.rpc(
+                    "canjear_invitacion", {"p_codigo": _codigo_inv.strip()}
+                ).execute().data
+                st.success(f"✅ ¡Te has unido a {_org_nombre_inv}! Recargando…")
+                cargar_organizaciones_usuario()
+                _inicializar_org_activa()
+                st.rerun()
+            except Exception as _e:
+                st.error(f"No se pudo canjear la invitación: {_e}")
+        else:
+            st.warning("Introduce el código de invitación.")
+    st.stop()
+
 if usuario_actual_es_admin():
+    with st.sidebar:
+        st.divider()
+        _opciones_nav = ["App", "Gerente", "Administración"] if usuario_es_gerente_org_activa() else ["App", "Administración"]
+        pagina_actual = st.radio(
+            "Navegación",
+            _opciones_nav,
+            horizontal=False,
+            key="pagina_principal",
+        )
+elif usuario_es_gerente_org_activa():
     with st.sidebar:
         st.divider()
         pagina_actual = st.radio(
             "Navegación",
-            ["App", "Administración"],
+            ["App", "Gerente"],
             horizontal=False,
-            key="pagina_principal"
+            key="pagina_principal",
         )
 
 if pagina_actual == "Administración":
     render_pagina_administracion()
+    st.stop()
+
+if pagina_actual == "Gerente":
+    render_pagina_gerente()
     st.stop()
 
 main_tab_recetas, main_tab_menus, main_tab_clientes, main_tab_facturas = st.tabs([
@@ -7460,6 +8320,15 @@ with main_tab_recetas:
     else:
         st.info("Sin alérgenos declarados")
 
+    # ⚠️ SEGURIDAD ALIMENTARIA: aviso si algún ingrediente privado no tiene
+    # alérgenos revisados (solo visible en Fase 3+ cuando alergenos_revisados existe)
+    if receta_tiene_privados_sin_revisar(st.session_state.get("ingredientes", [])):
+        st.error(
+            "⚠️ Esta receta contiene ingredientes privados cuyos alérgenos aún no "
+            "han sido revisados. Ve a **Gerente → Inventario propio** para completarlos "
+            "antes de usar esta receta en producción."
+        )
+
     with st.expander("IA: Generar receta con IA", expanded=False):
         texto_tab, imagen_tab = st.tabs(["Texto", "Imagen"])
         with texto_tab:
@@ -7840,10 +8709,18 @@ with main_tab_facturas:
                 if not factura_cliente_id:
                     st.warning("Selecciona un cliente antes de crear líneas desde un menú.")
                 else:
-                    menus_factura_df = cargar_menus_supabase(obtener_user_id_actual())
-                    menus_factura_df = menus_factura_df[
-                        menus_factura_df["user_id"].apply(lambda valor: valor_user_id_menu({"user_id": valor}) == obtener_user_id_actual())
-                    ].copy() if not menus_factura_df.empty else menus_factura_df
+                    menus_factura_df = cargar_menus_supabase(obtener_user_id_actual(), obtener_org_activa_id())
+                    _org_id_fact = obtener_org_activa_id()
+                    if _org_id_fact:
+                        menus_factura_df = menus_factura_df[
+                            menus_factura_df["organizacion_id"] == _org_id_fact
+                        ]
+                    else:
+                        menus_factura_df = menus_factura_df[
+                            menus_factura_df["user_id"].apply(
+                                lambda v: valor_user_id_menu({"user_id": v}) == obtener_user_id_actual()
+                            )
+                        ].copy() if not menus_factura_df.empty else menus_factura_df
                     if menus_factura_df.empty:
                         st.info("No hay menús guardados para crear un documento.")
                     else:
@@ -8231,7 +9108,7 @@ with main_tab_recetas:
     if not supabase_disponible:
         st.warning("El inventario no está disponible. No se pueden cargar recetas guardadas ahora.")
     else:
-        recetas_guardadas_df = cargar_recetas_supabase(obtener_user_id_actual())
+        recetas_guardadas_df = cargar_recetas_supabase(obtener_user_id_actual(), obtener_org_activa_id())
         if recetas_guardadas_df.empty:
             st.info("Todavía no hay recetas guardadas en el inventario.")
         else:
@@ -8572,7 +9449,7 @@ with main_tab_menus:
     if not supabase_disponible:
         st.warning("El inventario no está disponible. No se pueden cargar menús guardados ahora.")
     else:
-        menus_guardados_df = cargar_menus_supabase(obtener_user_id_actual())
+        menus_guardados_df = cargar_menus_supabase(obtener_user_id_actual(), obtener_org_activa_id())
         if menus_guardados_df.empty:
             st.info("Todavía no hay menús guardados en el inventario.")
         else:
@@ -8719,7 +9596,7 @@ with main_tab_menus:
     if not supabase_disponible:
         st.warning("El inventario no está disponible. No se pueden cargar recetas guardadas ahora.")
     else:
-        recetas_menu_df = cargar_recetas_supabase(obtener_user_id_actual())
+        recetas_menu_df = cargar_recetas_supabase(obtener_user_id_actual(), obtener_org_activa_id())
         if recetas_menu_df.empty:
             st.info("Todavía no hay recetas guardadas para crear un menú.")
         else:
@@ -8991,6 +9868,7 @@ with main_tab_menus:
                 if ok:
                     st.session_state["menu_id"] = menu_guardado.get("id")
                     st.success(f"{mensaje}: {menu_guardado.get('nombre', nombre_menu_limpio)}.")
+                    st.rerun()
                 else:
                     st.error(mensaje)
     with accion_menu_col2:
