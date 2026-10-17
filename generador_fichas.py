@@ -720,6 +720,7 @@ def procesar_callback_google():
     # Recuperar code_verifier: primero session_state (mismo render),
     # luego cookie (sobrevive al redirect a Google), luego st.context.cookies
     code_verifier = st.session_state.pop("_google_oauth_code_verifier", None) or None
+    _cv_source = "session_state" if code_verifier else None
 
     if not code_verifier and gestor is not None:
         try:
@@ -728,14 +729,20 @@ def procesar_callback_google():
                 code_verifier = todas.get(_GOOGLE_VERIFIER_COOKIE) or None
             if not code_verifier:
                 code_verifier = gestor.get(cookie=_GOOGLE_VERIFIER_COOKIE) or None
+            if code_verifier:
+                _cv_source = "cookie_manager"
         except Exception:
             pass
 
     if not code_verifier:
         try:
             code_verifier = st.context.cookies.get(_GOOGLE_VERIFIER_COOKIE) or None
+            if code_verifier:
+                _cv_source = "context_cookies"
         except Exception:
             pass
+
+    print(f"[google-callback] code presente: {bool(code)} | verifier presente: {bool(code_verifier)} | fuente verifier: {_cv_source}")
 
     # Limpiar URL antes del intercambio (evita reintento en siguiente rerun)
     st.query_params.clear()
@@ -762,9 +769,11 @@ def procesar_callback_google():
         sesion  = _obtener_campo_auth(respuesta, "session")
         if not usuario or not sesion:
             raise ValueError("Respuesta incompleta del servidor.")
+        print(f"[google-callback] exchange OK | user_id: {str(getattr(usuario, 'id', '') or '')[:8]}...")
 
     except Exception as e:
         _msg = str(e).lower()
+        print(f"[google-callback] exchange FALLO | tipo: {type(e).__name__} | mensaje: {_msg[:80]}")
         if "expired" in _msg or "invalid" in _msg or "used" in _msg:
             mensaje = "El enlace de Google ha caducado o ya fue usado. Inicia sesión de nuevo."
         else:
@@ -780,8 +789,13 @@ def procesar_callback_google():
         st.rerun()
         return
 
-    # Éxito: guardar sesión exactamente igual que el login con contraseña
+    # Éxito: guardar sesión.
+    # NO llamamos st.rerun() aquí: si lo hacemos, los components.html que
+    # escriben la cookie de sesión (refresh_token) no llegan al navegador.
+    # Aplicamos el JWT al cliente en esta misma ejecución para que las
+    # consultas de Supabase funcionen sin rerun.
     _guardar_sesion_supabase(usuario, sesion)
+    _aplicar_sesion_al_cliente()
     asegurar_usuario_app_supabase()
 
     # Borrar cookie de verifier
@@ -793,7 +807,11 @@ def procesar_callback_google():
 
     st.session_state["portal_entrado"] = True
     st.session_state["auth_feedback"]  = ("success", "Sesión iniciada con Google.")
-    st.rerun()
+    # Flag para que la lógica de portal continúe en este mismo render
+    # sin necesidad de rerun (el rerun ocurrirá de forma natural al
+    # final del script cuando Streamlit detecte el cambio de sesión).
+    st.session_state["_google_login_ok"] = True
+    print(f"[google-callback] sesion guardada | portal_entrado=True")
 
 
 def procesar_enlace_recuperacion():
@@ -6536,12 +6554,17 @@ with st.sidebar:
                 except Exception:
                     pass
 
-            st.link_button(
-                "🔗 Continuar con Google",
-                url=_google_url_pendiente,
-                use_container_width=True,
+            st.markdown(
+                f'<a href="{_google_url_pendiente}" target="_self" style="'
+                'display:block;text-align:center;padding:.75rem 1.5rem;'
+                'background:linear-gradient(180deg,#e8cd9a,#c9a15f);color:#141009;'
+                'font-family:Cinzel,serif;font-size:.8rem;letter-spacing:.15em;'
+                'text-transform:uppercase;text-decoration:none;border-radius:2px;'
+                'border:1px solid rgba(232,205,154,.5);">'
+                '🔗 Continuar con Google</a>',
+                unsafe_allow_html=True,
             )
-            st.caption("Serás redirigido a Google para autenticarte.")
+            st.caption("Serás redirigido a Google en la misma pestaña.")
             if st.button("Cancelar", key="btn_cancelar_google"):
                 st.session_state.pop("_google_oauth_url", None)
                 st.session_state.pop("_google_oauth_code_verifier", None)
