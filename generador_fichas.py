@@ -50,7 +50,15 @@ supabase_disponible = supabase_url is not None and supabase_key is not None
 supabase: Client = None
 if supabase_disponible:
     try:
-        supabase = create_client(supabase_url, supabase_key)
+        from supabase import ClientOptions as _ClientOptions
+        supabase = create_client(
+            supabase_url,
+            supabase_key,
+            _ClientOptions(
+                auto_refresh_token=False,  # la app gestiona el refresh manualmente
+                persist_session=False,     # no hay storage persistente en server-side
+            ),
+        )
     except Exception as e:
         st.error(f"⚠️ Error al conectar con el inventario: {e}")
         supabase_disponible = False
@@ -162,8 +170,10 @@ def _guardar_cookie_refresh_token(refresh_token):
     return True or guardado
 
 
-def _borrar_cookie_refresh_token():
-    """Elimina la cookie de sesión persistente."""
+def _borrar_cookie_refresh_token(motivo="sin especificar"):
+    """Elimina la cookie de sesión persistente. Registra el motivo en stderr."""
+    import sys
+    print(f"[cookie-borrado] motivo={motivo}", file=sys.stderr, flush=True)
     try:
         gestor = obtener_cookie_manager()
         if gestor is not None:
@@ -785,12 +795,28 @@ def procesar_callback_google():
             mensaje = "No se pudo completar el login con Google. Inténtalo de nuevo."
         st.session_state["portal_entrado"] = True
         st.session_state["auth_feedback"]  = ("error", mensaje)
-        # Borrar cookie de verifier caducada
+        # Borrar cookie de verifier caducada: CookieManager + respaldo JS
         if gestor is not None:
             try:
                 gestor.delete(_GOOGLE_VERIFIER_COOKIE, key="del_google_verifier_err")
             except Exception:
                 pass
+        try:
+            _nombre_js_gv_err = json.dumps(_GOOGLE_VERIFIER_COOKIE)
+            components.html(
+                f"""
+                <script>
+                (function() {{
+                  const name = {_nombre_js_gv_err};
+                  const secure = window.location.protocol === "https:" ? "; Secure" : "";
+                  document.cookie = name + "=; Max-Age=0; Path=/; SameSite=Lax" + secure;
+                }})();
+                </script>
+                """,
+                height=0,
+            )
+        except Exception:
+            pass
         st.rerun()
         return
 
@@ -1101,8 +1127,25 @@ def _guardar_sesion_supabase(usuario, sesion):
             _guardar_cookie_refresh_token(refresh_token)
 
 
+def _error_refresh_token_invalido(excepcion):
+    """
+    True si el error confirma que el refresh_token ya no es válido.
+    False para errores transitorios (red, timeout, servidor caído).
+    """
+    msg = str(excepcion).lower()
+    return any(k in msg for k in (
+        "invalid refresh token",
+        "invalid_grant",
+        "token not found",
+        "user not found",
+        "refresh_token_not_found",
+        "token has expired",
+        "token is expired",
+        "jwt expired",
+    ))
+
+
 def _token_caduca_pronto(access_token, margen_segundos=60):
-    """True si el JWT de acceso caduca en menos de `margen_segundos` o no se puede leer."""
     try:
         carga = str(access_token).split(".")[1]
         carga += "=" * (-len(carga) % 4)
@@ -1114,10 +1157,10 @@ def _token_caduca_pronto(access_token, margen_segundos=60):
 
 def _aplicar_sesion_al_cliente():
     """
-    El cliente se crea en cada ejecución del script solo con la clave
-    publishable, así que sin el JWT del usuario RLS trata las consultas como
-    anónimas (devuelven 0 filas sin error). Renueva el token si está a punto
-    de caducar y lo aplica a las consultas de la base de datos.
+    Aplica el JWT del usuario al cliente Supabase (necesario en cada ejecución
+    porque el cliente se crea sin sesión). Renueva el access_token si caduca.
+    Con auto_refresh_token=False el cliente no rota tokens en segundo plano,
+    así que este es el único punto de refresco.
     """
     access_token = st.session_state.get("access_token")
     refresh_token = st.session_state.get("refresh_token")
@@ -1129,21 +1172,56 @@ def _aplicar_sesion_al_cliente():
     if _token_caduca_pronto(access_token):
         if not refresh_token:
             return False
-        try:
+
+        def _hacer_refresh(rt):
             try:
-                respuesta = supabase.auth.refresh_session(refresh_token=refresh_token)
-            except TypeError:
-                respuesta = supabase.auth.refresh_session(refresh_token)
-        except Exception:
-            return False
+                try:
+                    return supabase.auth.refresh_session(refresh_token=rt)
+                except TypeError:
+                    return supabase.auth.refresh_session(rt)
+            except Exception as _e:
+                raise _e
+
+        import sys
+        try:
+            respuesta = _hacer_refresh(refresh_token)
+        except Exception as e1:
+            msg1 = str(e1).lower()
+            # "Already Used": puede que otra ejecución ya rotó el token y
+            # la cookie tiene el nuevo. Releerla y reintentar una vez.
+            if "already used" in msg1 or "already_used" in msg1:
+                rt_nuevo = _leer_cookie_refresh_token()
+                if rt_nuevo and rt_nuevo != refresh_token:
+                    try:
+                        respuesta = _hacer_refresh(rt_nuevo)
+                        # Actualizar session_state con el token de la cookie
+                        st.session_state["refresh_token"] = rt_nuevo
+                    except Exception as e2:
+                        if _error_refresh_token_invalido(e2):
+                            print(f"[refresh] token invalido (reintento): {str(e2)[:60]}", file=sys.stderr, flush=True)
+                            _limpiar_sesion_autenticacion()
+                        else:
+                            print(f"[refresh] error transitorio (reintento): {str(e2)[:60]}", file=sys.stderr, flush=True)
+                        return False
+                else:
+                    # Sin cookie nueva disponible, error transitorio
+                    print(f"[refresh] already_used sin cookie nueva: {msg1[:60]}", file=sys.stderr, flush=True)
+                    return False
+            elif _error_refresh_token_invalido(e1):
+                print(f"[refresh] token invalido: {msg1[:60]}", file=sys.stderr, flush=True)
+                _limpiar_sesion_autenticacion()
+                return False
+            else:
+                # Error transitorio (red, timeout): no borrar cookie
+                print(f"[refresh] error transitorio: {msg1[:60]}", file=sys.stderr, flush=True)
+                return False
+
         usuario = _obtener_campo_auth(respuesta, "user")
-        sesion = _obtener_campo_auth(respuesta, "session")
+        sesion  = _obtener_campo_auth(respuesta, "session")
         if not usuario or not sesion:
             return False
-        _rt_anterior = refresh_token
+        _rt_anterior = st.session_state.get("refresh_token")
         _guardar_sesion_supabase(usuario, sesion)
-        # Si el refresh_token rotó, reescribir la cookie para que el
-        # siguiente F5 no use un token ya invalidado.
         _rt_nuevo = st.session_state.get("refresh_token")
         if _rt_nuevo and _rt_nuevo != _rt_anterior:
             _guardar_cookie_refresh_token(_rt_nuevo)
@@ -1161,9 +1239,14 @@ def restaurar_sesion_supabase():
     if obtener_usuario_actual():
         if _aplicar_sesion_al_cliente():
             return True
-        # Sesión caducada y sin posibilidad de renovarla: volver al login en
-        # lugar de seguir con consultas anónimas que RLS deja vacías.
-        _limpiar_sesion_autenticacion()
+        # _aplicar_sesion_al_cliente ya distingue errores transitorios de inválidos
+        # y solo llama a _limpiar_sesion_autenticacion en caso de token inválido.
+        # Si devuelve False sin limpiar, simplemente indicamos fallo.
+        if st.session_state.get("user_id"):
+            # Sesión en session_state pero refresh falló transitoriamente: conservar
+            import sys
+            print("[restaurar] refresh transitoriamente fallido, conservando sesion", file=sys.stderr, flush=True)
+            return False
         return False
     if not supabase_disponible or supabase is None:
         return False
@@ -1203,16 +1286,22 @@ def restaurar_sesion_supabase():
         _rt_cookie = refresh_token   # el que venía de la cookie
         _guardar_sesion_supabase(usuario, sesion)
         st.session_state["_auth_cookie_retry_done"] = False
-        _aplicar_sesion_al_cliente()   # aplicar JWT al cliente antes de cargar orgs
-        # Si el token rotó respecto al que estaba en la cookie, reescribirla
+        _aplicar_sesion_al_cliente()
         _rt_nuevo = st.session_state.get("refresh_token")
         if _rt_nuevo and _rt_nuevo != _rt_cookie:
             _guardar_cookie_refresh_token(_rt_nuevo)
         asegurar_usuario_app_supabase()
         return True
-    except Exception:
-        # refresh_token revocado o caducado (p. ej. tras cerrar sesión).
-        _limpiar_sesion_autenticacion()
+    except Exception as e_restaurar:
+        # Solo limpiar sesión si el token está definitivamente inválido.
+        # Errores de red o transitorios: no borrar la cookie.
+        import sys
+        msg_r = str(e_restaurar).lower()
+        if _error_refresh_token_invalido(e_restaurar):
+            print(f"[restaurar] token invalido, limpiando sesion: {msg_r[:60]}", file=sys.stderr, flush=True)
+            _limpiar_sesion_autenticacion()
+        else:
+            print(f"[restaurar] error transitorio, conservando cookie: {msg_r[:60]}", file=sys.stderr, flush=True)
         return False
 
 
@@ -1501,7 +1590,7 @@ restaurar_sesion_supabase()
 
 # Borrado de la cookie pendiente tras cerrar sesión o rechazar el token.
 if st.session_state.get("_borrar_cookie_pendiente") and not obtener_usuario_actual():
-    _borrar_cookie_refresh_token()
+    _borrar_cookie_refresh_token("logout-o-sesion-rechazada")
 
 if 'nombre_plato' not in st.session_state:
     st.session_state['nombre_plato'] = st.session_state['receta_nombre']
