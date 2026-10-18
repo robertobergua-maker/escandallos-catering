@@ -458,31 +458,25 @@ comment on function public.ver_receta_compartida(uuid, uuid)
 --    FÓRMULA DE PRECIOS (idéntica a calcular_datos_ingrediente_receta en la app):
 --      precio_unidad_linea  = inventario_org(destino) → inventario global → 0 (privado)
 --      coste_total_linea    = cantidad_bruta * precio_unidad_linea
---      coste_total_receta   = sum(coste_total_linea)
+--      coste_total_receta   = sum(coste_total_linea)  [calculado vía UPDATE final]
 --      precio_venta_*       = 0  (márgenes no se copian del origen)
 --
 --    NUNCA se leen precios de la org origen. Solo se consulta:
 --      · inventario_org WHERE organizacion_id = p_org_destino
 --      · inventario    WHERE organizacion_id IS NULL  (catálogo global)
---    Los ingredientes privados copiados desde la org origen tienen precio 0
---    en destino hasta que el gerente los configure.
+--    Los ingredientes privados copiados tienen precio 0 en destino.
 --
---    Flujo completo:
---    1. Verifica: llamador es gerente de p_org_destino.
---    2. Verifica: existe compartición activa para (receta, p_org_destino).
---    3. Por cada ingrediente:
---       a. Global (organizacion_id IS NULL en inventario): mismo código.
---          Precio = inventario_org destino si existe, si no inventario global.
---       b. Privado (organizacion_id IS NOT NULL):
---          · Buscar copia existente en destino por copiado_de_codigo.
---          · Si no existe: crear privado en destino + copiar alérgenos +
---            alergenos_revisados = false.
---          Precio = 0 (privado nuevo, sin precio en destino).
---       Coste línea = cantidad_bruta * precio_unidad.
---    4. coste_total_receta = suma de costes de línea.
---    5. Insertar receta con coste_total calculado; precio_venta_* = 0;
---       costes_indirectos_pct, margen_beneficio_pct, iva_pct = 0.
---    6. Devolver { nueva_receta_id, privados_pendientes }.
+--    Flujo:
+--    1. Verificar: gerente de p_org_destino + compartición activa.
+--    2. Insertar cabecera de receta con coste_total = 0.
+--    3. Por cada ingrediente del bucle:
+--       · Resolver codigo_destino y precio_unidad.
+--       · INSERT directo en receta_ingredientes (sin tabla temporal
+--         para que la función sea segura de llamar N veces en la misma
+--         transacción sin "already exists").
+--    4. UPDATE recetas SET coste_total = sum(receta_ingredientes.coste_total)
+--       WHERE id = v_nueva_receta_id.
+--    5. Devolver { nueva_receta_id, privados_pendientes }.
 -- ===========================================================================
 
 create or replace function public.copiar_receta_a_org(
@@ -496,8 +490,7 @@ set search_path = public
 as $$
 declare
   v_nueva_receta_id     uuid;
-  v_privados_pendientes jsonb    := '[]'::jsonb;
-  v_coste_total_receta  numeric  := 0;
+  v_privados_pendientes jsonb   := '[]'::jsonb;
   v_ri                  record;
   v_slug_destino        text;
   v_codigo_destino      text;
@@ -508,12 +501,12 @@ declare
   v_precio_unidad       numeric;
   v_coste_linea         numeric;
 begin
-  -- 1. Verificar que el llamador es gerente de la org destino
+  -- 1a. Verificar que el llamador es gerente de la org destino
   if not public.es_gerente_org(p_org_destino) then
     raise exception 'Solo el gerente de la organización destino puede copiar recetas.';
   end if;
 
-  -- 2. Verificar compartición activa
+  -- 1b. Verificar compartición activa
   if not public._comparticion_activa_para_org(p_receta_id, p_org_destino) then
     raise exception 'La receta no está compartida con tu organización o la compartición no está activa.';
   end if;
@@ -522,7 +515,7 @@ begin
   select slug into v_slug_destino
   from public.organizaciones where id = p_org_destino;
 
-  -- 3. Resolver nombre (evitar colisión)
+  -- Resolver nombre (evitar colisión)
   select nombre into v_nombre_receta
   from public.recetas where id = p_receta_id;
 
@@ -539,150 +532,12 @@ begin
     v_nombre_receta := v_nombre_receta || ' ' || to_char(now(), 'YYYYMMDD-HH24MI');
   end if;
 
-  -- 4. Primera pasada: resolver ingredientes, calcular precios del destino
-  --    y acumular coste_total_receta ANTES de insertar la cabecera,
-  --    para poder escribirla ya con el coste correcto.
-  --
-  --    Usamos una tabla temporal de trabajo para no iterar dos veces.
-  create temp table _copia_ingredientes (
-    orden                   integer,
-    codigo_destino          text,
-    descripcion_ingrediente text,
-    cantidad_bruta          numeric,
-    unidad_medida           text,
-    merma                   numeric,
-    cantidad_neta           numeric,
-    precio_unidad           numeric,
-    coste_linea             numeric,
-    es_temporal             boolean
-  ) on commit drop;
-
-  for v_ri in
-    select ri.*
-    from public.receta_ingredientes ri
-    where ri.receta_id = p_receta_id
-    order by ri.orden
-  loop
-    v_codigo_destino := v_ri.codigo_ingrediente;
-    v_precio_unidad  := 0;
-
-    if v_ri.codigo_ingrediente is not null then
-
-      -- ── Comprobar si es ingrediente privado (organizacion_id NOT NULL) ──
-      if exists (
-        select 1 from public.inventario
-        where codigo          = v_ri.codigo_ingrediente
-          and organizacion_id is not null
-      ) then
-        -- PRIVADO: buscar copia previa en destino
-        select codigo into v_codigo_destino
-        from public.inventario
-        where organizacion_id   = p_org_destino
-          and copiado_de_codigo = v_ri.codigo_ingrediente
-        limit 1;
-
-        if v_codigo_destino is null then
-          -- Crear el privado en la org destino
-          v_prefix_dest := 'P-' || v_slug_destino || '-';
-
-          -- Lock anti-race para el secuencial de la org destino
-          perform pg_advisory_xact_lock(hashtext(p_org_destino::text));
-
-          select coalesce(
-            max(nullif(substring(codigo from '-(\d+)$'), '')::integer), 0
-          ) + 1
-          into v_seq
-          from public.inventario
-          where organizacion_id = p_org_destino
-            and codigo like (v_prefix_dest || '%');
-
-          v_nuevo_codigo := v_prefix_dest || lpad(v_seq::text, 4, '0');
-
-          -- Insertar el privado copiado en destino.
-          -- SECURITY DEFINER: saltamos el trigger _trg_inventario_protect_revisado
-          -- (que solo actúa para current_user IN ('anon','authenticated')).
-          -- Insertamos alergenos_revisados=false explícitamente.
-          insert into public.inventario (
-            codigo, familia, descripcion, unidad_medida,
-            merma, organizacion_id, alergenos_revisados, copiado_de_codigo
-            -- precio_unidad: deliberadamente omitido (queda NULL → precio 0)
-          )
-          select
-            v_nuevo_codigo,
-            i_orig.familia,
-            i_orig.descripcion,
-            i_orig.unidad_medida,
-            i_orig.merma,
-            p_org_destino,
-            false,                       -- pendiente revisión gerente destino
-            v_ri.codigo_ingrediente      -- trazabilidad
-          from public.inventario i_orig
-          where i_orig.codigo = v_ri.codigo_ingrediente;
-
-          -- ⚠️ SEGURIDAD ALIMENTARIA: copiar alérgenos del privado origen
-          insert into public.ingrediente_alergenos (codigo_ingrediente, alergeno_id)
-          select v_nuevo_codigo, ia.alergeno_id
-          from public.ingrediente_alergenos ia
-          where ia.codigo_ingrediente = v_ri.codigo_ingrediente
-          on conflict (codigo_ingrediente, alergeno_id) do nothing;
-
-          v_codigo_destino := v_nuevo_codigo;
-
-          -- Anotar privado pendiente de revisión
-          v_privados_pendientes := v_privados_pendientes || jsonb_build_object(
-            'codigo',        v_nuevo_codigo,
-            'descripcion',   (select descripcion from public.inventario
-                              where codigo = v_ri.codigo_ingrediente),
-            'codigo_origen', v_ri.codigo_ingrediente
-          );
-        end if;
-
-        -- Precio del privado copiado = 0 (no existe precio en destino todavía)
-        v_precio_unidad := 0;
-
-      else
-        -- ── GLOBAL (organizacion_id IS NULL) ──
-        -- Precio: inventario_org destino si existe, si no catálogo global.
-        -- NUNCA se lee el precio de la org origen.
-        select coalesce(io.precio_unidad, i.precio_unidad, 0)
-        into v_precio_unidad
-        from public.inventario i
-        left join public.inventario_org io
-          on  io.codigo_ingrediente = i.codigo
-          and io.organizacion_id    = p_org_destino
-        where i.codigo          = v_ri.codigo_ingrediente
-          and i.organizacion_id is null
-        limit 1;
-
-        v_precio_unidad := coalesce(v_precio_unidad, 0);
-      end if;
-    end if;
-
-    -- Fórmula coste (igual que calcular_datos_ingrediente_receta en la app):
-    --   coste_total_linea = cantidad_bruta * precio_unidad
-    v_coste_linea := v_ri.cantidad_bruta * v_precio_unidad;
-    v_coste_total_receta := v_coste_total_receta + v_coste_linea;
-
-    insert into _copia_ingredientes values (
-      v_ri.orden,
-      v_codigo_destino,
-      v_ri.descripcion_ingrediente,
-      v_ri.cantidad_bruta,
-      v_ri.unidad_medida,
-      v_ri.merma,
-      v_ri.cantidad_neta,
-      v_precio_unidad,
-      v_coste_linea,
-      (v_codigo_destino is null)
-    );
-  end loop;
-
-  -- 5. Insertar la cabecera de la receta con coste_total ya calculado
+  -- 2. Insertar cabecera con coste_total = 0 (se recalcula en el paso 4)
   insert into public.recetas (
     organizacion_id, user_id,
     codigo_receta, nombre, categoria, tipo_plato,
     raciones_base, unidad_servicio, descripcion, elaboracion, observaciones,
-    -- Márgenes a cero: no se heredan del origen; precio_venta_* tampoco
+    -- Márgenes a cero: no se heredan del origen
     costes_indirectos_pct, margen_beneficio_pct, iva_pct,
     coste_total, precio_venta_sin_iva, precio_venta_con_iva,
     activa, copiada_de
@@ -699,39 +554,150 @@ begin
     r.descripcion,
     r.elaboracion,
     r.observaciones,
-    0,                        -- costes_indirectos_pct
-    0,                        -- margen_beneficio_pct
-    0,                        -- iva_pct
-    v_coste_total_receta,     -- coste calculado con precios del destino
-    0,                        -- precio_venta_sin_iva (el gerente lo calculará)
-    0,                        -- precio_venta_con_iva
+    0, 0, 0,   -- costes_indirectos_pct, margen_beneficio_pct, iva_pct
+    0,         -- coste_total provisional; se actualiza en paso 4
+    0, 0,      -- precio_venta_sin_iva, precio_venta_con_iva
     true,
-    r.id                      -- copiada_de: trazabilidad
+    r.id       -- copiada_de: trazabilidad
   from public.recetas r
   where r.id = p_receta_id
   returning id into v_nueva_receta_id;
 
-  -- 6. Insertar las líneas de ingrediente desde la tabla temporal
-  insert into public.receta_ingredientes (
-    receta_id, codigo_ingrediente, descripcion_ingrediente,
-    cantidad_bruta, unidad_medida, merma, cantidad_neta,
-    precio_unidad, coste_total,
-    orden, es_temporal
-  )
-  select
-    v_nueva_receta_id,
-    codigo_destino,
-    descripcion_ingrediente,
-    cantidad_bruta,
-    unidad_medida,
-    merma,
-    cantidad_neta,
-    precio_unidad,
-    coste_linea,
-    orden,
-    es_temporal
-  from _copia_ingredientes
-  order by orden;
+  -- 3. Procesar cada ingrediente e insertar directamente en receta_ingredientes
+  --    (sin tabla temporal: seguro si la función se llama varias veces en la
+  --    misma transacción, ya que no persiste objetos de sesión entre llamadas)
+  for v_ri in
+    select ri.*
+    from public.receta_ingredientes ri
+    where ri.receta_id = p_receta_id
+    order by ri.orden
+  loop
+    v_codigo_destino := v_ri.codigo_ingrediente;
+    v_precio_unidad  := 0;
+
+    if v_ri.codigo_ingrediente is not null then
+
+      -- ── Privado (organizacion_id IS NOT NULL en inventario) ──────────────
+      if exists (
+        select 1 from public.inventario
+        where codigo          = v_ri.codigo_ingrediente
+          and organizacion_id is not null
+      ) then
+        -- Buscar copia previa en destino (reutilizar si ya existe)
+        select codigo into v_codigo_destino
+        from public.inventario
+        where organizacion_id   = p_org_destino
+          and copiado_de_codigo = v_ri.codigo_ingrediente
+        limit 1;
+
+        if v_codigo_destino is null then
+          -- No existe: crear el privado en la org destino
+          v_prefix_dest := 'P-' || v_slug_destino || '-';
+
+          -- Lock anti-race para el secuencial de la org destino
+          perform pg_advisory_xact_lock(hashtext(p_org_destino::text));
+
+          select coalesce(
+            max(nullif(substring(codigo from '-(\d+)$'), '')::integer), 0
+          ) + 1
+          into v_seq
+          from public.inventario
+          where organizacion_id = p_org_destino
+            and codigo like (v_prefix_dest || '%');
+
+          v_nuevo_codigo := v_prefix_dest || lpad(v_seq::text, 4, '0');
+
+          -- Insertar privado en destino (SECURITY DEFINER: trigger
+          -- _trg_inventario_protect_revisado solo actúa para role
+          -- 'anon'/'authenticated'; aquí somos el propietario de la función)
+          insert into public.inventario (
+            codigo, familia, descripcion, unidad_medida,
+            merma, organizacion_id, alergenos_revisados, copiado_de_codigo
+            -- precio_unidad omitido: queda NULL (precio 0 en destino)
+          )
+          select
+            v_nuevo_codigo,
+            i_orig.familia,
+            i_orig.descripcion,
+            i_orig.unidad_medida,
+            i_orig.merma,
+            p_org_destino,
+            false,                      -- pendiente revisión gerente destino
+            v_ri.codigo_ingrediente     -- trazabilidad
+          from public.inventario i_orig
+          where i_orig.codigo = v_ri.codigo_ingrediente;
+
+          -- ⚠️ SEGURIDAD ALIMENTARIA: copiar alérgenos del privado origen
+          insert into public.ingrediente_alergenos (codigo_ingrediente, alergeno_id)
+          select v_nuevo_codigo, ia.alergeno_id
+          from public.ingrediente_alergenos ia
+          where ia.codigo_ingrediente = v_ri.codigo_ingrediente
+          on conflict (codigo_ingrediente, alergeno_id) do nothing;
+
+          v_codigo_destino := v_nuevo_codigo;
+
+          v_privados_pendientes := v_privados_pendientes || jsonb_build_object(
+            'codigo',        v_nuevo_codigo,
+            'descripcion',   (select descripcion from public.inventario
+                              where codigo = v_ri.codigo_ingrediente),
+            'codigo_origen', v_ri.codigo_ingrediente
+          );
+        end if;
+
+        -- Precio del privado en destino = 0 (sin precio hasta que el gerente lo configure)
+        v_precio_unidad := 0;
+
+      else
+        -- ── Global (organizacion_id IS NULL) ─────────────────────────────
+        -- Precio: inventario_org destino → catálogo global → 0
+        -- NUNCA se lee el precio de la org origen
+        select coalesce(io.precio_unidad, i.precio_unidad, 0)
+        into v_precio_unidad
+        from public.inventario i
+        left join public.inventario_org io
+          on  io.codigo_ingrediente = i.codigo
+          and io.organizacion_id    = p_org_destino
+        where i.codigo          = v_ri.codigo_ingrediente
+          and i.organizacion_id is null
+        limit 1;
+
+        v_precio_unidad := coalesce(v_precio_unidad, 0);
+      end if;
+    end if;
+
+    -- Fórmula coste (idéntica a calcular_datos_ingrediente_receta en la app):
+    --   coste_total_linea = cantidad_bruta * precio_unidad
+    v_coste_linea := v_ri.cantidad_bruta * v_precio_unidad;
+
+    -- INSERT directo (sin tabla temporal)
+    insert into public.receta_ingredientes (
+      receta_id, codigo_ingrediente, descripcion_ingrediente,
+      cantidad_bruta, unidad_medida, merma, cantidad_neta,
+      precio_unidad, coste_total,
+      orden, es_temporal
+    ) values (
+      v_nueva_receta_id,
+      v_codigo_destino,
+      v_ri.descripcion_ingrediente,
+      v_ri.cantidad_bruta,
+      v_ri.unidad_medida,
+      v_ri.merma,
+      v_ri.cantidad_neta,
+      v_precio_unidad,
+      v_coste_linea,
+      v_ri.orden,
+      (v_codigo_destino is null)
+    );
+  end loop;
+
+  -- 4. Recalcular coste_total de la receta sumando las líneas ya insertadas
+  update public.recetas
+     set coste_total = (
+       select coalesce(sum(coste_total), 0)
+       from public.receta_ingredientes
+       where receta_id = v_nueva_receta_id
+     )
+   where id = v_nueva_receta_id;
 
   return jsonb_build_object(
     'nueva_receta_id',     v_nueva_receta_id,
