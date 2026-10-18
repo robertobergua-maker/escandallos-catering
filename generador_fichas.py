@@ -9581,7 +9581,7 @@ with main_tab_recetas:
             recetas_sin_propietario = recetas_guardadas_df["user_id"].apply(
                 lambda valor: valor_user_id_receta({"user_id": valor}) is None
             ).sum()
-            if obtener_user_id_actual() and recetas_sin_propietario:
+            if obtener_user_id_actual() and recetas_sin_propietario and not obtener_org_activa_id():
                 st.info(
                     f"Hay {recetas_sin_propietario} recetas antiguas sin propietario. "
                     "Puedes cargarlas para consultarlas o duplicarlas en tu cuenta."
