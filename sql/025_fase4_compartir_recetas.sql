@@ -100,10 +100,14 @@ create table if not exists public.comparticiones (
       or (destino = 'especifica' and destino_organizacion_id is not null)
     ),
   constraint comparticiones_no_autocomparticion
-    check (origen_organizacion_id <> coalesce(destino_organizacion_id, gen_random_uuid())),
-  -- Unicidad: una receta solo se puede compartir una vez con el mismo destino
+    check (
+      destino_organizacion_id is null
+      or destino_organizacion_id <> origen_organizacion_id
+    ),
+  -- Unicidad: una receta solo se puede compartir una vez con el mismo destino.
+  -- NULLS NOT DISTINCT: destino_organizacion_id NULL ('todas') también es único.
   constraint comparticiones_unique
-    unique (tipo, objeto_id, destino, destino_organizacion_id)
+    unique nulls not distinct (tipo, objeto_id, destino, destino_organizacion_id)
 );
 
 comment on table public.comparticiones
@@ -146,25 +150,37 @@ create policy comparticiones_select
   using (public.es_gerente_org(origen_organizacion_id));
 
 -- Solo gerentes de la org origen pueden crear comparticiones.
+-- El creador debe ser el propio usuario autenticado.
 drop policy if exists comparticiones_insert on public.comparticiones;
 create policy comparticiones_insert
   on public.comparticiones for insert to authenticated
   with check (
     public.es_gerente_org(origen_organizacion_id)
+    -- El campo created_by debe ser el propio usuario (no se puede suplantar)
+    and created_by = auth.uid()
     -- La receta debe pertenecer a la org origen
     and exists (
       select 1 from public.recetas r
-      where r.id          = comparticiones.objeto_id
+      where r.id            = comparticiones.objeto_id
         and r.organizacion_id = comparticiones.origen_organizacion_id
     )
   );
 
--- Solo gerentes de la org origen pueden desactivar o borrar.
+-- Solo gerentes de la org origen pueden modificar comparticiones.
+-- WITH CHECK garantiza que objeto_id siga siendo una receta de la org origen
+-- (impide mover la compartición a apuntar a una receta ajena).
 drop policy if exists comparticiones_update on public.comparticiones;
 create policy comparticiones_update
   on public.comparticiones for update to authenticated
-  using    (public.es_gerente_org(origen_organizacion_id))
-  with check (public.es_gerente_org(origen_organizacion_id));
+  using (public.es_gerente_org(origen_organizacion_id))
+  with check (
+    public.es_gerente_org(origen_organizacion_id)
+    and exists (
+      select 1 from public.recetas r
+      where r.id            = comparticiones.objeto_id
+        and r.organizacion_id = comparticiones.origen_organizacion_id
+    )
+  );
 
 drop policy if exists comparticiones_delete on public.comparticiones;
 create policy comparticiones_delete
@@ -439,50 +455,58 @@ comment on function public.ver_receta_compartida(uuid, uuid)
 -- H. FUNCIÓN: copiar_receta_a_org
 --    ⚠️  SEGURIDAD ALIMENTARIA: copia ingredientes privados con sus alérgenos.
 --
---    Flujo:
+--    FÓRMULA DE PRECIOS (idéntica a calcular_datos_ingrediente_receta en la app):
+--      precio_unidad_linea  = inventario_org(destino) → inventario global → 0 (privado)
+--      coste_total_linea    = cantidad_bruta * precio_unidad_linea
+--      coste_total_receta   = sum(coste_total_linea)
+--      precio_venta_*       = 0  (márgenes no se copian del origen)
+--
+--    NUNCA se leen precios de la org origen. Solo se consulta:
+--      · inventario_org WHERE organizacion_id = p_org_destino
+--      · inventario    WHERE organizacion_id IS NULL  (catálogo global)
+--    Los ingredientes privados copiados desde la org origen tienen precio 0
+--    en destino hasta que el gerente los configure.
+--
+--    Flujo completo:
 --    1. Verifica: llamador es gerente de p_org_destino.
 --    2. Verifica: existe compartición activa para (receta, p_org_destino).
---    3. Por cada ingrediente de la receta:
---       a. Si es global (codigo_ingrediente en catálogo global): se usa el mismo código.
---       b. Si es privado (código empieza por 'P-'):
---          · Buscar si ya existe en p_org_destino con copiado_de_codigo = código origen.
---          · Si existe: reutilizarlo (mismo código destino).
---          · Si no: crear un nuevo privado en p_org_destino con el generador
---            crear_ingrediente_privado_interno (SECURITY DEFINER, misma lógica
---            que crear_ingrediente_privado pero sin exigir es_gerente_org al llamador
---            ya que la propia función copiar_receta_a_org ya lo verificó).
---            Copiar alérgenos del privado origen al nuevo privado destino.
---            alergenos_revisados = false (el gerente destino debe revisarlos).
---    4. Insertar la nueva receta en p_org_destino con:
---       · costes_indirectos_pct, margen_beneficio_pct, iva_pct = 0 (sin datos de origen)
---       · coste_total, precio_venta_sin_iva, precio_venta_con_iva = 0
---       · copiada_de = p_receta_id
---    5. Insertar receta_ingredientes con códigos resueltos y precio_unidad = 0.
---    6. Devolver: id de la nueva receta + lista de privados pendientes de revisión.
---
---    Si el nombre de la receta ya existe en p_org_destino: añade sufijo " (copia)".
---    Si aún así choca (hay CHECK UNIQUE en el nombre): añade timestamp.
+--    3. Por cada ingrediente:
+--       a. Global (organizacion_id IS NULL en inventario): mismo código.
+--          Precio = inventario_org destino si existe, si no inventario global.
+--       b. Privado (organizacion_id IS NOT NULL):
+--          · Buscar copia existente en destino por copiado_de_codigo.
+--          · Si no existe: crear privado en destino + copiar alérgenos +
+--            alergenos_revisados = false.
+--          Precio = 0 (privado nuevo, sin precio en destino).
+--       Coste línea = cantidad_bruta * precio_unidad.
+--    4. coste_total_receta = suma de costes de línea.
+--    5. Insertar receta con coste_total calculado; precio_venta_* = 0;
+--       costes_indirectos_pct, margen_beneficio_pct, iva_pct = 0.
+--    6. Devolver { nueva_receta_id, privados_pendientes }.
 -- ===========================================================================
 
 create or replace function public.copiar_receta_a_org(
   p_receta_id   uuid,
   p_org_destino uuid
 )
-returns jsonb    -- { nueva_receta_id, privados_pendientes: [{codigo, descripcion}] }
+returns jsonb    -- { nueva_receta_id, privados_pendientes: [{codigo, descripcion, codigo_origen}] }
 language plpgsql
 security definer
 set search_path = public
 as $$
 declare
-  v_nueva_receta_id    uuid;
-  v_privados_pendientes jsonb := '[]'::jsonb;
-  v_ri                 record;
-  v_slug_destino       text;
-  v_codigo_destino     text;
-  v_nuevo_codigo       text;
-  v_nombre_receta      text;
-  v_prefix_dest        text;
-  v_seq                integer;
+  v_nueva_receta_id     uuid;
+  v_privados_pendientes jsonb    := '[]'::jsonb;
+  v_coste_total_receta  numeric  := 0;
+  v_ri                  record;
+  v_slug_destino        text;
+  v_codigo_destino      text;
+  v_nuevo_codigo        text;
+  v_nombre_receta       text;
+  v_prefix_dest         text;
+  v_seq                 integer;
+  v_precio_unidad       numeric;
+  v_coste_linea         numeric;
 begin
   -- 1. Verificar que el llamador es gerente de la org destino
   if not public.es_gerente_org(p_org_destino) then
@@ -494,7 +518,7 @@ begin
     raise exception 'La receta no está compartida con tu organización o la compartición no está activa.';
   end if;
 
-  -- Obtener slug de la org destino (necesario para generar códigos privados)
+  -- Slug de la org destino (para generar códigos P-<slug>-NNNN)
   select slug into v_slug_destino
   from public.organizaciones where id = p_org_destino;
 
@@ -508,7 +532,6 @@ begin
   ) then
     v_nombre_receta := v_nombre_receta || ' (copia)';
   end if;
-  -- Si aún choca, añadir timestamp de segundo
   if exists (
     select 1 from public.recetas
     where organizacion_id = p_org_destino and nombre = v_nombre_receta
@@ -516,12 +539,150 @@ begin
     v_nombre_receta := v_nombre_receta || ' ' || to_char(now(), 'YYYYMMDD-HH24MI');
   end if;
 
-  -- 4. Insertar la nueva receta (sin datos económicos de origen)
+  -- 4. Primera pasada: resolver ingredientes, calcular precios del destino
+  --    y acumular coste_total_receta ANTES de insertar la cabecera,
+  --    para poder escribirla ya con el coste correcto.
+  --
+  --    Usamos una tabla temporal de trabajo para no iterar dos veces.
+  create temp table _copia_ingredientes (
+    orden                   integer,
+    codigo_destino          text,
+    descripcion_ingrediente text,
+    cantidad_bruta          numeric,
+    unidad_medida           text,
+    merma                   numeric,
+    cantidad_neta           numeric,
+    precio_unidad           numeric,
+    coste_linea             numeric,
+    es_temporal             boolean
+  ) on commit drop;
+
+  for v_ri in
+    select ri.*
+    from public.receta_ingredientes ri
+    where ri.receta_id = p_receta_id
+    order by ri.orden
+  loop
+    v_codigo_destino := v_ri.codigo_ingrediente;
+    v_precio_unidad  := 0;
+
+    if v_ri.codigo_ingrediente is not null then
+
+      -- ── Comprobar si es ingrediente privado (organizacion_id NOT NULL) ──
+      if exists (
+        select 1 from public.inventario
+        where codigo          = v_ri.codigo_ingrediente
+          and organizacion_id is not null
+      ) then
+        -- PRIVADO: buscar copia previa en destino
+        select codigo into v_codigo_destino
+        from public.inventario
+        where organizacion_id   = p_org_destino
+          and copiado_de_codigo = v_ri.codigo_ingrediente
+        limit 1;
+
+        if v_codigo_destino is null then
+          -- Crear el privado en la org destino
+          v_prefix_dest := 'P-' || v_slug_destino || '-';
+
+          -- Lock anti-race para el secuencial de la org destino
+          perform pg_advisory_xact_lock(hashtext(p_org_destino::text));
+
+          select coalesce(
+            max(nullif(substring(codigo from '-(\d+)$'), '')::integer), 0
+          ) + 1
+          into v_seq
+          from public.inventario
+          where organizacion_id = p_org_destino
+            and codigo like (v_prefix_dest || '%');
+
+          v_nuevo_codigo := v_prefix_dest || lpad(v_seq::text, 4, '0');
+
+          -- Insertar el privado copiado en destino.
+          -- SECURITY DEFINER: saltamos el trigger _trg_inventario_protect_revisado
+          -- (que solo actúa para current_user IN ('anon','authenticated')).
+          -- Insertamos alergenos_revisados=false explícitamente.
+          insert into public.inventario (
+            codigo, familia, descripcion, unidad_medida,
+            merma, organizacion_id, alergenos_revisados, copiado_de_codigo
+            -- precio_unidad: deliberadamente omitido (queda NULL → precio 0)
+          )
+          select
+            v_nuevo_codigo,
+            i_orig.familia,
+            i_orig.descripcion,
+            i_orig.unidad_medida,
+            i_orig.merma,
+            p_org_destino,
+            false,                       -- pendiente revisión gerente destino
+            v_ri.codigo_ingrediente      -- trazabilidad
+          from public.inventario i_orig
+          where i_orig.codigo = v_ri.codigo_ingrediente;
+
+          -- ⚠️ SEGURIDAD ALIMENTARIA: copiar alérgenos del privado origen
+          insert into public.ingrediente_alergenos (codigo_ingrediente, alergeno_id)
+          select v_nuevo_codigo, ia.alergeno_id
+          from public.ingrediente_alergenos ia
+          where ia.codigo_ingrediente = v_ri.codigo_ingrediente
+          on conflict (codigo_ingrediente, alergeno_id) do nothing;
+
+          v_codigo_destino := v_nuevo_codigo;
+
+          -- Anotar privado pendiente de revisión
+          v_privados_pendientes := v_privados_pendientes || jsonb_build_object(
+            'codigo',        v_nuevo_codigo,
+            'descripcion',   (select descripcion from public.inventario
+                              where codigo = v_ri.codigo_ingrediente),
+            'codigo_origen', v_ri.codigo_ingrediente
+          );
+        end if;
+
+        -- Precio del privado copiado = 0 (no existe precio en destino todavía)
+        v_precio_unidad := 0;
+
+      else
+        -- ── GLOBAL (organizacion_id IS NULL) ──
+        -- Precio: inventario_org destino si existe, si no catálogo global.
+        -- NUNCA se lee el precio de la org origen.
+        select coalesce(io.precio_unidad, i.precio_unidad, 0)
+        into v_precio_unidad
+        from public.inventario i
+        left join public.inventario_org io
+          on  io.codigo_ingrediente = i.codigo
+          and io.organizacion_id    = p_org_destino
+        where i.codigo          = v_ri.codigo_ingrediente
+          and i.organizacion_id is null
+        limit 1;
+
+        v_precio_unidad := coalesce(v_precio_unidad, 0);
+      end if;
+    end if;
+
+    -- Fórmula coste (igual que calcular_datos_ingrediente_receta en la app):
+    --   coste_total_linea = cantidad_bruta * precio_unidad
+    v_coste_linea := v_ri.cantidad_bruta * v_precio_unidad;
+    v_coste_total_receta := v_coste_total_receta + v_coste_linea;
+
+    insert into _copia_ingredientes values (
+      v_ri.orden,
+      v_codigo_destino,
+      v_ri.descripcion_ingrediente,
+      v_ri.cantidad_bruta,
+      v_ri.unidad_medida,
+      v_ri.merma,
+      v_ri.cantidad_neta,
+      v_precio_unidad,
+      v_coste_linea,
+      (v_codigo_destino is null)
+    );
+  end loop;
+
+  -- 5. Insertar la cabecera de la receta con coste_total ya calculado
   insert into public.recetas (
     organizacion_id, user_id,
     codigo_receta, nombre, categoria, tipo_plato,
     raciones_base, unidad_servicio, descripcion, elaboracion, observaciones,
-    -- Campos económicos a cero: la org destino los calculará con sus propios precios
+    -- Márgenes a cero: no se heredan del origen; precio_venta_* tampoco
     costes_indirectos_pct, margen_beneficio_pct, iva_pct,
     coste_total, precio_venta_sin_iva, precio_venta_con_iva,
     activa, copiada_de
@@ -538,128 +699,42 @@ begin
     r.descripcion,
     r.elaboracion,
     r.observaciones,
-    0,   -- costes_indirectos_pct
-    0,   -- margen_beneficio_pct
-    0,   -- iva_pct
-    0,   -- coste_total
-    0,   -- precio_venta_sin_iva
-    0,   -- precio_venta_con_iva
+    0,                        -- costes_indirectos_pct
+    0,                        -- margen_beneficio_pct
+    0,                        -- iva_pct
+    v_coste_total_receta,     -- coste calculado con precios del destino
+    0,                        -- precio_venta_sin_iva (el gerente lo calculará)
+    0,                        -- precio_venta_con_iva
     true,
-    r.id -- copiada_de: trazabilidad
+    r.id                      -- copiada_de: trazabilidad
   from public.recetas r
   where r.id = p_receta_id
   returning id into v_nueva_receta_id;
 
-  -- 5. Procesar cada ingrediente de la receta origen
-  for v_ri in
-    select ri.*
-    from public.receta_ingredientes ri
-    where ri.receta_id = p_receta_id
-    order by ri.orden
-  loop
-    v_codigo_destino := v_ri.codigo_ingrediente;
-
-    -- Comprobar si el ingrediente es privado (código comienza por 'P-' en minúsculas)
-    if v_ri.codigo_ingrediente is not null
-       and lower(v_ri.codigo_ingrediente) like 'p-%'
-       and exists (
-         select 1 from public.inventario i
-         where i.codigo = v_ri.codigo_ingrediente
-           and i.organizacion_id is not null
-       )
-    then
-      -- Es un ingrediente privado de la org origen.
-      -- Buscar si ya existe una copia en la org destino (reutilizar).
-      select codigo into v_codigo_destino
-      from public.inventario
-      where organizacion_id    = p_org_destino
-        and copiado_de_codigo  = v_ri.codigo_ingrediente
-      limit 1;
-
-      if v_codigo_destino is null then
-        -- No existe copia previa: crear el ingrediente privado en la org destino.
-        v_prefix_dest := 'P-' || v_slug_destino || '-';
-
-        -- Lock anti-race para el secuencial de la org destino
-        perform pg_advisory_xact_lock(hashtext(p_org_destino::text));
-
-        select coalesce(
-          max(nullif(substring(codigo from '-(\d+)$'), '')::integer), 0
-        ) + 1
-        into v_seq
-        from public.inventario
-        where organizacion_id = p_org_destino
-          and codigo like (v_prefix_dest || '%');
-
-        v_nuevo_codigo := v_prefix_dest || lpad(v_seq::text, 4, '0');
-
-        -- Insertar el nuevo privado en la org destino
-        -- (Usamos INSERT directo porque estamos en SECURITY DEFINER y ya verificamos
-        --  el permiso del llamador arriba. El trigger _trg_inventario_protect_revisado
-        --  forzará alergenos_revisados=false para current_user='postgres'? No:
-        --  el trigger solo actúa si current_user IN ('anon','authenticated'). Aquí
-        --  current_user = propietario de la función (postgres), así que el trigger
-        --  no interviene — insertamos alergenos_revisados=false explícitamente.)
-        insert into public.inventario (
-          codigo, familia, descripcion, unidad_medida,
-          merma,  -- copiamos la merma del origen como referencia
-          organizacion_id, alergenos_revisados, copiado_de_codigo
-        )
-        select
-          v_nuevo_codigo,
-          i_orig.familia,
-          i_orig.descripcion,
-          i_orig.unidad_medida,
-          i_orig.merma,    -- merma de referencia (sin precio)
-          p_org_destino,
-          false,           -- pendiente de revisión por el gerente destino
-          v_ri.codigo_ingrediente  -- trazabilidad
-        from public.inventario i_orig
-        where i_orig.codigo = v_ri.codigo_ingrediente;
-
-        -- Copiar alérgenos del privado origen al nuevo privado destino
-        -- ⚠️  SEGURIDAD ALIMENTARIA: los alérgenos viajan con la copia.
-        insert into public.ingrediente_alergenos (codigo_ingrediente, alergeno_id)
-        select v_nuevo_codigo, ia.alergeno_id
-        from public.ingrediente_alergenos ia
-        where ia.codigo_ingrediente = v_ri.codigo_ingrediente
-        on conflict (codigo_ingrediente, alergeno_id) do nothing;
-
-        v_codigo_destino := v_nuevo_codigo;
-
-        -- Añadir a la lista de privados pendientes de revisión
-        v_privados_pendientes := v_privados_pendientes || jsonb_build_object(
-          'codigo',      v_nuevo_codigo,
-          'descripcion', (select descripcion from public.inventario where codigo = v_ri.codigo_ingrediente),
-          'codigo_origen', v_ri.codigo_ingrediente
-        );
-      end if;
-      -- Si ya existía copia previa (v_codigo_destino != null), la usamos sin tocar alérgenos
-    end if;
-
-    -- Insertar línea de ingrediente en la nueva receta (sin precio ni coste)
-    insert into public.receta_ingredientes (
-      receta_id, codigo_ingrediente, descripcion_ingrediente,
-      cantidad_bruta, unidad_medida, merma, cantidad_neta,
-      precio_unidad, coste_total,   -- a 0: la org destino los calculará
-      orden, es_temporal
-    ) values (
-      v_nueva_receta_id,
-      v_codigo_destino,
-      v_ri.descripcion_ingrediente,
-      v_ri.cantidad_bruta,
-      v_ri.unidad_medida,
-      v_ri.merma,
-      v_ri.cantidad_neta,
-      0,    -- precio_unidad
-      0,    -- coste_total
-      v_ri.orden,
-      (v_codigo_destino is null)   -- es_temporal si no se pudo resolver
-    );
-  end loop;
+  -- 6. Insertar las líneas de ingrediente desde la tabla temporal
+  insert into public.receta_ingredientes (
+    receta_id, codigo_ingrediente, descripcion_ingrediente,
+    cantidad_bruta, unidad_medida, merma, cantidad_neta,
+    precio_unidad, coste_total,
+    orden, es_temporal
+  )
+  select
+    v_nueva_receta_id,
+    codigo_destino,
+    descripcion_ingrediente,
+    cantidad_bruta,
+    unidad_medida,
+    merma,
+    cantidad_neta,
+    precio_unidad,
+    coste_linea,
+    orden,
+    es_temporal
+  from _copia_ingredientes
+  order by orden;
 
   return jsonb_build_object(
-    'nueva_receta_id',    v_nueva_receta_id,
+    'nueva_receta_id',     v_nueva_receta_id,
     'privados_pendientes', v_privados_pendientes
   );
 end;
@@ -670,8 +745,12 @@ grant  execute on function public.copiar_receta_a_org(uuid, uuid) to authenticat
 
 comment on function public.copiar_receta_a_org(uuid, uuid)
   is '⚠️  Copia una receta compartida a la org destino. '
-     'Los ingredientes privados origen se crean en destino con alergenos_revisados=false. '
-     'NUNCA copia precios, costes ni márgenes. Solo gerentes de la org destino. '
+     'Precios: inventario_org destino → catálogo global → 0 (privados copiados). '
+     'Fórmula: precio_unidad_linea * cantidad_bruta = coste_linea; '
+     'coste_total_receta = sum(coste_linea). '
+     'NUNCA lee precios de la org origen. '
+     'Privados copiados con alergenos_revisados=false (seguridad alimentaria). '
+     'Solo gerentes de la org destino. '
      'Devuelve {nueva_receta_id, privados_pendientes: [{codigo, descripcion, codigo_origen}]}.';
 
 
@@ -715,149 +794,8 @@ order by proname;
 
 
 -- ===========================================================================
--- I. PRUEBA DE AISLAMIENTO (transacción con ROLLBACK — no deja rastro)
--- Ejecutar en Supabase SQL Editor. Sustituir los UUIDs reales.
--- Requisitos: org Samirarte (slug 'samirarte'), org Pruebas (slug 'pruebas'),
---   gerente Samirarte (uid_gerente_samirarte), chef Samirarte (uid_chef_samirarte),
---   gerente Pruebas (uid_gerente_pruebas), tercera org (slug 'tercera', si existe).
+-- I. PRUEBA DE AISLAMIENTO
+-- Ver: sql/025_prueba_aislamiento.sql
 -- ===========================================================================
-/*
-begin;
-
--- ─── Preparación: crear compartición de prueba ───────────────────────────────
--- Simular como gerente de Samirarte
-set local role authenticated;
-set local "request.jwt.claims" to '{"sub":"<uid_gerente_samirarte>","role":"authenticated"}';
-
--- Crear compartición específica con Pruebas
-insert into public.comparticiones (origen_organizacion_id, tipo, objeto_id, destino, destino_organizacion_id, created_by)
-values (
-  (select id from public.organizaciones where slug='samirarte'),
-  'receta',
-  (select id from public.recetas where organizacion_id=(select id from public.organizaciones where slug='samirarte') limit 1),
-  'especifica',
-  (select id from public.organizaciones where slug='pruebas'),
-  auth.uid()
-);
--- Si falla: el gerente no es de Samirarte o no hay recetas en Samirarte.
-
--- ─── TEST 1: gerente origen puede listar sus comparticiones ──────────────────
-select count(*) as comparticiones_gerente_samirarte
-from public.comparticiones
-where origen_organizacion_id = (select id from public.organizaciones where slug='samirarte');
--- Debe ser ≥ 1.
-
--- ─── TEST 2: chef (no gerente) de Samirarte NO puede copiar ──────────────────
-set local "request.jwt.claims" to '{"sub":"<uid_chef_samirarte>","role":"authenticated"}';
-select public.copiar_receta_a_org(
-  (select id from public.recetas where organizacion_id=(select id from public.organizaciones where slug='samirarte') limit 1),
-  (select id from public.organizaciones where slug='pruebas')
-);
--- Debe lanzar excepción: "Solo el gerente de la organización destino puede copiar recetas."
-
--- ─── TEST 3: gerente Pruebas SÍ puede copiar ─────────────────────────────────
-set local "request.jwt.claims" to '{"sub":"<uid_gerente_pruebas>","role":"authenticated"}';
-select public.copiar_receta_a_org(
-  (select id from public.recetas where organizacion_id=(select id from public.organizaciones where slug='samirarte') limit 1),
-  (select id from public.organizaciones where slug='pruebas')
-);
--- Debe devolver {nueva_receta_id: "...", privados_pendientes: [...]}.
--- nueva_receta_id debe apuntar a una receta de Pruebas.
-
--- ─── TEST 4: ver_receta_compartida NO devuelve precios ───────────────────────
-set local "request.jwt.claims" to '{"sub":"<uid_gerente_pruebas>","role":"authenticated"}';
-with vista as (
-  select * from public.ver_receta_compartida(
-    (select id from public.recetas where organizacion_id=(select id from public.organizaciones where slug='samirarte') limit 1),
-    (select id from public.organizaciones where slug='pruebas')
-  )
-)
-select
-  -- Estas columnas NO deben existir en el resultado:
-  (ingredientes::text) like '%precio_unidad%'    as contiene_precio_unidad,
-  (ingredientes::text) like '%coste_total%'      as contiene_coste_total
-from vista;
--- Ambas columnas deben ser FALSE.
-
--- ─── TEST 5: tercera org NO ve la compartición específica ────────────────────
--- Si existe un usuario de una tercera org:
--- set local "request.jwt.claims" to '{"sub":"<uid_tercera_org>","role":"authenticated"}';
--- select public.listar_recetas_compartidas_conmigo(
---   (select id from public.organizaciones where slug='tercera')
--- );
--- Debe devolver 0 filas (la compartición es 'especifica' para Pruebas, no para Tercera).
-
--- ─── TEST 6: privados copiados tienen alergenos_revisados = false ─────────────
-set local "request.jwt.claims" to '{"sub":"<uid_gerente_pruebas>","role":"authenticated"}';
-select codigo, alergenos_revisados, copiado_de_codigo
-from public.inventario
-where organizacion_id = (select id from public.organizaciones where slug='pruebas')
-  and copiado_de_codigo is not null;
--- Todos deben tener alergenos_revisados = false.
--- Los alérgenos deben existir en ingrediente_alergenos para esos códigos.
-select count(*) as alergenos_copiados
-from public.ingrediente_alergenos ia
-where ia.codigo_ingrediente in (
-  select codigo from public.inventario
-  where organizacion_id = (select id from public.organizaciones where slug='pruebas')
-    and copiado_de_codigo is not null
-);
--- Debe ser > 0 si los privados origen tenían alérgenos.
-
--- ─── TEST 7: privados copiados tienen MISMOS alérgenos que el original ────────
--- Verificar que cada alérgeno del origen existe en la copia:
-select
-  ia_orig.codigo_ingrediente as codigo_origen,
-  al.nombre                  as alergeno,
-  exists (
-    select 1 from public.ingrediente_alergenos ia_dest
-    join public.inventario i_dest on i_dest.codigo = ia_dest.codigo_ingrediente
-    where i_dest.organizacion_id  = (select id from public.organizaciones where slug='pruebas')
-      and i_dest.copiado_de_codigo = ia_orig.codigo_ingrediente
-      and ia_dest.alergeno_id      = ia_orig.alergeno_id
-  ) as alergenoExisteEnCopia
-from public.ingrediente_alergenos ia_orig
-join public.inventario i_orig on i_orig.codigo = ia_orig.codigo_ingrediente
-join public.alergenos al on al.id = ia_orig.alergeno_id
-where i_orig.organizacion_id = (select id from public.organizaciones where slug='samirarte')
-  and i_orig.codigo like 'P-%';
--- alergenoExisteEnCopia debe ser TRUE en todas las filas.
-
--- ─── TEST 8: compartición desactivada → copiar falla ─────────────────────────
-set local "request.jwt.claims" to '{"sub":"<uid_gerente_samirarte>","role":"authenticated"}';
-update public.comparticiones set activa = false
-where origen_organizacion_id = (select id from public.organizaciones where slug='samirarte')
-  and tipo = 'receta';
-
-set local "request.jwt.claims" to '{"sub":"<uid_gerente_pruebas>","role":"authenticated"}';
-select public.copiar_receta_a_org(
-  (select id from public.recetas where organizacion_id=(select id from public.organizaciones where slug='samirarte') limit 1),
-  (select id from public.organizaciones where slug='pruebas')
-);
--- Debe lanzar excepción: "La receta no está compartida..."
-
--- ─── TEST 9: anon no puede ejecutar ninguna función ──────────────────────────
-set local role anon;
-select public.listar_recetas_compartidas_conmigo(
-  (select id from public.organizaciones where slug='pruebas')
-);
--- Debe lanzar excepción o "permission denied".
-
-select public.copiar_receta_a_org(
-  (select id from public.recetas limit 1),
-  (select id from public.organizaciones where slug='pruebas')
-);
--- Debe lanzar excepción o "permission denied".
-
--- ─── TEST 10: ver_receta_compartida sin compartición → excepción ─────────────
-set local "request.jwt.claims" to '{"sub":"<uid_gerente_pruebas>","role":"authenticated"}';
-select * from public.ver_receta_compartida(
-  gen_random_uuid(),   -- UUID inexistente
-  (select id from public.organizaciones where slug='pruebas')
-);
--- Debe lanzar excepción: "La receta no está compartida..."
-
-rollback;   -- La prueba no deja rastro en la BD
-*/
 
 commit;
