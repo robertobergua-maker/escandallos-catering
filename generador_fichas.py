@@ -50,7 +50,15 @@ supabase_disponible = supabase_url is not None and supabase_key is not None
 supabase: Client = None
 if supabase_disponible:
     try:
-        supabase = create_client(supabase_url, supabase_key)
+        from supabase import ClientOptions as _ClientOptions
+        supabase = create_client(
+            supabase_url,
+            supabase_key,
+            _ClientOptions(
+                auto_refresh_token=False,  # la app gestiona el refresh manualmente
+                persist_session=False,     # no hay storage persistente en server-side
+            ),
+        )
     except Exception as e:
         st.error(f"⚠️ Error al conectar con el inventario: {e}")
         supabase_disponible = False
@@ -162,8 +170,10 @@ def _guardar_cookie_refresh_token(refresh_token):
     return True or guardado
 
 
-def _borrar_cookie_refresh_token():
-    """Elimina la cookie de sesión persistente."""
+def _borrar_cookie_refresh_token(motivo="sin especificar"):
+    """Elimina la cookie de sesión persistente. Registra el motivo en stderr."""
+    import sys
+    print(f"[cookie-borrado] motivo={motivo}", file=sys.stderr, flush=True)
     try:
         gestor = obtener_cookie_manager()
         if gestor is not None:
@@ -467,6 +477,20 @@ def obtener_url_recuperacion_password():
     return urlunsplit((partes.scheme, partes.netloc, partes.path or "/", "", ""))
 
 
+def obtener_app_base_url():
+    """
+    Devuelve la URL base de la app para OAuth redirect.
+    Usa APP_BASE_URL de secrets (recomendado en producción/pruebas).
+    Fallback: misma lógica que obtener_url_recuperacion_password.
+    """
+    url = str(st.secrets.get("APP_BASE_URL", "") or "").strip()
+    if url:
+        partes = urlsplit(url)
+        if partes.scheme in {"http", "https"} and partes.netloc:
+            return urlunsplit((partes.scheme, partes.netloc, partes.path or "/", "", ""))
+    return obtener_url_recuperacion_password()
+
+
 def login_supabase(email, password):
     """
     Inicia sesion y guarda los datos basicos en session_state.
@@ -578,11 +602,267 @@ def enviar_recuperacion_password(email):
         return False, f"No se pudo enviar el correo de recuperación: {e}"
 
 
+# =============================================================================
+# Login con Google (OAuth 2.0 + PKCE)
+# =============================================================================
+# Flujo:
+#   1. iniciar_login_google() genera la URL OAuth con PKCE, guarda el
+#      code_verifier en una cookie HttpOnly de corta duración y redirige al
+#      navegador a Google.
+#   2. Google redirige de vuelta a APP_BASE_URL con ?code=... (y opcionalmente
+#      ?invitacion=... si venía en la URL original).
+#   3. procesar_callback_google() detecta ?code= al inicio de cada ejecución,
+#      recupera el code_verifier de la cookie, intercambia el código por sesión
+#      con exchange_code_for_session, guarda la sesión y limpia la URL.
+#   4. Si el usuario cancela en Google, la URL trae ?error=access_denied.
+#
+# El code_verifier sobrevive a la redirección en una cookie porque Streamlit
+# pierde session_state al salir del dominio y volver.
+# =============================================================================
+
+_GOOGLE_VERIFIER_COOKIE = "escandallos_google_verifier"
+_GOOGLE_VERIFIER_COOKIE_SEGUNDOS = 300   # 5 min; suficiente para el ida y vuelta
+
+
+def iniciar_login_google():
+    """
+    Prepara el flujo OAuth 2.0 con PKCE para Google.
+
+    Mecánica con supabase-py 2.x:
+      1. Se crea un cliente temporal con ClientOptions(flow_type="pkce").
+         El cliente principal (global) NO se modifica para no romper el
+         login con contraseña ni verify_otp (token_hash).
+      2. sign_in_with_oauth devuelve solo {url, provider}; el code_verifier
+         queda guardado en _storage del cliente temporal bajo la clave
+         "{storage_key}-code-verifier".
+      3. Se extrae el verifier del _storage y se guarda en session_state.
+         La cookie se escribe en el mismo render; en el siguiente render
+         (tras el st.rerun) se muestra st.link_button con la URL de Google.
+         Así CookieManager tiene tiempo de hidratarse antes de la redirección.
+
+    Devuelve (True, url) o (False, mensaje_error).
+    """
+    if not supabase_disponible or supabase is None:
+        return False, "El inventario no está conectado correctamente."
+
+    redirect_to = obtener_app_base_url()
+    if not redirect_to:
+        return False, (
+            "No se pudo determinar la URL de retorno. "
+            "Configura APP_BASE_URL en los secrets de Streamlit."
+        )
+
+    try:
+        from supabase import ClientOptions
+        # Cliente temporal solo para generar la URL OAuth con PKCE
+        cliente_pkce = __import__("supabase").create_client(
+            st.secrets.get("SUPABASE_URL", ""),
+            st.secrets.get("SUPABASE_KEY", ""),
+            ClientOptions(flow_type="pkce"),
+        )
+        respuesta = cliente_pkce.auth.sign_in_with_oauth({
+            "provider": "google",
+            "options":  {"redirect_to": redirect_to},
+        })
+        url = getattr(respuesta, "url", None)
+        if not url:
+            return False, "No se recibió URL de autorización de Google."
+
+        # Extraer code_verifier del storage interno del cliente temporal
+        storage     = cliente_pkce.auth._storage
+        storage_key = cliente_pkce.auth._storage_key
+        cv_key      = f"{storage_key}-code-verifier"
+        code_verifier = None
+        if hasattr(storage, "get_item"):
+            code_verifier = storage.get_item(cv_key)
+
+        # Guardar en session_state para el siguiente render (punto 3)
+        st.session_state["_google_oauth_url"]           = url
+        st.session_state["_google_oauth_code_verifier"] = code_verifier or ""
+
+        return True, url
+
+    except Exception as e:
+        return False, f"No se pudo iniciar el login con Google: {e}"
+
+
+def procesar_callback_google():
+    """
+    Detecta el retorno de Google (?code=... o ?error=...) al inicio de cada
+    ejecución de Streamlit y completa el intercambio de código por sesión.
+    Llama a esta función UNA VEZ antes de renderizar cualquier UI.
+    """
+    try:
+        code        = st.query_params.get("code")
+        error_oauth = st.query_params.get("error") or st.query_params.get("error_description")
+        # Preservar ?invitacion= si venía en la URL original
+        invitacion  = st.query_params.get("invitacion")
+    except Exception:
+        return
+
+    if error_oauth:
+        st.query_params.clear()
+        st.session_state["portal_entrado"] = True
+        if "access_denied" in str(error_oauth).lower():
+            st.session_state["auth_feedback"] = (
+                "info", "Login con Google cancelado. Puedes acceder con email y contraseña."
+            )
+        else:
+            st.session_state["auth_feedback"] = (
+                "error", "No se pudo completar el login con Google. Inténtalo de nuevo."
+            )
+        st.rerun()
+        return
+
+    if not code:
+        return   # No hay callback de Google; ejecución normal
+
+    if not supabase_disponible or supabase is None:
+        st.query_params.clear()
+        st.session_state["portal_entrado"] = True
+        st.session_state["auth_feedback"] = ("error", "El inventario no está conectado.")
+        st.rerun()
+        return
+
+    # ── Definir gestor aquí para usarlo en todos los bloques siguientes ──
+    gestor = obtener_cookie_manager()
+
+    # Recuperar code_verifier: primero session_state (mismo render),
+    # luego cookie (sobrevive al redirect a Google), luego st.context.cookies
+    code_verifier = st.session_state.pop("_google_oauth_code_verifier", None) or None
+    _cv_source = "session_state" if code_verifier else None
+
+    if not code_verifier and gestor is not None:
+        try:
+            todas = gestor.get_all()
+            if isinstance(todas, dict):
+                code_verifier = todas.get(_GOOGLE_VERIFIER_COOKIE) or None
+            if not code_verifier:
+                code_verifier = gestor.get(cookie=_GOOGLE_VERIFIER_COOKIE) or None
+            if code_verifier:
+                _cv_source = "cookie_manager"
+        except Exception:
+            pass
+
+    if not code_verifier:
+        try:
+            code_verifier = st.context.cookies.get(_GOOGLE_VERIFIER_COOKIE) or None
+            if code_verifier:
+                _cv_source = "context_cookies"
+        except Exception:
+            pass
+
+    # Logging mínimo para diagnóstico (sin valores sensibles)
+    import sys
+    print(
+        f"[google-cb] code={bool(code)} verifier={bool(code_verifier)} src={_cv_source}",
+        file=sys.stderr, flush=True,
+    )
+
+    # Limpiar URL antes del intercambio (evita reintento en siguiente rerun)
+    st.query_params.clear()
+    if invitacion:
+        st.query_params["invitacion"] = invitacion
+
+    # Sin verifier no podemos hacer el intercambio PKCE de forma segura
+    if not code_verifier:
+        st.session_state["portal_entrado"] = True
+        st.session_state["auth_feedback"]  = (
+            "error",
+            "No se pudo completar el login con Google: el código de verificación no está disponible. "
+            "Inténtalo de nuevo."
+        )
+        st.rerun()
+        return
+
+    try:
+        respuesta = supabase.auth.exchange_code_for_session({
+            "auth_code":     code,
+            "code_verifier": code_verifier,
+        })
+        usuario = _obtener_campo_auth(respuesta, "user")
+        sesion  = _obtener_campo_auth(respuesta, "session")
+        if not usuario or not sesion:
+            raise ValueError("Respuesta incompleta del servidor.")
+        print(f"[google-cb] exchange OK | uid={str(getattr(usuario, 'id', '') or '')[:8]}", file=__import__('sys').stderr, flush=True)
+
+    except Exception as e:
+        _msg = str(e).lower()
+        print(f"[google-cb] exchange ERR type={type(e).__name__} msg={_msg[:60]}", file=__import__('sys').stderr, flush=True)
+        if "expired" in _msg or "invalid" in _msg or "used" in _msg:
+            mensaje = "El enlace de Google ha caducado o ya fue usado. Inicia sesión de nuevo."
+        else:
+            mensaje = "No se pudo completar el login con Google. Inténtalo de nuevo."
+        st.session_state["portal_entrado"] = True
+        st.session_state["auth_feedback"]  = ("error", mensaje)
+        # Borrar cookie de verifier caducada: CookieManager + respaldo JS
+        if gestor is not None:
+            try:
+                gestor.delete(_GOOGLE_VERIFIER_COOKIE, key="del_google_verifier_err")
+            except Exception:
+                pass
+        try:
+            _nombre_js_gv_err = json.dumps(_GOOGLE_VERIFIER_COOKIE)
+            components.html(
+                f"""
+                <script>
+                (function() {{
+                  const name = {_nombre_js_gv_err};
+                  const secure = window.location.protocol === "https:" ? "; Secure" : "";
+                  document.cookie = name + "=; Max-Age=0; Path=/; SameSite=Lax" + secure;
+                }})();
+                </script>
+                """,
+                height=0,
+            )
+        except Exception:
+            pass
+        st.rerun()
+        return
+
+    # Éxito: guardar sesión.
+    # NO llamamos st.rerun() aquí: si lo hacemos, los components.html que
+    # escriben la cookie de sesión (refresh_token) no llegan al navegador.
+    # Aplicamos el JWT al cliente en esta misma ejecución para que las
+    # consultas de Supabase funcionen sin rerun.
+    _guardar_sesion_supabase(usuario, sesion)
+    _aplicar_sesion_al_cliente()
+    asegurar_usuario_app_supabase()
+
+    # Borrar cookie de verifier: via CookieManager y via JS
+    if gestor is not None:
+        try:
+            gestor.delete(_GOOGLE_VERIFIER_COOKIE, key="del_google_verifier_ok")
+        except Exception:
+            pass
+    try:
+        _nombre_js_gv = json.dumps(_GOOGLE_VERIFIER_COOKIE)
+        components.html(
+            f"""
+            <script>
+            (function() {{
+              const name = {_nombre_js_gv};
+              const secure = window.location.protocol === "https:" ? "; Secure" : "";
+              document.cookie = name + "=; Max-Age=0; Path=/; SameSite=Lax" + secure;
+            }})();
+            </script>
+            """,
+            height=0,
+        )
+    except Exception:
+        pass
+
+    st.session_state["portal_entrado"] = True
+    st.session_state["auth_feedback"]  = ("success", "Sesión iniciada con Google.")
+    # Flag para que la lógica de portal continúe en este mismo render
+    # sin necesidad de rerun (el rerun ocurrirá de forma natural al
+    # final del script cuando Streamlit detecte el cambio de sesión).
+    st.session_state["_google_login_ok"] = True
+
+
 def procesar_enlace_recuperacion():
     """
     Valida el enlace del correo de recuperación y abre la sesión del usuario.
-
-    La plantilla "Reset Password" de Supabase debe enlazar a
     {{ .RedirectTo }}?token_hash={{ .TokenHash }}&type=recovery. Se usa
     token_hash y no el flujo PKCE porque el cliente se crea en cada ejecución
     y perdería el code_verifier guardado al pedir el correo.
@@ -743,6 +1023,9 @@ def _limpiar_sesion_autenticacion():
     st.session_state["organizacion_activa_nombre"] = None
     st.session_state["organizaciones_usuario"] = []
     st.session_state["_orgs_carga_intentada"] = False
+    # Resetear el radio de navegación para evitar desincronización si el
+    # siguiente usuario tiene opciones distintas (admin vs gerente vs chef)
+    st.session_state.pop("pagina_principal", None)
 
 
 # =============================================================================
@@ -844,8 +1127,25 @@ def _guardar_sesion_supabase(usuario, sesion):
             _guardar_cookie_refresh_token(refresh_token)
 
 
+def _error_refresh_token_invalido(excepcion):
+    """
+    True si el error confirma que el refresh_token ya no es válido.
+    False para errores transitorios (red, timeout, servidor caído).
+    """
+    msg = str(excepcion).lower()
+    return any(k in msg for k in (
+        "invalid refresh token",
+        "invalid_grant",
+        "token not found",
+        "user not found",
+        "refresh_token_not_found",
+        "token has expired",
+        "token is expired",
+        "jwt expired",
+    ))
+
+
 def _token_caduca_pronto(access_token, margen_segundos=60):
-    """True si el JWT de acceso caduca en menos de `margen_segundos` o no se puede leer."""
     try:
         carga = str(access_token).split(".")[1]
         carga += "=" * (-len(carga) % 4)
@@ -857,10 +1157,10 @@ def _token_caduca_pronto(access_token, margen_segundos=60):
 
 def _aplicar_sesion_al_cliente():
     """
-    El cliente se crea en cada ejecución del script solo con la clave
-    publishable, así que sin el JWT del usuario RLS trata las consultas como
-    anónimas (devuelven 0 filas sin error). Renueva el token si está a punto
-    de caducar y lo aplica a las consultas de la base de datos.
+    Aplica el JWT del usuario al cliente Supabase (necesario en cada ejecución
+    porque el cliente se crea sin sesión). Renueva el access_token si caduca.
+    Con auto_refresh_token=False el cliente no rota tokens en segundo plano,
+    así que este es el único punto de refresco.
     """
     access_token = st.session_state.get("access_token")
     refresh_token = st.session_state.get("refresh_token")
@@ -872,18 +1172,59 @@ def _aplicar_sesion_al_cliente():
     if _token_caduca_pronto(access_token):
         if not refresh_token:
             return False
-        try:
+
+        def _hacer_refresh(rt):
             try:
-                respuesta = supabase.auth.refresh_session(refresh_token=refresh_token)
-            except TypeError:
-                respuesta = supabase.auth.refresh_session(refresh_token)
-        except Exception:
-            return False
+                try:
+                    return supabase.auth.refresh_session(refresh_token=rt)
+                except TypeError:
+                    return supabase.auth.refresh_session(rt)
+            except Exception as _e:
+                raise _e
+
+        import sys
+        try:
+            respuesta = _hacer_refresh(refresh_token)
+        except Exception as e1:
+            msg1 = str(e1).lower()
+            # "Already Used": puede que otra ejecución ya rotó el token y
+            # la cookie tiene el nuevo. Releerla y reintentar una vez.
+            if "already used" in msg1 or "already_used" in msg1:
+                rt_nuevo = _leer_cookie_refresh_token()
+                if rt_nuevo and rt_nuevo != refresh_token:
+                    try:
+                        respuesta = _hacer_refresh(rt_nuevo)
+                        # Actualizar session_state con el token de la cookie
+                        st.session_state["refresh_token"] = rt_nuevo
+                    except Exception as e2:
+                        if _error_refresh_token_invalido(e2):
+                            print(f"[refresh] token invalido (reintento): {str(e2)[:60]}", file=sys.stderr, flush=True)
+                            _limpiar_sesion_autenticacion()
+                        else:
+                            print(f"[refresh] error transitorio (reintento): {str(e2)[:60]}", file=sys.stderr, flush=True)
+                        return False
+                else:
+                    # Sin cookie nueva disponible, error transitorio
+                    print(f"[refresh] already_used sin cookie nueva: {msg1[:60]}", file=sys.stderr, flush=True)
+                    return False
+            elif _error_refresh_token_invalido(e1):
+                print(f"[refresh] token invalido: {msg1[:60]}", file=sys.stderr, flush=True)
+                _limpiar_sesion_autenticacion()
+                return False
+            else:
+                # Error transitorio (red, timeout): no borrar cookie
+                print(f"[refresh] error transitorio: {msg1[:60]}", file=sys.stderr, flush=True)
+                return False
+
         usuario = _obtener_campo_auth(respuesta, "user")
-        sesion = _obtener_campo_auth(respuesta, "session")
+        sesion  = _obtener_campo_auth(respuesta, "session")
         if not usuario or not sesion:
             return False
+        _rt_anterior = st.session_state.get("refresh_token")
         _guardar_sesion_supabase(usuario, sesion)
+        _rt_nuevo = st.session_state.get("refresh_token")
+        if _rt_nuevo and _rt_nuevo != _rt_anterior:
+            _guardar_cookie_refresh_token(_rt_nuevo)
         access_token = st.session_state.get("access_token")
 
     supabase.postgrest.auth(access_token)
@@ -898,9 +1239,14 @@ def restaurar_sesion_supabase():
     if obtener_usuario_actual():
         if _aplicar_sesion_al_cliente():
             return True
-        # Sesión caducada y sin posibilidad de renovarla: volver al login en
-        # lugar de seguir con consultas anónimas que RLS deja vacías.
-        _limpiar_sesion_autenticacion()
+        # _aplicar_sesion_al_cliente ya distingue errores transitorios de inválidos
+        # y solo llama a _limpiar_sesion_autenticacion en caso de token inválido.
+        # Si devuelve False sin limpiar, simplemente indicamos fallo.
+        if st.session_state.get("user_id"):
+            # Sesión en session_state pero refresh falló transitoriamente: conservar
+            import sys
+            print("[restaurar] refresh transitoriamente fallido, conservando sesion", file=sys.stderr, flush=True)
+            return False
         return False
     if not supabase_disponible or supabase is None:
         return False
@@ -937,14 +1283,25 @@ def restaurar_sesion_supabase():
             _limpiar_sesion_autenticacion()
             return False
 
+        _rt_cookie = refresh_token   # el que venía de la cookie
         _guardar_sesion_supabase(usuario, sesion)
         st.session_state["_auth_cookie_retry_done"] = False
-        _aplicar_sesion_al_cliente()   # aplicar JWT al cliente antes de cargar orgs
+        _aplicar_sesion_al_cliente()
+        _rt_nuevo = st.session_state.get("refresh_token")
+        if _rt_nuevo and _rt_nuevo != _rt_cookie:
+            _guardar_cookie_refresh_token(_rt_nuevo)
         asegurar_usuario_app_supabase()
         return True
-    except Exception:
-        # refresh_token revocado o caducado (p. ej. tras cerrar sesión).
-        _limpiar_sesion_autenticacion()
+    except Exception as e_restaurar:
+        # Solo limpiar sesión si el token está definitivamente inválido.
+        # Errores de red o transitorios: no borrar la cookie.
+        import sys
+        msg_r = str(e_restaurar).lower()
+        if _error_refresh_token_invalido(e_restaurar):
+            print(f"[restaurar] token invalido, limpiando sesion: {msg_r[:60]}", file=sys.stderr, flush=True)
+            _limpiar_sesion_autenticacion()
+        else:
+            print(f"[restaurar] error transitorio, conservando cookie: {msg_r[:60]}", file=sys.stderr, flush=True)
         return False
 
 
@@ -1233,7 +1590,7 @@ restaurar_sesion_supabase()
 
 # Borrado de la cookie pendiente tras cerrar sesión o rechazar el token.
 if st.session_state.get("_borrar_cookie_pendiente") and not obtener_usuario_actual():
-    _borrar_cookie_refresh_token()
+    _borrar_cookie_refresh_token("logout-o-sesion-rechazada")
 
 if 'nombre_plato' not in st.session_state:
     st.session_state['nombre_plato'] = st.session_state['receta_nombre']
@@ -5839,6 +6196,8 @@ def generar_excel(
 
 
 # --- INTERFAZ GRÁFICA DE STREAMLIT ---
+# Retorno de Google OAuth: va antes de cualquier otra lógica de URL.
+procesar_callback_google()
 # Vuelta desde el correo de recuperación: va antes de la portada.
 procesar_enlace_recuperacion()
 if st.session_state.get("recuperacion_password_activa") and obtener_usuario_actual():
@@ -6275,6 +6634,80 @@ with st.sidebar:
                     else:
                         st.error(mensaje_password)
     else:
+        # ── Botón Google (flujo de dos renders para que la cookie se hidrate) ──
+        _google_url_pendiente = st.session_state.get("_google_oauth_url")
+        _google_cv_pendiente  = st.session_state.get("_google_oauth_code_verifier")
+
+        if _google_url_pendiente:
+            # Render 2: URL lista → escribir cookie con el patrón de _guardar_cookie_refresh_token
+            if _google_cv_pendiente:
+                # CookieManager (mismo patrón que la cookie de sesión)
+                _gestor_g = obtener_cookie_manager()
+                try:
+                    if _gestor_g is not None:
+                        _gestor_g.set(
+                            _GOOGLE_VERIFIER_COOKIE,
+                            _google_cv_pendiente,
+                            expires_at=datetime.now() + timedelta(seconds=_GOOGLE_VERIFIER_COOKIE_SEGUNDOS),
+                            key="set_google_verifier_cookie",
+                            secure=True,
+                            same_site="lax",
+                        )
+                except Exception:
+                    pass
+
+                # Respaldo JS: escribe la cookie desde el navegador
+                try:
+                    _nombre_js   = json.dumps(_GOOGLE_VERIFIER_COOKIE)
+                    _verifier_js = json.dumps(_google_cv_pendiente)
+                    components.html(
+                        f"""
+                        <script>
+                        (function() {{
+                          const name  = {_nombre_js};
+                          const value = encodeURIComponent({_verifier_js});
+                          const secure = window.location.protocol === "https:" ? "; Secure" : "";
+                          document.cookie = name + "=" + value
+                            + "; Max-Age={_GOOGLE_VERIFIER_COOKIE_SEGUNDOS}; Path=/; SameSite=Lax" + secure;
+                        }})();
+                        </script>
+                        """,
+                        height=0,
+                    )
+                except Exception:
+                    pass
+
+            st.markdown(
+                f'<a href="{_google_url_pendiente}" target="_self" style="'
+                'display:block;text-align:center;padding:.75rem 1.5rem;'
+                'background:linear-gradient(180deg,#e8cd9a,#c9a15f);color:#141009;'
+                'font-family:Cinzel,serif;font-size:.8rem;letter-spacing:.15em;'
+                'text-transform:uppercase;text-decoration:none;border-radius:2px;'
+                'border:1px solid rgba(232,205,154,.5);">'
+                '🔗 Continuar con Google</a>',
+                unsafe_allow_html=True,
+            )
+            st.caption("Serás redirigido a Google en la misma pestaña.")
+            if st.button("Cancelar", key="btn_cancelar_google"):
+                st.session_state.pop("_google_oauth_url", None)
+                st.session_state.pop("_google_oauth_code_verifier", None)
+                st.rerun()
+        else:
+            # Botón para iniciar el flujo OAuth (render 1)
+            if supabase_disponible and st.button(
+                "Entrar con Google",
+                use_container_width=True,
+                key="btn_google_login",
+                help="Login con tu cuenta de Google",
+            ):
+                ok_g, resultado_g = iniciar_login_google()
+                if ok_g:
+                    st.rerun()   # Render 2 mostrará el link_button
+                else:
+                    st.error(resultado_g)
+
+            st.divider()
+
         with st.form("form_acceso_supabase"):
             acceso_email = st.text_input("Email")
             acceso_password = st.text_input("Contraseña", type="password")
@@ -7211,8 +7644,8 @@ def _renderizar_inventario_propio(org_id):
         _msg = str(e_inv).lower()
         if "could not find" in _msg or "does not exist" in _msg or "pgrst202" in _msg:
             st.info(
-                "ℹ️ La pantalla de inventario propio estará disponible cuando se aplique "
-                "la **Fase 3** de la migración multiorganización (sql/024)."
+                "ℹ️ La pantalla de inventario propio estará disponible "
+                "cuando se aplique la Fase 3 (sql/024)."
             )
         else:
             st.warning(f"No se pudo cargar el inventario propio: {e_inv}")
@@ -7279,7 +7712,16 @@ def _renderizar_inventario_propio(org_id):
     st.markdown("#### Añadir ingrediente privado")
     with st.form("form_ingrediente_privado"):
         new_desc    = st.text_input("Descripción *", key="priv_desc")
-        new_familia = st.text_input("Familia", key="priv_familia")
+        # Familia obligatoria: selectbox con opciones comunes + libre
+        _familias_opciones = [
+            "", "Carnes", "Pescados y mariscos", "Verduras y hortalizas",
+            "Frutas", "Lácteos y huevos", "Cereales y harinas",
+            "Legumbres y frutos secos", "Aceites y grasas", "Especias y hierbas",
+            "Salsas y condimentos", "Bebidas", "Pastelería y panadería", "Otro",
+        ]
+        new_familia = st.selectbox("Familia *", _familias_opciones, key="priv_familia")
+        if new_familia == "Otro":
+            new_familia = st.text_input("Familia (escribe la tuya)", key="priv_familia_libre")
         new_unidad  = st.selectbox("Unidad de medida", ["kg", "l", "ud", "g", "ml"], key="priv_unidad")
         new_sin_alerg = st.checkbox(
             "No contiene ninguno de los 14 alérgenos de la UE",
@@ -7290,6 +7732,8 @@ def _renderizar_inventario_propio(org_id):
     if submitted:
         if not new_desc:
             st.error("Introduce una descripción.")
+        elif not new_familia:
+            st.error("Selecciona una familia antes de guardar.")
         else:
             ok, msg, codigo_nuevo = guardar_ficha_en_inventario({
                 "descripcion":  new_desc,
