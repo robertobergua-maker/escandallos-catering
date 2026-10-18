@@ -1023,6 +1023,11 @@ def _limpiar_sesion_autenticacion():
     st.session_state["organizacion_activa_nombre"] = None
     st.session_state["organizaciones_usuario"] = []
     st.session_state["_orgs_carga_intentada"] = False
+    st.session_state.pop("_orgs_carga_uid", None)
+    # Limpiar URL de OAuth de Google para que el siguiente usuario genere la suya
+    st.session_state.pop("_google_oauth_url", None)
+    st.session_state.pop("_google_oauth_code_verifier", None)
+    st.session_state.pop("_google_login_ok", None)
     # Resetear el radio de navegación para evitar desincronización si el
     # siguiente usuario tiene opciones distintas (admin vs gerente vs chef)
     st.session_state.pop("pagina_principal", None)
@@ -1402,6 +1407,9 @@ def _inicializar_org_activa():
     orgs = cargar_organizaciones_usuario()
     if obtener_org_activa_id() is None and len(orgs) == 1:
         establecer_org_activa(orgs[0]["id"], orgs[0]["nombre"])
+    # Siempre resetear el flag para que el sidebar no quede bloqueado
+    # si la carga anterior ocurrió sin JWT válido.
+    st.session_state["_orgs_carga_intentada"] = True
 
 
 def obtener_perfil_usuario_app():
@@ -2760,6 +2768,9 @@ def datos_factura_para_supabase(factura, totales, user_id_actual):
     datos = {col: factura.get(col) for col in campos_escritura if col in factura}
     datos["user_id"] = user_id_actual
     org_id = obtener_org_activa_id()
+    if not org_id and obtener_usuario_actual():
+        # Con 023c aplicada, organizacion_id es NOT NULL: bloquear antes de intentar insertar
+        raise ValueError("Sin organización activa: no se puede guardar el documento.")
     if org_id:
         datos["organizacion_id"] = org_id
     datos["tipo_documento"] = str(datos.get("tipo_documento") or "factura").strip().lower() or "factura"
@@ -3067,6 +3078,8 @@ def guardar_receta_nueva_supabase(datos_receta, ingredientes):
     """
     if es_modo_invitado():
         return False, "Estás en modo invitado: crea una cuenta gratuita para guardar recetas.", None
+    if obtener_usuario_actual() and not obtener_org_activa_id():
+        return False, "Sin organización activa: no se puede guardar. Selecciona una organización.", None
     if not supabase_disponible or supabase is None:
         return False, "El inventario no está conectado correctamente.", None
     datos_receta, ingredientes = preparar_receta_para_una_racion(
@@ -3683,6 +3696,8 @@ def guardar_cliente_supabase(cliente):
     """
     if not supabase_disponible or supabase is None:
         return False, "El inventario no está conectado correctamente.", None
+    if obtener_usuario_actual() and not obtener_org_activa_id():
+        return False, "Sin organización activa: no se puede guardar. Selecciona una organización.", None
 
     user_id_actual = obtener_user_id_actual()
     if not user_id_actual:
@@ -5097,6 +5112,8 @@ def guardar_menu_supabase(datos_menu, lineas_menu):
     """
     if es_modo_invitado():
         return False, "Estás en modo invitado: crea una cuenta gratuita para guardar menús.", None
+    if obtener_usuario_actual() and not obtener_org_activa_id():
+        return False, "Sin organización activa: no se puede guardar. Selecciona una organización.", None
     if not supabase_disponible or supabase is None:
         return False, "El inventario no está conectado correctamente.", None
 
@@ -6226,6 +6243,12 @@ if _codigo_url and obtener_usuario_actual():
         )
     st.rerun()
 
+# Si hay sesión activa, entrar directo a la app sin pasar por la portada.
+# La portada solo se muestra sin sesión. Tras cerrar sesión, _limpiar_sesion_autenticacion
+# pone portal_entrado=False implícitamente (se resetea en el siguiente render).
+if obtener_usuario_actual() and not st.session_state.get("portal_entrado"):
+    st.session_state["portal_entrado"] = True
+
 if not st.session_state.get("portal_entrado"):
     mostrar_portal_acceso()
     st.stop()
@@ -6545,6 +6568,13 @@ with st.sidebar:
     # ── Selector de organización (Fase 2) ────────────────────────────────
     _usuario_autenticado = obtener_usuario_actual()
     if _usuario_autenticado:
+        # Resetear el flag si el user_id cambió (nuevo login) para que se
+        # recarguen las orgs con el JWT correcto del nuevo usuario.
+        _uid_actual = _usuario_autenticado.get("id", "")
+        if st.session_state.get("_orgs_carga_uid") != _uid_actual:
+            st.session_state["_orgs_carga_intentada"] = False
+            st.session_state["_orgs_carga_uid"] = _uid_actual
+
         _orgs = st.session_state.get("organizaciones_usuario", [])
         if len(_orgs) == 0:
             # Intentar recargar UNA sola vez por sesión (flag evita llamadas en cada rerun).
@@ -6634,79 +6664,70 @@ with st.sidebar:
                     else:
                         st.error(mensaje_password)
     else:
-        # ── Botón Google (flujo de dos renders para que la cookie se hidrate) ──
-        _google_url_pendiente = st.session_state.get("_google_oauth_url")
-        _google_cv_pendiente  = st.session_state.get("_google_oauth_code_verifier")
+        # ── Botón Google: URL generada una vez por sesión, enlace directo ──
+        # La URL y el verifier se generan al renderizar el bloque de acceso
+        # (no en respuesta a un click). La cookie del verifier se escribe aquí
+        # con CookieManager + JS; el enlace lleva directamente a Google.
+        if supabase_disponible:
+            # Generar URL si no existe aún para esta sesión de Streamlit
+            if not st.session_state.get("_google_oauth_url"):
+                _ok_g, _res_g = iniciar_login_google()
+                if _ok_g:
+                    st.session_state["_google_oauth_url"] = _res_g
+                # Si falla la generación, simplemente no se muestra el botón
 
-        if _google_url_pendiente:
-            # Render 2: URL lista → escribir cookie con el patrón de _guardar_cookie_refresh_token
-            if _google_cv_pendiente:
-                # CookieManager (mismo patrón que la cookie de sesión)
-                _gestor_g = obtener_cookie_manager()
-                try:
-                    if _gestor_g is not None:
-                        _gestor_g.set(
-                            _GOOGLE_VERIFIER_COOKIE,
-                            _google_cv_pendiente,
-                            expires_at=datetime.now() + timedelta(seconds=_GOOGLE_VERIFIER_COOKIE_SEGUNDOS),
-                            key="set_google_verifier_cookie",
-                            secure=True,
-                            same_site="lax",
+            _google_url_ahora  = st.session_state.get("_google_oauth_url")
+            _google_cv_ahora   = st.session_state.get("_google_oauth_code_verifier")
+
+            if _google_url_ahora:
+                # Escribir cookie del verifier en este mismo render
+                if _google_cv_ahora:
+                    _gestor_g = obtener_cookie_manager()
+                    try:
+                        if _gestor_g is not None:
+                            _gestor_g.set(
+                                _GOOGLE_VERIFIER_COOKIE,
+                                _google_cv_ahora,
+                                expires_at=datetime.now() + timedelta(seconds=_GOOGLE_VERIFIER_COOKIE_SEGUNDOS),
+                                key="set_google_verifier_cookie",
+                                secure=True,
+                                same_site="lax",
+                            )
+                    except Exception:
+                        pass
+                    try:
+                        _nombre_js_gv2 = json.dumps(_GOOGLE_VERIFIER_COOKIE)
+                        _verifier_js2  = json.dumps(_google_cv_ahora)
+                        components.html(
+                            f"""
+                            <script>
+                            (function() {{
+                              const name  = {_nombre_js_gv2};
+                              const value = encodeURIComponent({_verifier_js2});
+                              const secure = window.location.protocol === "https:" ? "; Secure" : "";
+                              document.cookie = name + "=" + value
+                                + "; Max-Age={_GOOGLE_VERIFIER_COOKIE_SEGUNDOS}; Path=/; SameSite=Lax" + secure;
+                            }})();
+                            </script>
+                            """,
+                            height=0,
                         )
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
 
-                # Respaldo JS: escribe la cookie desde el navegador
-                try:
-                    _nombre_js   = json.dumps(_GOOGLE_VERIFIER_COOKIE)
-                    _verifier_js = json.dumps(_google_cv_pendiente)
-                    components.html(
-                        f"""
-                        <script>
-                        (function() {{
-                          const name  = {_nombre_js};
-                          const value = encodeURIComponent({_verifier_js});
-                          const secure = window.location.protocol === "https:" ? "; Secure" : "";
-                          document.cookie = name + "=" + value
-                            + "; Max-Age={_GOOGLE_VERIFIER_COOKIE_SEGUNDOS}; Path=/; SameSite=Lax" + secure;
-                        }})();
-                        </script>
-                        """,
-                        height=0,
-                    )
-                except Exception:
-                    pass
-
-            st.markdown(
-                f'<a href="{_google_url_pendiente}" target="_self" style="'
-                'display:block;text-align:center;padding:.75rem 1.5rem;'
-                'background:linear-gradient(180deg,#e8cd9a,#c9a15f);color:#141009;'
-                'font-family:Cinzel,serif;font-size:.8rem;letter-spacing:.15em;'
-                'text-transform:uppercase;text-decoration:none;border-radius:2px;'
-                'border:1px solid rgba(232,205,154,.5);">'
-                '🔗 Continuar con Google</a>',
-                unsafe_allow_html=True,
-            )
-            st.caption("Serás redirigido a Google en la misma pestaña.")
-            if st.button("Cancelar", key="btn_cancelar_google"):
-                st.session_state.pop("_google_oauth_url", None)
-                st.session_state.pop("_google_oauth_code_verifier", None)
-                st.rerun()
-        else:
-            # Botón para iniciar el flujo OAuth (render 1)
-            if supabase_disponible and st.button(
-                "Entrar con Google",
-                use_container_width=True,
-                key="btn_google_login",
-                help="Login con tu cuenta de Google",
-            ):
-                ok_g, resultado_g = iniciar_login_google()
-                if ok_g:
-                    st.rerun()   # Render 2 mostrará el link_button
-                else:
-                    st.error(resultado_g)
-
-            st.divider()
+                # Enlace directo en la misma pestaña, estilo botón dorado
+                st.markdown(
+                    f'<a href="{_google_url_ahora}" target="_self" style="'
+                    'display:block;text-align:center;padding:.75rem 1.5rem;'
+                    'background:linear-gradient(180deg,#e8cd9a,#c9a15f);color:#141009;'
+                    'font-family:Cinzel,serif;font-size:.8rem;letter-spacing:.15em;'
+                    'text-transform:uppercase;text-decoration:none;border-radius:2px;'
+                    'border:1px solid rgba(232,205,154,.5);margin-bottom:.5rem;'
+                    'display:block;">'
+                    'Entrar con Google</a>',
+                    unsafe_allow_html=True,
+                )
+                st.divider()
 
         with st.form("form_acceso_supabase"):
             acceso_email = st.text_input("Email")
