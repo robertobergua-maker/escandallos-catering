@@ -6577,14 +6577,11 @@ with st.sidebar:
 
         _orgs = st.session_state.get("organizaciones_usuario", [])
         if len(_orgs) == 0:
-            # Intentar recargar UNA sola vez por sesión (flag evita llamadas en cada rerun).
-            # Se resetea al hacer logout (_limpiar_sesion_autenticacion lo limpia).
+            # Intentar recargar UNA sola vez por sesión usando _inicializar_org_activa()
+            # (no solo cargar_organizaciones_usuario) para que org_activa quede establecida.
             if not st.session_state.get("_orgs_carga_intentada"):
-                st.session_state["_orgs_carga_intentada"] = True
-                _orgs_recargadas = cargar_organizaciones_usuario()
-                if _orgs_recargadas:
-                    st.session_state["organizaciones_usuario"] = _orgs_recargadas
-                    _orgs = _orgs_recargadas
+                _inicializar_org_activa()   # carga orgs Y establece la activa si hay una sola
+                _orgs = st.session_state.get("organizaciones_usuario", [])
 
             if len(_orgs) == 0:
                 # Tras el intento automático, si sigue vacío mostrar aviso
@@ -6593,18 +6590,33 @@ with st.sidebar:
                     "Pide a tu gerente una invitación."
                 )
                 if st.button("🔄 Recargar permisos", key="btn_recargar_permisos_sidebar"):
-                    # El botón manual resetea el flag para permitir un nuevo intento
                     st.session_state["_orgs_carga_intentada"] = False
-                    cargar_organizaciones_usuario()
+                    _inicializar_org_activa()
                     st.rerun()
-        elif len(_orgs) == 1:
+
+        # Punto 2: si hay orgs pero org_activa es None, establecerla ahora.
+        # Puede ocurrir si la lista se cargó en un render sin JWT y la activa
+        # no se pudo fijar. Se hace aquí para cubrirlo en TODOS los renders.
+        if len(_orgs) > 0 and obtener_org_activa_id() is None:
+            if len(_orgs) == 1:
+                establecer_org_activa(_orgs[0]["id"], _orgs[0]["nombre"])
+                # Punto 3: rerun para que la navegación (Gerente/Admin) se pinte ya
+                st.rerun()
+            # Si hay varias, el selector la establecerá a continuación (primer render)
+
+        if len(_orgs) == 1:
             st.caption(f"🏢 {_orgs[0]['nombre']}")
-        else:
+        elif len(_orgs) > 1:
             # Más de una organización: mostrar selector
             _nombres = [o["nombre"] for o in _orgs]
             _ids     = [o["id"]     for o in _orgs]
             _org_actual_nombre = obtener_org_activa_nombre()
-            _idx_actual = _nombres.index(_org_actual_nombre) if _org_actual_nombre in _nombres else 0
+            # Si no hay activa aún, tomar la primera como default
+            if not _org_actual_nombre or _org_actual_nombre not in _nombres:
+                _org_actual_nombre = _nombres[0]
+                establecer_org_activa(_ids[0], _nombres[0])
+                st.rerun()
+            _idx_actual = _nombres.index(_org_actual_nombre)
             _seleccion = st.selectbox(
                 "Organización activa",
                 _nombres,
