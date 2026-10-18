@@ -312,11 +312,13 @@ podría empezar a rellenar `organizacion_miembros` pero no es obligatorio en F1.
 
 > ⚠️ **Decisiones OBLIGATORIAS antes de la primera organización externa (Fase 3)**
 >
-> **(a) Bloque G — vaciar precios del catálogo global**: el catálogo global actualmente
-> contiene los precios de Samirarte. Si no se vacía, otras organizaciones podrán ver
-> esos precios a través de `obtener_inventario_para_org`. El bloque G de `sql/024` está
-> comentado; hay que decidir y ejecutarlo **antes** de que entre la primera org externa.
-> Es IRREVERSIBLE sin la copia de seguridad previa.
+> **(a) Bloque G — precios del catálogo global**: ~~vaciar precios antes de la primera org externa~~
+> **DECISIÓN TOMADA (2026-10-18): el bloque G NO se aplica.**
+> Los precios del catálogo global (`inventario` con `organizacion_id IS NULL`) permanecen
+> visibles para todas las organizaciones. Es una decisión deliberada: el catálogo compartido
+> incluye los precios de referencia de Samirarte, accesibles a cualquier org como punto de
+> partida antes de definir sus propios precios en `inventario_org`.
+> El bloque G de `sql/024` queda comentado como referencia histórica únicamente.
 >
 > **(b) SMTP propio**: configurar en Supabase → Authentication → SMTP Settings el servidor
 > de correo propio antes de que usuarios de otras organizaciones reciban invitaciones.

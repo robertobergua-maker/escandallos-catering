@@ -13,9 +13,9 @@
   admins de plataforma a los datos de otras organizaciones.
   Ver docs/multiorganizacion_diseno_tecnico.md §11 Fase 2.
 - ⚠️ ANTES de dar de alta la primera organización externa, también hay que:
-  (a) DECIDIR Y APLICAR el bloque G de sql/024 (vaciar precios del catálogo global para
-      que Samirarte no filtre sus precios a otras orgs a través del catálogo compartido).
-      El bloque está comentado en 024 esperando esta decisión; es IRREVERSIBLE sin backup.
+  (a) ~~DECIDIR Y APLICAR el bloque G de sql/024~~ **DECISIÓN TOMADA (2026-10-18): el bloque G
+      NO se aplica.** Los precios del catálogo global (inventario con organizacion_id null)
+      permanecen visibles para todas las organizaciones. Es una decisión deliberada de Samira.
   (b) CONFIGURAR SMTP PROPIO en Supabase (Authentication → SMTP Settings) para que los
       correos de recuperación de contraseña e invitación lleguen con el dominio correcto
       y no fallen por límites del SMTP gratuito de Supabase.
