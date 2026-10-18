@@ -267,14 +267,16 @@ migración correspondiente.
 | `sql/022_fase1_organizaciones_miembros.sql` | 1 | Tablas org + miembros + funciones de rol + datos Samirarte |
 | `sql/023_fase2_organizacion_id_rls.sql` | 2 | `organizacion_id` en tablas + RLS nueva + invitaciones |
 | `sql/024_fase3_catalogo_global_precios_org.sql` | 3 | `inventario_org` + separar catálogo |
-| `sql/025_fase4_comparticiones_copia.sql` | 4 | Comparticiones + columna `copiada_de` |
+| `sql/025_fase4_compartir_recetas.sql` | 4 | Comparticiones + columna `copiada_de` + 5 funciones SECURITY DEFINER |
+| `sql/025_rollback.sql` | 4 | Rollback de 025 |
 | `sql/023a_fase2_columnas_nullable_backfill.sql` | 2A | Columnas nullable + backfill Samirarte + invitaciones |
 | `sql/023c_fase2_not_null_rls.sql` | 2C | NOT NULL + swap de políticas RLS |
 | `sql/023c_rollback.sql` | 2C | Rollback del paso C |
 | `sql/023d_admin_solo_por_invitacion.sql` | 2D | ⚠️ OBLIGATORIO antes de primera org externa |
 | `sql/023d_rollback.sql` | 2D | Rollback de 023d |
 | `sql/024_fase3_catalogo_global_precios_org.sql` | 3 | `inventario_org` + separar catálogo |
-| `sql/025_fase4_comparticiones_copia.sql` | 4 | Comparticiones + columna `copiada_de` |
+| `sql/025_fase4_compartir_recetas.sql` | 4 | Comparticiones + columna `copiada_de` + 5 funciones SECURITY DEFINER |
+| `sql/025_rollback.sql` | 4 | Rollback de 025 |
 | `sql/026_fase5_facturacion_por_org.sql` | 5 | `organizacion_config` + numeración propia |
 
 ---
@@ -324,27 +326,75 @@ podría empezar a rellenar `organizacion_miembros` pero no es obligatorio en F1.
 > de correo propio antes de que usuarios de otras organizaciones reciban invitaciones.
 > El SMTP gratuito de Supabase tiene límites bajos y el dominio remitente no es el del proyecto.
 
-### Fase 4 — Compartir
+### Fase 4 — Compartir recetas ✅ (implementada 2026-10-18)
 
-> ⚠️ **Ingredientes privados en recetas compartidas**
+**Fichero SQL**: `sql/025_fase4_compartir_recetas.sql` (reescrito desde cero;
+el borrador original `sql/025_fase4_comparticiones_copia.sql` era obsoleto).
+**Rollback**: `sql/025_rollback.sql`.
+
+#### Decisiones de diseño tomadas
+
+| Decisión | Valor elegido | Motivo |
+|---|---|---|
+| Scope inicial | Solo recetas (no menús) | Los menús se abordan en una fase posterior |
+| Quién puede compartir | Solo el gerente de la org origen | Misma restricción que crear/editar ingredientes privados |
+| Destino | Una org concreta o todas (param `p_org_destino`) | Decisión Samira |
+| Tipo de copia | Copia independiente (no referencia) | Cada org puede editar la receta copiada sin afectar a la original |
+| Precios | **NUNCA** se copian precios de la org origen | Seguridad: la org destino usa sus propios precios de `inventario_org` |
+| Ingredientes privados | Se copian a la org destino con sus alérgenos | Opción 2: no bloquear comparticiones válidas |
+| `alergenos_revisados` en privados copiados | **`false`** | El gerente destino debe revisar explícitamente |
+| `copiado_de_codigo` en `inventario` | Trazabilidad + reutilización (no copiar dos veces) | Evita duplicados si la misma receta se vuelve a compartir |
+| `origen_organizacion_id` en comparticiones | NOT NULL | En esta fase solo gerentes comparten (no admin de plataforma) |
+| Respeta 023d | Sí — sin bypass admin | Las funciones son SECURITY DEFINER con validación explícita |
+| Subrecetas | No aplica (no existe ese esquema) | No hay bloqueo necesario |
+
+> ⚠️ **Ingredientes privados en recetas compartidas — SEGURIDAD ALIMENTARIA**
 >
 > Si una receta de la org A contiene ingredientes privados (código `P-<slug>-NNNN`),
 > al copiarla a la org B mediante `copiar_receta_a_org` (sql/025) **no se pueden perder
-> los alérgenos**. Las opciones son:
+> los alérgenos**. La función:
 >
-> 1. **Bloquear la copia** si la receta contiene privados de la org origen que no existen
->    en el catálogo global ni en la org destino.
-> 2. **Copiar también el ingrediente privado** a la org destino con sus alérgenos, marcando
->    `alergenos_revisados = true` (ya que vienen declarados de origen).
+> 1. Detecta los ingredientes de la receta que son privados de la org origen.
+> 2. Los copia a la org destino (`inventario` con el `organizacion_id` de destino),
+>    incluyendo **todos los alérgenos** (`ingrediente_alergenos`).
+> 3. Marca `alergenos_revisados = false` en el ingrediente copiado para que el gerente
+>    destino los valide explícitamente.
+> 4. Reutiliza el ingrediente si `copiado_de_codigo` ya existe en la org destino
+>    (en lugar de duplicar).
+> 5. Copia la receta con los referencias apuntando a los nuevos ingredientes destino.
 >
-> La opción 2 es preferible para no bloquear comparticiones válidas. La función
-> `copiar_receta_a_org` del 025 debe detectar privados y copiarlos antes de copiar la receta.
-> Esto requiere que el gerente destino tenga permiso para crear privados (lo tiene).
-> Ver `sql/025_fase4_comparticiones_copia.sql` para implementar este comportamiento.
+> La app muestra un aviso (`receta_tiene_privados_sin_revisar`) en la receta copiada
+> mientras haya ingredientes privados pendientes de revisión.
 
-- Botón "Compartir" en receta/menú propio (solo gerente).
-- Sección "Recetas y menús compartidos conmigo" en modo lectura.
-- Botón "Copiar a mi organización".
+#### Cambios en la base de datos (sql/025)
+
+- `ALTER TABLE recetas ADD COLUMN copiada_de uuid REFERENCES recetas(id) ON DELETE SET NULL`
+- `ALTER TABLE inventario ADD COLUMN copiado_de_codigo text`
+- `CREATE TABLE comparticiones` (RLS sin políticas `*_admin_all`)
+- Funciones SECURITY DEFINER:
+  - `_comparticion_activa_para_org(uuid, uuid)` — interna, REVOKE a todos
+  - `listar_organizaciones_destino()` — solo gerentes
+  - `listar_recetas_compartidas_conmigo(p_org uuid)` — miembros de la org
+  - `ver_receta_compartida(p_receta_id uuid, p_org uuid)` — sin precios
+  - `copiar_receta_a_org(p_receta_id uuid, p_org_destino uuid)` — gerente destino
+
+#### Cambios en la app (generador_fichas.py)
+
+- `RECETAS_COLUMNAS` incluye `copiada_de`.
+- Botón "Compartir" junto al selector de recetas guardadas (solo gerentes);
+  abre selector de org destino inline y llama a `copiar_receta_a_org`.
+- Función `_renderizar_compartir_recetas(org_id)` en la pestaña Gerente:
+  lista las recetas compartidas a otras orgs y permite revocar.
+- Sección "Recetas compartidas con mi organización" en `main_tab_recetas`:
+  vista previa sin precios + botón "Copiar a mi organización".
+
+#### Orden de aplicación
+
+```
+sql/025_fase4_compartir_recetas.sql
+```
+
+Rollback: `sql/025_rollback.sql`.
 
 ### Fase 5 — Facturación
 - Pantalla de configuración de facturación por organización.
