@@ -6970,22 +6970,21 @@ if _logo_org_b64:
 else:
     _hero_icono_html = ""
 usuario_topbar = (usuario_actual or {}).get("email") or "Usuario"
-st.markdown(
-    f"""
-    <div class="samirarte-topbar">
-        <div class="samirarte-brand">{logo_html}</div>
-        <div class="samirarte-user">Usuario · {html.escape(str(usuario_topbar))}</div>
-    </div>
-    <div class="samirarte-hero">
-        {_hero_icono_html}
-        <div>
-            <h1>{_titulo_hero}</h1>
-            <p>Gestiona tus recetas y controla costes de forma eficiente</p>
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+# HTML en una sola cadena sin sangría inicial ni líneas en blanco: si se dejan
+# líneas indentadas (>=4 espacios) o vacías, Markdown las interpreta como bloque
+# de código y muestra el HTML literal (p.ej. cuando _hero_icono_html está vacío).
+_cabecera_html = "".join([
+    '<div class="samirarte-topbar">',
+    f'<div class="samirarte-brand">{logo_html}</div>',
+    f'<div class="samirarte-user">Usuario · {html.escape(str(usuario_topbar))}</div>',
+    '</div>',
+    '<div class="samirarte-hero">',
+    _hero_icono_html,
+    f'<div><h1>{_titulo_hero}</h1>',
+    '<p>Gestiona tus recetas y controla costes de forma eficiente</p></div>',
+    '</div>',
+])
+st.markdown(_cabecera_html, unsafe_allow_html=True)
 
 # Panel lateral indicador de conexiones activas
 with st.sidebar:
