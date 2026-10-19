@@ -239,8 +239,10 @@ begin
     when 'factura'               then 'FAC'
     when 'factura_rectificativa' then 'REC'
     when 'presupuesto'           then 'PRE'
-    else raise exception 'Tipo de documento no soportado: %', p_tipo_documento
   end;
+  if v_prefijo is null then
+    raise exception 'Tipo de documento no soportado: %', p_tipo_documento;
+  end if;
 
   -- Lock exclusivo por org+tipo+año (estable y único)
   perform pg_advisory_xact_lock(
