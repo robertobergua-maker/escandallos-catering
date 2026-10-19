@@ -5059,7 +5059,58 @@ def cargar_factura_en_sesion(factura, lineas_df):
     if lineas_df is not None and not lineas_df.empty:
         for _, linea in lineas_df.iterrows():
             lineas.append(calcular_linea_factura(linea.to_dict()))
-    st.session_state["factura_lineas_actual"] = lineas or [linea_factura_vacia()]
+    lineas = lineas or [linea_factura_vacia()]
+
+    # Re-hidratar el COSTE de las líneas de menú. factura_lineas no persiste
+    # coste_total_menu (es un campo auxiliar), así que al recargar el coste/margen/
+    # food-cost salían a 0. Recomputamos el coste de cada menú de origen desde su
+    # detalle actual y lo asignamos a las líneas de ese menú.
+    _lineas = _rehidratar_coste_lineas_menu(lineas)
+    st.session_state["factura_lineas_actual"] = _lineas
+
+
+def _rehidratar_coste_lineas_menu(lineas):
+    """
+    Para cada menú distinto presente en las líneas (origen_tipo='menu'),
+    carga su detalle y recalcula coste_total_menu / coste_linea_menu_documento,
+    asignándolo a sus líneas. Si el menú ya no existe, deja el coste en 0.
+    No altera precios ni importes de venta.
+    """
+    if not lineas:
+        return lineas
+    # Agrupar menús distintos por su id de origen
+    menu_ids = set()
+    for linea in lineas:
+        if str(linea.get("origen_tipo", "") or "").strip() == "menu":
+            mid = str(linea.get("menu_origen_id", linea.get("origen_id", "")) or "").strip()
+            if mid:
+                menu_ids.add(mid)
+    if not menu_ids:
+        return lineas
+
+    costes_por_menu = {}
+    for mid in menu_ids:
+        try:
+            cab_menu, lineas_menu_df = cargar_menu_detalle_supabase(mid)
+            if cab_menu:
+                _tot = calcular_totales_menu(lineas_menu_df)
+                costes_por_menu[mid] = numero_seguro(
+                    cab_menu.get("coste_total", _tot.get("coste_total", 0.0)),
+                    numero_seguro(_tot.get("coste_total", 0.0), 0.0),
+                )
+        except Exception:
+            costes_por_menu[mid] = 0.0
+
+    for linea in lineas:
+        if str(linea.get("origen_tipo", "") or "").strip() == "menu":
+            mid = str(linea.get("menu_origen_id", linea.get("origen_id", "")) or "").strip()
+            if mid in costes_por_menu:
+                _coste = costes_por_menu[mid]
+                linea["coste_total_menu"] = _coste
+                linea["coste_linea_menu_documento"] = _coste
+                # asegurar que menu_origen_id queda fijado para extraer_lineas_menu_documento
+                linea.setdefault("menu_origen_id", mid)
+    return lineas
 
 
 def calcular_totales_menu(lineas_menu):
@@ -6592,6 +6643,11 @@ st.markdown(
         font-size: 1.72rem;
         line-height: 1;
     }
+    .samirarte-hero-logo {
+        height: 38px;
+        width: auto;
+        object-fit: contain;
+    }
     .samirarte-hero h1 {
         font-size: clamp(1.55rem, 1.85vw, 2.05rem);
         line-height: 1.02;
@@ -6777,6 +6833,18 @@ usuario_actual = obtener_usuario_actual()
 if not usuario_actual:
     restaurar_sesion_supabase()
     usuario_actual = obtener_usuario_actual()
+
+# Resolver la organización activa ANTES de dibujar la cabecera y el sidebar,
+# para que el logo/nombre de la org se muestre desde el primer render (si no,
+# en el primer render tras login la org aún no está fijada y se veía el logo
+# de Samirarte). _inicializar_org_activa fija la activa si el usuario tiene una
+# sola organización; con varias, el selector del sidebar la fijará.
+if usuario_actual and obtener_org_activa_id() is None:
+    try:
+        _inicializar_org_activa()
+    except Exception:
+        pass
+
 # Marca de la cabecera: logo y nombre de la ORGANIZACIÓN ACTIVA (Fase 5).
 # NUNCA se muestra el logo ni el nombre de Samirarte para otra organización.
 # Si no hay organización activa (recién autenticado, sin org), se muestra solo
@@ -6802,6 +6870,16 @@ _titulo_hero = (
     if _org_activa_nombre_topbar
     else "Gestor de Escandallos"
 )
+# Icono de la cabecera: logo de la org activa (pequeño) si existe; si no, nada.
+# Nunca el emoji genérico ni el logo de Samirarte para otra organización.
+if _logo_org_b64:
+    _hero_icono_html = (
+        f'<img class="samirarte-hero-logo" '
+        f'src="data:{_logo_org_mime};base64,{_logo_org_b64}" '
+        f'alt="{html.escape(_org_activa_nombre_topbar)}">'
+    )
+else:
+    _hero_icono_html = ""
 usuario_topbar = (usuario_actual or {}).get("email") or "Usuario"
 st.markdown(
     f"""
@@ -6810,7 +6888,7 @@ st.markdown(
         <div class="samirarte-user">Usuario · {html.escape(str(usuario_topbar))}</div>
     </div>
     <div class="samirarte-hero">
-        <div class="samirarte-hero-icon">👨‍🍳</div>
+        {_hero_icono_html}
         <div>
             <h1>{_titulo_hero}</h1>
             <p>Gestiona tus recetas y controla costes de forma eficiente</p>
@@ -6832,8 +6910,10 @@ with st.sidebar:
             st.image(f"data:{_sb_logo_mime};base64,{_sb_logo_b64}", width=160)
         else:
             st.caption(f"🏢 {obtener_org_activa_nombre()}")
-    else:
-        # Antes de tener organización activa: marca de plataforma
+    elif not obtener_usuario_actual():
+        # Solo antes de iniciar sesión: marca de plataforma Samirarte.
+        # Con usuario pero sin org todavía elegida, no se muestra ningún logo
+        # (nunca el de Samirarte para una sesión que pertenece a otra org).
         if logo_samirarte_existe():
             st.image(str(LOGO_SAMIRARTE_PATH), width=160)
 
