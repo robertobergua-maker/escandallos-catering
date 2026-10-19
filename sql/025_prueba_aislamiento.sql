@@ -699,6 +699,63 @@ reset role;
 -- =============================================================================
 -- RESULTADO
 -- =============================================================================
+-- P14: alérgenos copiados, comprobado como postgres (sin RLS)
+do $$
+declare n_orig int; n_dest int; v_cod text;
+begin
+  select count(*) into n_orig from public.ingrediente_alergenos
+   where codigo_ingrediente = 'P-samirarte-TEST025';
+  select codigo into v_cod from public.inventario
+   where organizacion_id = '367d4642-16bc-4817-9565-a6b914d96aa9'
+     and copiado_de_codigo = 'P-samirarte-TEST025';
+  select count(*) into n_dest from public.ingrediente_alergenos
+   where codigo_ingrediente = v_cod
+     and alergeno_id in (select alergeno_id from public.ingrediente_alergenos
+                          where codigo_ingrediente = 'P-samirarte-TEST025');
+  insert into r values ('P14 alérgenos copiados (postgres)', 'orig>0 y dest=orig',
+    'orig=' || n_orig || ' dest=' || n_dest, n_orig > 0 and n_dest = n_orig);
+end $$;
+
+reset role;
+
+-- =============================================================================
+-- P15: codigo_receta de la copia es distinto del original y tiene formato REC-NNNN
+-- =============================================================================
+do $$
+declare
+  v_nueva_id      text;
+  v_cod_original  text;
+  v_cod_copia     text;
+  v_distinto      boolean;
+  v_formato_ok    boolean;
+begin
+  v_nueva_id := current_setting('test.nueva_receta_id', true);
+
+  -- Código de la receta original en Samirarte
+  select codigo_receta into v_cod_original
+  from public.recetas
+  where id = 'aaaaaaaa-0025-0025-0025-000000000025';
+
+  -- Código de la primera copia en Pruebas (la de P5)
+  select codigo_receta into v_cod_copia
+  from public.recetas
+  where id = v_nueva_id::uuid;
+
+  v_distinto   := (v_cod_copia is distinct from v_cod_original);
+  v_formato_ok := (v_cod_copia ~ '^REC-\d{4,}$');
+
+  insert into r values (
+    'P15 codigo_receta copia distinto del original y formato REC-NNNN',
+    'distinto=true formato=true',
+    'original=' || coalesce(v_cod_original, 'null')
+      || ' copia=' || coalesce(v_cod_copia, 'null')
+      || ' distinto=' || v_distinto::text
+      || ' formato=' || v_formato_ok::text,
+    v_distinto and v_formato_ok
+  );
+end $$;
+
+reset role;
 
 select prueba, resultado_esperado, obtenido, ok
 from r

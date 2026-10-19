@@ -2843,38 +2843,26 @@ def formatear_numero_usuario(valor, decimales=3, vacio_si_cero=True):
 
 def generar_codigo_receta():
     """
-    Genera el siguiente codigo REC-0001, REC-0002... leyendo public.recetas.
-    Si el inventario no esta disponible, devuelve un codigo inicial seguro.
+    Devuelve el siguiente codigo REC-NNNN disponible globalmente llamando a
+    public.siguiente_codigo_receta() (SECURITY DEFINER, ve todas las orgs).
+
+    Si la RPC no está disponible o falla, devuelve None: el código NO se
+    genera localmente para evitar colisiones con la constraint UNIQUE global
+    de recetas.codigo_receta. El llamador debe comprobar el retorno y NO
+    intentar guardar si es None.
     """
     if not supabase_disponible or supabase is None:
-        return "REC-0001"
+        return None
 
     try:
-        respuesta = (
-            supabase
-            .table("recetas")
-            .select("codigo_receta")
-            .execute()
-        )
-        codigos_existentes = {
-            str(fila.get("codigo_receta", "")).strip().upper()
-            for fila in (respuesta.data or [])
-            if fila.get("codigo_receta")
-        }
-        ultimo_numero = 0
-        for codigo in codigos_existentes:
-            coincidencia = re.fullmatch(r"REC-(\d+)", codigo)
-            if coincidencia:
-                ultimo_numero = max(ultimo_numero, int(coincidencia.group(1)))
-
-        siguiente = ultimo_numero + 1
-        candidato = f"REC-{siguiente:04d}"
-        while candidato in codigos_existentes:
-            siguiente += 1
-            candidato = f"REC-{siguiente:04d}"
-        return candidato
+        respuesta = supabase.rpc("siguiente_codigo_receta").execute()
+        codigo = str(respuesta.data or "").strip().upper()
+        if re.fullmatch(r"REC-\d{4,}", codigo):
+            return codigo
+        # Respuesta inesperada: no fabricar un código propio
+        return None
     except Exception:
-        return "REC-0001"
+        return None
 
 
 def generar_nombre_copia_receta(nombre_original):
@@ -3210,7 +3198,10 @@ def duplicar_receta_supabase(datos_receta, ingredientes):
 
     datos_copia = dict(datos_receta)
     datos_copia["user_id"] = obtener_user_id_actual()
-    datos_copia["codigo_receta"] = generar_codigo_receta()
+    _codigo_copia = generar_codigo_receta()
+    if _codigo_copia is None:
+        return False, "No se pudo obtener un código único para la receta. Comprueba la conexión con la base de datos.", None
+    datos_copia["codigo_receta"] = _codigo_copia
     datos_copia["nombre"] = generar_nombre_copia_receta(datos_receta.get("nombre", "Receta"))
 
     return guardar_receta_nueva_supabase(datos_copia, ingredientes)
@@ -3325,9 +3316,12 @@ def crear_copia_receta_normalizada_supabase(datos_receta, ingredientes, raciones
 
     nombre_original = str(datos_receta.get("nombre", "") or "Receta").strip() or "Receta"
     datos_copia = dict(datos_receta)
+    _codigo_racion = generar_codigo_receta()
+    if _codigo_racion is None:
+        return False, "No se pudo obtener un código único para la receta. Comprueba la conexión con la base de datos.", None
     datos_copia.update({
         "user_id": obtener_user_id_actual(),
-        "codigo_receta": generar_codigo_receta(),
+        "codigo_receta": _codigo_racion,
         "nombre": f"{nombre_original} - 1 ración",
         "raciones_base": 1.0,
         "unidad_servicio": "ración",
@@ -9988,7 +9982,18 @@ with main_tab_recetas:
             elif duplicar_existente and not receta_id_cargada:
                 st.warning("Carga una receta guardada antes de duplicarla.")
             else:
-                codigo_receta = codigo_receta_cargada if actualizar_existente else generar_codigo_receta()
+                if actualizar_existente:
+                    codigo_receta = codigo_receta_cargada
+                else:
+                    codigo_receta = generar_codigo_receta()
+                    if codigo_receta is None:
+                        st.error(
+                            "No se pudo obtener un código único para la receta. "
+                            "Comprueba la conexión e inténtalo de nuevo. "
+                            "Si el problema persiste, es posible que la función "
+                            "siguiente_codigo_receta() no esté aplicada (sql/025b)."
+                        )
+                        st.stop()
                 datos_receta = {
                     "user_id": obtener_user_id_actual(),
                     "codigo_receta": codigo_receta,
