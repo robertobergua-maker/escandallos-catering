@@ -376,6 +376,12 @@ begin
   from public.clientes
   where id = v_doc.cliente_id;
 
+  -- El cliente, si lo hay, debe pertenecer a la misma organización que el documento
+  if v_doc.cliente_id is not null
+     and (v_cli is null or v_cli.organizacion_id <> v_doc.organizacion_id) then
+    raise exception 'El cliente no pertenece a esta organización.';
+  end if;
+
   -- Reservar número
   v_numero := public._reservar_numero_documento(
     v_doc.organizacion_id,

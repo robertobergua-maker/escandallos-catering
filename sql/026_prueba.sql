@@ -1209,6 +1209,47 @@ end $$;
 reset role;
 
 -- =============================================================================
+-- P33: emitir factura de Pruebas con un cliente de Samirarte FALLA
+-- =============================================================================
+do $$
+declare
+  v_uid uuid;
+  v_err text := 'no lanzó excepción';
+  v_fid uuid := 'ffffffff-0026-0026-0026-000000000033';
+begin
+  -- Borrador en Pruebas pero apuntando al cliente de Samirarte (cccccccc-...0001).
+  -- Se inserta como postgres (el trigger de usuario solo valida INSERT de borradores limpios).
+  insert into public.facturas (id, organizacion_id, user_id, cliente_id, tipo_documento, estado,
+    base_imponible, iva_pct, iva_importe, retencion_pct, retencion_importe, total)
+  values (v_fid, '367d4642-16bc-4817-9565-a6b914d96aa9',
+    (select id from u where clave='gerente_pruebas'),
+    'cccccccc-0026-0026-0026-000000000001',   -- cliente de Samirarte
+    'factura', 'borrador', 100, 21, 21, 0, 0, 121)
+  on conflict (id) do nothing;
+  insert into public.factura_lineas (factura_id, descripcion, cantidad, precio_unitario, base_linea, iva_pct, iva_linea, total_linea, orden)
+  values (v_fid, 'Servicio 33', 1, 100, 100, 21, 21, 121, 1)
+  on conflict do nothing;
+
+  select id into v_uid from u where clave = 'gerente_pruebas';
+  set local role authenticated;
+  perform set_config('request.jwt.claims', '{"sub":"' || v_uid || '","role":"authenticated"}', true);
+
+  begin
+    perform public.emitir_documento(v_fid);
+  exception when others then
+    v_err := sqlerrm;
+  end;
+
+  insert into r values (
+    'P33 emitir factura de Pruebas con cliente de Samirarte falla',
+    'exc: El cliente no pertenece a esta organización',
+    v_err,
+    v_err ilike '%no pertenece a esta organización%'
+  );
+end $$;
+reset role;
+
+-- =============================================================================
 -- RESULTADO
 -- =============================================================================
 
