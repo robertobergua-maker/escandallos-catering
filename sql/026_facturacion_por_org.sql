@@ -391,12 +391,20 @@ begin
     v_fecha
   );
 
-  -- Emitir: número, fecha, estado, snapshot del emisor y snapshot del cliente
+  -- Emitir: número, fecha, estado, snapshot del emisor y snapshot del cliente.
+  -- Si la fecha de vencimiento es anterior a la de emisión, se AJUSTA a la fecha
+  -- de emisión (no se rechaza) para no bloquear la emisión por un descuadre menor.
   update public.facturas
   set
     numero_factura            = v_numero,
     estado                    = 'emitida',
     fecha_emision             = v_fecha,
+    fecha_vencimiento         = case
+                                  when fecha_vencimiento is not null
+                                       and fecha_vencimiento < v_fecha
+                                  then v_fecha
+                                  else fecha_vencimiento
+                                end,
     -- Snapshot emisor
     emisor_razon_social       = v_config.razon_social,
     emisor_nif                = v_config.nif_cif,
@@ -430,7 +438,9 @@ grant  execute on function public.emitir_documento(uuid) to authenticated;
 
 comment on function public.emitir_documento(uuid)
   is 'Emite un documento borrador: solo gerente, exige config fiscal completa, '
-     'reserva número anual, guarda snapshot del emisor. Devuelve el número.';
+     'exige cliente de la org para factura/rectificativa, >=1 línea y totales '
+     'cuadrados; guarda snapshot de emisor y cliente; ajusta fecha_vencimiento '
+     'a la fecha de emisión si era anterior. Devuelve el número.';
 
 
 -- ===========================================================================

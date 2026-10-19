@@ -4219,6 +4219,15 @@ def generar_pdf_factura(factura, lineas, cliente):
         factura.get("iva_pct", 21),
         factura.get("retencion_pct", 0)
     )
+    # Documento EMITIDO: usar los totales de cabecera congelados en la BD, no los
+    # recalculados, para que el PDF coincida exactamente con lo guardado.
+    _estado_doc = str(factura.get("estado") or "").strip().lower()
+    if _estado_doc in ("emitida", "cobrada", "anulada") and factura.get("total") is not None:
+        totales = dict(totales)
+        totales["base_imponible"] = numero_seguro(factura.get("base_imponible"), totales["base_imponible"])
+        totales["iva_importe"] = numero_seguro(factura.get("iva_importe"), totales["iva_importe"])
+        totales["retencion_importe"] = numero_seguro(factura.get("retencion_importe"), totales["retencion_importe"])
+        totales["total"] = numero_seguro(factura.get("total"), totales["total"])
     tipo_documento = str(factura.get("tipo_documento") or "factura").strip() or "factura"
     tipo_visible = tipo_documento.replace("_", " ").title()
     numero = str(factura.get("numero_factura") or "sin_numero").strip() or "sin_numero"
@@ -5054,6 +5063,14 @@ def cargar_factura_en_sesion(factura, lineas_df):
     # y organizacion_id) para que la descarga de documentos emitidos use el
     # snapshot congelado y el logo de la org correcta.
     st.session_state["factura_detalle_cargado"] = dict(factura or {})
+
+    # Guardar las líneas CRUDAS de la BD (con su iva_pct/iva_linea/total_linea)
+    # para que el PDF de un documento emitido use exactamente lo guardado, sin
+    # recálculos posteriores que pisan el IVA.
+    if lineas_df is not None and not lineas_df.empty:
+        st.session_state["factura_lineas_bd"] = lineas_df.to_dict(orient="records")
+    else:
+        st.session_state["factura_lineas_bd"] = []
 
     lineas = []
     if lineas_df is not None and not lineas_df.empty:
@@ -10178,11 +10195,34 @@ with main_tab_facturas:
                     factura_actual["organizacion_id"] = obtener_org_activa_id()
 
                 cliente_actual_factura = clientes_por_id_factura.get(str(factura_cliente_id), {})
-                lineas_validas_descarga = [
-                    calcular_linea_factura(linea)
-                    for linea in st.session_state["factura_lineas_actual"]
-                    if str(linea.get("descripcion", "") or "").strip()
-                ]
+
+                # Documento EMITIDO: el PDF/HTML debe reflejar EXACTAMENTE lo
+                # guardado en la BD (tipo, número, líneas con su IVA y totales
+                # congelados), no los valores recalculados del formulario.
+                if _es_solo_lectura and _detalle_cargado.get("id") and \
+                   str(_detalle_cargado.get("id")) == str(factura_id_en_edicion or ""):
+                    # Tipo, número y totales reales del documento emitido
+                    factura_actual["tipo_documento"] = _detalle_cargado.get("tipo_documento") or tipo_documento
+                    factura_actual["numero_factura"] = _detalle_cargado.get("numero_factura")
+                    factura_actual["estado"] = _detalle_cargado.get("estado")
+                    factura_actual["fecha_emision"] = _detalle_cargado.get("fecha_emision")
+                    factura_actual["fecha_vencimiento"] = _detalle_cargado.get("fecha_vencimiento")
+                    factura_actual["concepto"] = _detalle_cargado.get("concepto")
+                    factura_actual["iva_pct"] = numero_seguro(_detalle_cargado.get("iva_pct"), 0.0)
+                    factura_actual["retencion_pct"] = numero_seguro(_detalle_cargado.get("retencion_pct"), 0.0)
+                    factura_actual["metodo_pago"] = _detalle_cargado.get("metodo_pago")
+                    factura_actual["notas"] = _detalle_cargado.get("notas")
+                    # Líneas crudas tal como se guardaron (con su IVA y totales)
+                    lineas_validas_descarga = [
+                        linea for linea in (st.session_state.get("factura_lineas_bd") or [])
+                        if str(linea.get("descripcion", "") or "").strip()
+                    ]
+                else:
+                    lineas_validas_descarga = [
+                        calcular_linea_factura(linea)
+                        for linea in st.session_state["factura_lineas_actual"]
+                        if str(linea.get("descripcion", "") or "").strip()
+                    ]
                 menu_id_descarga = obtener_menu_id_desde_lineas_factura(lineas_validas_descarga)
                 if menu_id_descarga:
                     factura_actual["menu_nombre_asociado"] = obtener_nombre_menu_por_id(menu_id_descarga)
