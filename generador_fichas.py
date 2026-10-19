@@ -7706,7 +7706,7 @@ def _renderizar_inventario_propio(org_id):
                     st.warning("Alérgenos pendientes de declarar.")
                     if st.button(
                         "Marcar como 'Sin alérgenos de los 14'",
-                        key=f"sin_alerg_{row['codigo'][:12]}",
+                        key=f"sin_alerg_{row['codigo']}",
                     ):
                         try:
                             # Llamar a marcar_alergenos_revisados vía RPC:
@@ -7723,7 +7723,7 @@ def _renderizar_inventario_propio(org_id):
                 # Eliminar: el trigger de BD rechaza si está en uso en alguna receta
                 if st.button(
                     "🗑️ Eliminar ingrediente",
-                    key=f"del_priv_{row['codigo'][:12]}",
+                    key=f"del_priv_{row['codigo']}",
                     type="secondary",
                 ):
                     try:
@@ -7813,16 +7813,16 @@ def _renderizar_inventario_propio(org_id):
                         "Precio/unidad (€)",
                         value=float(row.get("precio_unidad") or 0.0),
                         min_value=0.0, step=0.01, format="%.4f",
-                        key=f"precio_{row['codigo'][:12]}",
+                        key=f"precio_{row['codigo']}",
                     )
                 with col_m:
                     nuevo_merma = st.number_input(
-                        "Merma (0-1)",
+                        "Merma (%)",
                         value=float(row.get("merma") or 0.0),
-                        min_value=0.0, max_value=0.99, step=0.01, format="%.2f",
-                        key=f"merma_{row['codigo'][:12]}",
+                        min_value=0.0, max_value=99.99, step=0.5, format="%.2f",
+                        key=f"merma_{row['codigo']}",
                     )
-                if st.button("Guardar precio propio", key=f"save_precio_{row['codigo'][:12]}"):
+                if st.button("Guardar precio propio", key=f"save_precio_{row['codigo']}"):
                     try:
                         supabase.table("inventario_org").upsert({
                             "organizacion_id":   org_id,
@@ -7893,7 +7893,7 @@ def _renderizar_miembros_e_invitaciones(org_id, org_nombre):
                     st.write("✅ activo" if activo else "❌ inactivo")
                 with col4:
                     if activo and m.get("user_id") != obtener_user_id_actual():
-                        if st.button("Desactivar", key=f"desact_m_{org_id[:8]}_{m['id'][:8]}"):
+                        if st.button("Desactivar", key=f"desact_m_{org_id}_{m['id']}"):
                             try:
                                 supabase.table("organizacion_miembros").update(
                                     {"activo": False}
@@ -7980,7 +7980,7 @@ def _renderizar_miembros_e_invitaciones(org_id, org_nombre):
                         st.write("⏰ Pendiente")
                 with col4:
                     if not _canjeada:
-                        if st.button("Revocar", key=f"rev_{org_id[:8]}_{inv['id'][:8]}"):
+                        if st.button("Revocar", key=f"rev_{org_id}_{inv['id']}"):
                             try:
                                 # Marcar como revocada: canjeada=True + expires_at al pasado
                                 supabase.table("invitaciones").update({
