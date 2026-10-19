@@ -7653,6 +7653,45 @@ def guardar_cambios_tabla_admin(nombre_tabla, df_original, editor_state, lookups
     return cambios
 
 
+def _crear_comparticion_receta(org_id, receta_id, destino_sel, orgs_destino):
+    """
+    Crea una compartición en la tabla comparticiones.
+    destino_sel: nombre de org destino (str) o "Todas las organizaciones".
+    orgs_destino: lista de dicts {id, nombre} de la RPC listar_organizaciones_destino.
+    Devuelve (ok: bool, mensaje: str).
+    """
+    try:
+        if destino_sel == "Todas las organizaciones":
+            payload = {
+                "origen_organizacion_id": str(org_id),
+                "tipo": "receta",
+                "objeto_id": str(receta_id),
+                "destino": "todas",
+                "created_by": obtener_user_id_actual(),
+            }
+        else:
+            org_dest = next(
+                (o for o in orgs_destino if o["nombre"] == destino_sel), None
+            )
+            if org_dest is None:
+                return False, "No se encontró la organización destino seleccionada."
+            payload = {
+                "origen_organizacion_id": str(org_id),
+                "tipo": "receta",
+                "objeto_id": str(receta_id),
+                "destino": "especifica",
+                "destino_organizacion_id": org_dest["id"],
+                "created_by": obtener_user_id_actual(),
+            }
+        supabase.table("comparticiones").insert(payload).execute()
+        return True, f"Receta compartida con: {destino_sel}."
+    except Exception as e_comp:
+        msg = str(e_comp)
+        if "unique" in msg.lower() or "duplicate" in msg.lower():
+            return False, "Esta receta ya está compartida con ese destino."
+        return False, f"No se pudo crear la compartición: {msg[:120]}"
+
+
 def _renderizar_compartir_recetas(org_id):
     """
     Pantalla del gerente para gestionar comparticiones de sus recetas.
@@ -7706,39 +7745,21 @@ def _renderizar_compartir_recetas(org_id):
                     key="comp_destino_sel",
                 )
                 if st.button("Compartir", key="btn_compartir_receta"):
-                    try:
-                        if _destino_sel == "Todas las organizaciones":
-                            _payload = {
-                                "origen_organizacion_id": org_id,
-                                "tipo": "receta",
-                                "objeto_id": str(_receta_sel),
-                                "destino": "todas",
-                                "created_by": obtener_user_id_actual(),
-                            }
-                        else:
-                            _org_dest = next(
-                                o for o in _orgs_destino if o["nombre"] == _destino_sel
-                            )
-                            _payload = {
-                                "origen_organizacion_id": org_id,
-                                "tipo": "receta",
-                                "objeto_id": str(_receta_sel),
-                                "destino": "especifica",
-                                "destino_organizacion_id": _org_dest["id"],
-                                "created_by": obtener_user_id_actual(),
-                            }
-                        supabase.table("comparticiones").insert(_payload).execute()
-                        st.success(f"Receta compartida con: {_destino_sel}.")
+                    _ok_c, _msg_c = _crear_comparticion_receta(
+                        org_id, _receta_sel, _destino_sel, _orgs_destino
+                    )
+                    if _ok_c:
+                        st.success(_msg_c)
                         st.rerun()
-                    except Exception as e_comp:
-                        st.error(f"No se pudo crear la compartición: {e_comp}")
+                    else:
+                        st.error(_msg_c)
 
     with tab_activas:
         st.write("**Comparticiones activas de tu organización**")
         try:
             _comp_resp = (
                 supabase.table("comparticiones")
-                .select("id, objeto_id, destino, destino_organizacion_id, activa, created_at, recetas(nombre)")
+                .select("id, objeto_id, destino, destino_organizacion_id, activa, created_at")
                 .eq("origen_organizacion_id", org_id)
                 .eq("tipo", "receta")
                 .order("created_at", desc=True)
@@ -7749,12 +7770,31 @@ def _renderizar_compartir_recetas(org_id):
             st.warning(f"No se pudieron cargar las comparticiones: {e_list_c}")
             _comps = []
 
+        # Cargar nombres de recetas en segunda query (objeto_id no tiene FK a recetas
+        # en PostgREST, así que el embed directo falla con PGRST200)
+        _nombres_recetas = {}
+        if _comps:
+            try:
+                _ids_recetas = list({c["objeto_id"] for c in _comps if c.get("objeto_id")})
+                _resp_nombres = (
+                    supabase.table("recetas")
+                    .select("id, nombre")
+                    .in_("id", _ids_recetas)
+                    .execute()
+                )
+                _nombres_recetas = {
+                    r["id"]: r["nombre"]
+                    for r in (_resp_nombres.data or [])
+                    if r.get("id")
+                }
+            except Exception:
+                pass
+
         if not _comps:
             st.info("No hay comparticiones activas.")
         else:
             for _c in _comps:
-                _receta_obj = _c.get("recetas") or {}
-                _nombre_r   = _receta_obj.get("nombre", _c.get("objeto_id", ""))
+                _nombre_r   = _nombres_recetas.get(_c.get("objeto_id", ""), _c.get("objeto_id", "—"))
                 _dest_texto = "Todas las orgs" if _c.get("destino") == "todas" else (
                     _c.get("destino_organizacion_id", "?")
                 )
@@ -7768,7 +7808,7 @@ def _renderizar_compartir_recetas(org_id):
                     st.write(_estado)
                 with col4:
                     if _c.get("activa"):
-                        if st.button("Desactivar", key=f"deact_comp_{_c['id'][:8]}"):
+                        if st.button("Desactivar", key=f"deact_comp_{_c['id']}"):
                             try:
                                 supabase.table("comparticiones").update(
                                     {"activa": False}
@@ -7826,7 +7866,7 @@ def _renderizar_inventario_propio(org_id):
                     st.warning("Alérgenos pendientes de declarar.")
                     if st.button(
                         "Marcar como 'Sin alérgenos de los 14'",
-                        key=f"sin_alerg_{row['codigo'][:12]}",
+                        key=f"sin_alerg_{row['codigo']}",
                     ):
                         try:
                             # Llamar a marcar_alergenos_revisados vía RPC:
@@ -7843,7 +7883,7 @@ def _renderizar_inventario_propio(org_id):
                 # Eliminar: el trigger de BD rechaza si está en uso en alguna receta
                 if st.button(
                     "🗑️ Eliminar ingrediente",
-                    key=f"del_priv_{row['codigo'][:12]}",
+                    key=f"del_priv_{row['codigo']}",
                     type="secondary",
                 ):
                     try:
@@ -7933,16 +7973,16 @@ def _renderizar_inventario_propio(org_id):
                         "Precio/unidad (€)",
                         value=float(row.get("precio_unidad") or 0.0),
                         min_value=0.0, step=0.01, format="%.4f",
-                        key=f"precio_{row['codigo'][:12]}",
+                        key=f"precio_{row['codigo']}",
                     )
                 with col_m:
                     nuevo_merma = st.number_input(
-                        "Merma (0-1)",
+                        "Merma (%)",
                         value=float(row.get("merma") or 0.0),
-                        min_value=0.0, max_value=0.99, step=0.01, format="%.2f",
-                        key=f"merma_{row['codigo'][:12]}",
+                        min_value=0.0, max_value=99.99, step=0.5, format="%.2f",
+                        key=f"merma_{row['codigo']}",
                     )
-                if st.button("Guardar precio propio", key=f"save_precio_{row['codigo'][:12]}"):
+                if st.button("Guardar precio propio", key=f"save_precio_{row['codigo']}"):
                     try:
                         supabase.table("inventario_org").upsert({
                             "organizacion_id":   org_id,
@@ -8013,7 +8053,7 @@ def _renderizar_miembros_e_invitaciones(org_id, org_nombre):
                     st.write("✅ activo" if activo else "❌ inactivo")
                 with col4:
                     if activo and m.get("user_id") != obtener_user_id_actual():
-                        if st.button("Desactivar", key=f"desact_m_{org_id[:8]}_{m['id'][:8]}"):
+                        if st.button("Desactivar", key=f"desact_m_{org_id}_{m['id']}"):
                             try:
                                 supabase.table("organizacion_miembros").update(
                                     {"activo": False}
@@ -8100,7 +8140,7 @@ def _renderizar_miembros_e_invitaciones(org_id, org_nombre):
                         st.write("⏰ Pendiente")
                 with col4:
                     if not _canjeada:
-                        if st.button("Revocar", key=f"rev_{org_id[:8]}_{inv['id'][:8]}"):
+                        if st.button("Revocar", key=f"rev_{org_id}_{inv['id']}"):
                             try:
                                 # Marcar como revocada: canjeada=True + expires_at al pasado
                                 supabase.table("invitaciones").update({
@@ -9805,69 +9845,53 @@ with main_tab_recetas:
                         _orgs_destino = None
 
                     if _orgs_destino is not None:
+                        # Incluir opción "Todas las organizaciones"
+                        _modal_destino_opciones = ["Todas las organizaciones"] + [
+                            o["nombre"] for o in _orgs_destino
+                        ]
                         if not _orgs_destino:
-                            st.info("No hay otras organizaciones disponibles para compartir.")
-                            if st.button("Cerrar", key="btn_compartir_cerrar_vacio"):
-                                st.session_state.pop("compartir_receta_modal_id", None)
-                                st.session_state.pop("compartir_receta_modal_nombre", None)
-                                st.rerun()
-                        else:
-                            _opciones_orgs = {
-                                str(o.get("id")): o.get("nombre", str(o.get("id")))
-                                for o in _orgs_destino
-                            }
-                            _org_destino_sel = st.selectbox(
-                                "Organización destino",
-                                list(_opciones_orgs.keys()),
-                                format_func=lambda oid: _opciones_orgs.get(oid, oid),
-                                key="compartir_receta_org_destino",
+                            st.info("No hay otras organizaciones disponibles.")
+                            _modal_destino_opciones = ["Todas las organizaciones"]
+
+                        _modal_org_destino_sel = st.selectbox(
+                            "Organización destino",
+                            _modal_destino_opciones,
+                            key="compartir_receta_org_destino",
+                        )
+                        _compartir_c1, _compartir_c2 = st.columns([1, 1])
+                        with _compartir_c1:
+                            _btn_confirmar_compartir = st.button(
+                                "Confirmar compartir",
+                                type="primary",
+                                use_container_width=True,
+                                key="btn_confirmar_compartir_receta",
                             )
-                            _compartir_c1, _compartir_c2 = st.columns([1, 1])
-                            with _compartir_c1:
-                                _btn_confirmar_compartir = st.button(
-                                    "Confirmar compartir",
-                                    type="primary",
-                                    use_container_width=True,
-                                    key="btn_confirmar_compartir_receta",
+                        with _compartir_c2:
+                            _btn_cancelar_compartir = st.button(
+                                "Cancelar",
+                                use_container_width=True,
+                                key="btn_cancelar_compartir_receta",
+                            )
+                        if _btn_cancelar_compartir:
+                            st.session_state.pop("compartir_receta_modal_id", None)
+                            st.session_state.pop("compartir_receta_modal_nombre", None)
+                            st.rerun()
+                        if _btn_confirmar_compartir:
+                            _ok_c, _msg_c = _crear_comparticion_receta(
+                                obtener_org_activa_id(),
+                                _modal_receta_id,
+                                _modal_org_destino_sel,
+                                _orgs_destino,
+                            )
+                            if _ok_c:
+                                st.success(
+                                    f"✅ Receta «{_modal_receta_nombre}» compartida con "
+                                    f"«{_modal_org_destino_sel}» correctamente."
                                 )
-                            with _compartir_c2:
-                                _btn_cancelar_compartir = st.button(
-                                    "Cancelar",
-                                    use_container_width=True,
-                                    key="btn_cancelar_compartir_receta",
-                                )
-                            if _btn_cancelar_compartir:
                                 st.session_state.pop("compartir_receta_modal_id", None)
                                 st.session_state.pop("compartir_receta_modal_nombre", None)
-                                st.rerun()
-                            if _btn_confirmar_compartir and _org_destino_sel:
-                                try:
-                                    _res_compartir = supabase.rpc(
-                                        "copiar_receta_a_org",
-                                        {
-                                            "p_receta_id": _modal_receta_id,
-                                            "p_org_destino": _org_destino_sel,
-                                        },
-                                    ).execute()
-                                    _nueva_id = (
-                                        _res_compartir.data
-                                        if isinstance(_res_compartir.data, str)
-                                        else str(_res_compartir.data or "")
-                                    )
-                                    st.success(
-                                        f"✅ Receta «{_modal_receta_nombre}» compartida con "
-                                        f"«{_opciones_orgs.get(_org_destino_sel, _org_destino_sel)}» correctamente."
-                                    )
-                                    st.session_state.pop("compartir_receta_modal_id", None)
-                                    st.session_state.pop("compartir_receta_modal_nombre", None)
-                                except Exception as _e_cp:
-                                    _msg_cp = str(_e_cp)
-                                    if "Solo el gerente destino" in _msg_cp:
-                                        st.error("❌ Solo el gerente de la organización destino puede recibir recetas compartidas.")
-                                    elif "ya existe" in _msg_cp.lower() or "duplicate" in _msg_cp.lower():
-                                        st.warning("⚠️ Esta receta ya ha sido compartida con esa organización.")
-                                    else:
-                                        st.error(f"Error al compartir la receta: {_msg_cp[:120]}")
+                            else:
+                                st.error(_msg_c)
 
                 receta_id_a_cargar = None
                 if cargar_receta_btn:
@@ -10201,7 +10225,7 @@ with main_tab_recetas:
                             if not _ya_copiada and usuario_es_gerente_org_activa():
                                 if st.button(
                                     "Ver y copiar",
-                                    key=f"btn_ver_rc_{_rc['receta_id'][:8]}",
+                                    key=f"btn_ver_rc_{_rc['receta_id']}",
                                     use_container_width=True,
                                 ):
                                     st.session_state["_vista_previa_receta_compartida"] = _rc["receta_id"]
