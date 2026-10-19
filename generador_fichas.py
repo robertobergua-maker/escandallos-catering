@@ -1088,6 +1088,9 @@ def establecer_org_activa(org_id, org_nombre):
     st.session_state["organizacion_activa_id"] = org_id
     st.session_state["organizacion_activa_nombre"] = org_nombre
     vaciar_caches_datos_org()
+    # Invalidar cachés de config y logo de org (dependen de la org activa)
+    st.session_state.pop("_org_config_cache", None)
+    st.session_state.pop("_org_logo_cache", None)
 
 
 def vaciar_caches_datos_org():
@@ -1112,6 +1115,76 @@ def usuario_es_gerente_org_activa():
         return False
     orgs = st.session_state.get("organizaciones_usuario", [])
     return any(o["id"] == org_id and o["rol"] == "gerente" for o in orgs)
+
+
+# ── Config y logo por organización (Fase 5 / 026) ─────────────────────────────
+
+def cargar_config_org(org_id):
+    """
+    Lee la configuración de facturación de una organización (organizacion_config)
+    vía RPC obtener_config_facturacion. Cachea en sesión por org_id.
+    Devuelve un dict con los campos o {} si no hay config / la Fase 5 no está aplicada.
+    El logo viene como bytes (bytea de Postgres), que la RPC devuelve en base64 o hex.
+    """
+    if not org_id or not supabase_disponible or supabase is None:
+        return {}
+    cache = st.session_state.setdefault("_org_config_cache", {})
+    if org_id in cache:
+        return cache[org_id]
+    config = {}
+    try:
+        resp = supabase.rpc(
+            "obtener_config_facturacion", {"p_organizacion_id": str(org_id)}
+        ).execute()
+        filas = resp.data or []
+        if filas:
+            config = dict(filas[0])
+    except Exception:
+        # Fase 5 no aplicada aún o sin acceso: devolver vacío sin romper la app
+        config = {}
+    cache[org_id] = config
+    return config
+
+
+def _bytea_a_base64(valor):
+    """
+    Normaliza un valor bytea devuelto por PostgREST a base64 ascii.
+    PostgREST suele devolver bytea como cadena hex con prefijo '\\x'.
+    """
+    if not valor:
+        return ""
+    try:
+        if isinstance(valor, (bytes, bytearray)):
+            return base64.b64encode(bytes(valor)).decode("ascii")
+        texto = str(valor)
+        if texto.startswith("\\x") or texto.startswith("0x"):
+            crudo = bytes.fromhex(texto[2:])
+            return base64.b64encode(crudo).decode("ascii")
+        # Si ya parece base64, devolverlo tal cual
+        return texto
+    except Exception:
+        return ""
+
+
+def cargar_logo_org(org_id):
+    """
+    Devuelve (logo_base64, mime) del logo de la organización, o (None, None).
+    Cachea en sesión por org_id. Se recarga al cambiar de org o tras subir uno nuevo
+    (establecer_org_activa y la pantalla de datos de la org limpian el cache).
+    """
+    if not org_id:
+        return None, None
+    cache = st.session_state.setdefault("_org_logo_cache", {})
+    if org_id in cache:
+        entrada = cache[org_id]
+        return entrada.get("logo_b64"), entrada.get("mime")
+    config = cargar_config_org(org_id)
+    logo_b64 = _bytea_a_base64(config.get("logo"))
+    mime = config.get("logo_mime") or "image/png"
+    if not logo_b64:
+        logo_b64, mime = None, None
+    cache[org_id] = {"logo_b64": logo_b64, "mime": mime}
+    return logo_b64, mime
 
 
 def _guardar_sesion_supabase(usuario, sesion):
@@ -2675,6 +2748,17 @@ FACTURAS_COLUMNAS = [
     "metodo_pago", "estado_cobro", "notas", "created_at", "updated_at"
 ]
 
+# Columnas de snapshot del emisor (Fase 5 / 026). Se leen para el PDF pero NO
+# se escriben desde la app: las rellena emitir_documento() en la BD.
+FACTURAS_COLUMNAS_EMISOR = [
+    "emisor_razon_social", "emisor_nif", "emisor_direccion", "emisor_cp_ciudad",
+    "emisor_provincia", "emisor_pais", "emisor_email", "emisor_telefono",
+    "emisor_logo", "emisor_logo_mime", "emisor_notas_pie", "factura_rectificada_id",
+]
+
+# Columnas para SELECT de detalle (incluye snapshot del emisor si la Fase 5 está aplicada)
+FACTURAS_COLUMNAS_DETALLE = FACTURAS_COLUMNAS + FACTURAS_COLUMNAS_EMISOR
+
 FACTURA_LINEAS_COLUMNAS = [
     "id", "factura_id", "origen_tipo", "origen_id", "descripcion", "cantidad",
     "unidad", "precio_unitario", "descuento_pct", "base_linea", "iva_pct",
@@ -3977,34 +4061,82 @@ def iva_documento_actual():
     return numero_seguro(st.session_state.get("iva_pct", 21.0), 21.0)
 
 
-def obtener_datos_fiscales_emisor():
-    """Datos mínimos del emisor para documentos con validez fiscal."""
+def obtener_datos_fiscales_emisor(factura=None):
+    """
+    Datos del emisor para documentos con validez fiscal (Fase 5 / 026).
+
+    Prioridad:
+      1. Si `factura` trae snapshot (emisor_razon_social no vacío) → usar el snapshot
+         guardado al emitir (inmutable, no cambia si luego se edita la config).
+      2. Si hay organización activa → leer organizacion_config vía RPC.
+      3. Fallback a st.secrets (solo útil en entornos sin Fase 5).
+    """
+    # 1. Snapshot de un documento ya emitido
+    if factura and str(factura.get("emisor_razon_social") or "").strip():
+        return {
+            "nombre": str(factura.get("emisor_razon_social") or "").strip(),
+            "nif": str(factura.get("emisor_nif") or "").strip(),
+            "direccion": str(factura.get("emisor_direccion") or "").strip(),
+            "cp_ciudad": str(factura.get("emisor_cp_ciudad") or "").strip(),
+            "provincia": str(factura.get("emisor_provincia") or "").strip(),
+            "pais": str(factura.get("emisor_pais") or "España").strip() or "España",
+            "email": str(factura.get("emisor_email") or "").strip(),
+            "telefono": str(factura.get("emisor_telefono") or "").strip(),
+            "notas_pie": str(factura.get("emisor_notas_pie") or "").strip(),
+        }
+
+    # 2. Config de la organización activa
+    org_id = obtener_org_activa_id()
+    if org_id:
+        config = cargar_config_org(org_id)
+        if config:
+            cp = str(config.get("codigo_postal_fiscal") or "").strip()
+            ciudad = str(config.get("ciudad_fiscal") or "").strip()
+            return {
+                "nombre": str(config.get("razon_social") or config.get("nombre_org") or "").strip(),
+                "nif": str(config.get("nif_cif") or "").strip(),
+                "direccion": str(config.get("direccion_fiscal") or "").strip(),
+                "cp_ciudad": (cp + " " + ciudad).strip(),
+                "provincia": str(config.get("provincia_fiscal") or "").strip(),
+                "pais": str(config.get("pais_fiscal") or "España").strip() or "España",
+                "email": str(config.get("email_fiscal") or "").strip(),
+                "telefono": str(config.get("telefono_fiscal") or "").strip(),
+                "notas_pie": str(config.get("notas_pie_factura") or "").strip(),
+            }
+
+    # 3. Fallback a secrets (sin Fase 5)
     return {
-        "nombre": str(st.secrets.get("EMISOR_NOMBRE_FISCAL", "Samirarte") or "Samirarte").strip(),
+        "nombre": str(st.secrets.get("EMISOR_NOMBRE_FISCAL", "") or "").strip(),
         "nif": str(st.secrets.get("EMISOR_NIF", "") or "").strip(),
         "direccion": str(st.secrets.get("EMISOR_DIRECCION", "") or "").strip(),
         "cp_ciudad": str(st.secrets.get("EMISOR_CP_CIUDAD", "") or "").strip(),
         "provincia": str(st.secrets.get("EMISOR_PROVINCIA", "") or "").strip(),
         "pais": str(st.secrets.get("EMISOR_PAIS", "España") or "España").strip(),
+        "email": "",
+        "telefono": "",
+        "notas_pie": "",
     }
 
 
 def validar_factura_normativa_basica(factura, cliente, lineas):
-    """Validaciones mínimas para emitir factura ordinaria en España."""
+    """
+    Validaciones mínimas para guardar/descargar un documento (Fase 5).
+    La validación fiscal dura (razón social + NIF + dirección obligatorios)
+    la hace emitir_documento() en la BD al emitir. Aquí solo validamos lo
+    necesario para guardar un borrador o descargar su PDF.
+    """
     tipo = str(factura.get("tipo_documento") or "").strip().lower()
     if tipo != "factura":
         return True, ""
-    emisor = obtener_datos_fiscales_emisor()
-    if not emisor.get("nif"):
-        return False, "Configura EMISOR_NIF en los secrets antes de emitir facturas."
-    if not emisor.get("direccion"):
-        return False, "Configura EMISOR_DIRECCION en los secrets antes de emitir facturas."
     if not str(cliente.get("nif_cif") or "").strip():
         return False, "El cliente debe tener NIF/CIF para emitir factura."
-    if not re.match(r"^FAC-\d{4}-\d{4}-\d{4,}$", str(factura.get("numero_factura") or "")):
-        return False, "La factura debe usar numeración FAC-AAAA-MMDD-000X."
     if not lineas:
         return False, "La factura debe incluir el desglose de recetas de uno o más menús."
+    # El número solo se valida si ya está asignado (documento emitido).
+    # Los borradores no llevan número (se asigna al emitir con emitir_documento).
+    numero = str(factura.get("numero_factura") or "").strip()
+    if numero and not re.match(r"^FAC-\d{4}-\d+$", numero):
+        return False, "La factura emitida debe usar numeración FAC-AAAA-NNNN."
     return True, ""
 
 
@@ -4066,6 +4198,26 @@ def generar_pdf_factura(factura, lineas, cliente):
     ]
     datos_cliente = [str(valor).strip() for valor in datos_cliente if str(valor or "").strip()]
 
+    # ── Emisor y logo (Fase 5): snapshot de la factura o config de la org ──────
+    # NUNCA se usa el logo ni el nombre de Samirarte (plataforma) para los documentos.
+    emisor = obtener_datos_fiscales_emisor(factura)
+    emisor_logo_b64 = ""
+    emisor_logo_mime = "image/png"
+    # 1. Snapshot del logo guardado al emitir
+    if factura.get("emisor_logo"):
+        emisor_logo_b64 = _bytea_a_base64(factura.get("emisor_logo"))
+        emisor_logo_mime = factura.get("emisor_logo_mime") or "image/png"
+    else:
+        # 2. Logo actual de la org (borrador)
+        _org_id_doc = factura.get("organizacion_id") or obtener_org_activa_id()
+        if _org_id_doc:
+            _lb64, _lmime = cargar_logo_org(_org_id_doc)
+            if _lb64:
+                emisor_logo_b64 = _lb64
+                emisor_logo_mime = _lmime or "image/png"
+    emisor_nombre = emisor.get("nombre") or ""
+    emisor_pie = str(emisor.get("notas_pie") or "").strip()
+
     try:
         from reportlab.lib import colors
         from reportlab.lib.pagesizes import A4
@@ -4076,11 +4228,17 @@ def generar_pdf_factura(factura, lineas, cliente):
         doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
         estilos = getSampleStyleSheet()
         elementos = []
-        if logo_samirarte_existe():
-            elementos.extend([Image(str(LOGO_SAMIRARTE_PATH), width=120, height=60), Spacer(1, 8)])
-        emisor = obtener_datos_fiscales_emisor()
+        # Logo de la org (si existe). Si no hay logo, no se muestra ninguno.
+        if emisor_logo_b64:
+            try:
+                elementos.extend([
+                    Image(io.BytesIO(base64.b64decode(emisor_logo_b64)), width=120, height=60),
+                    Spacer(1, 8),
+                ])
+            except Exception:
+                pass
         elementos.extend([
-            Paragraph(html.escape(emisor.get("nombre") or "Samirarte"), estilos["Title"]),
+            Paragraph(html.escape(emisor_nombre), estilos["Title"]),
             Paragraph(f"{tipo_visible} {html.escape(numero)}", estilos["Heading2"]),
             Paragraph(f"NIF/CIF emisor: {html.escape(emisor.get('nif') or '')}", estilos["Normal"]),
             Paragraph(f"Domicilio fiscal: {html.escape(emisor.get('direccion') or '')}", estilos["Normal"]),
@@ -4144,7 +4302,9 @@ def generar_pdf_factura(factura, lineas, cliente):
             elementos.append(Paragraph(f"Método de pago: {html.escape(str(factura.get('metodo_pago')))}", estilos["Normal"]))
         if factura.get("notas"):
             elementos.append(Paragraph(f"Notas: {html.escape(str(factura.get('notas')))}", estilos["Normal"]))
-        elementos.extend([Spacer(1, 12), Paragraph("Documento generado por Samirarte. Módulo de facturación interna.", estilos["Italic"])])
+        # Pie: texto propio de la org si existe; si no, sin pie (nunca "Samirarte").
+        if emisor_pie:
+            elementos.extend([Spacer(1, 12), Paragraph(html.escape(emisor_pie), estilos["Italic"])])
         doc.build(elementos)
         return {
             "data": buffer.getvalue(),
@@ -4178,11 +4338,15 @@ def generar_pdf_factura(factura, lineas, cliente):
             """)
     filas_html = "\n".join(filas_html_partes)
     cliente_html = "".join(f"<div>{escapar(dato)}</div>" for dato in datos_cliente)
-    emisor = obtener_datos_fiscales_emisor()
-    logo_b64 = logo_samirarte_base64()
+    # Emisor y logo de la org (nunca de Samirarte). emisor/emisor_logo_b64 ya calculados arriba.
     logo_html = ""
-    if logo_b64:
-        logo_html = f'<img class="logo" src="data:image/png;base64,{logo_b64}" alt="Samirarte">'
+    if emisor_logo_b64:
+        logo_html = (
+            f'<img class="logo" src="data:{emisor_logo_mime};base64,{emisor_logo_b64}" '
+            f'alt="{escapar(emisor_nombre)}">'
+        )
+    # Pie: texto propio de la org si existe; si no, sin pie (nunca "Samirarte").
+    pie_html = f"<footer>{escapar(emisor_pie)}</footer>" if emisor_pie else ""
     retencion_html = ""
     if numero_seguro(totales.get("retencion_importe"), 0.0):
         retencion_html = f"""
@@ -4226,7 +4390,7 @@ def generar_pdf_factura(factura, lineas, cliente):
 <body>
   <header>
     {logo_html}
-    <h1>{escapar(emisor.get('nombre') or 'Samirarte')}</h1>
+    <h1>{escapar(emisor_nombre)}</h1>
     <div>NIF/CIF: {escapar(emisor.get('nif'))}</div>
     <div>Domicilio fiscal: {escapar(emisor.get('direccion'))} {escapar(emisor.get('cp_ciudad'))}</div>
     <h2>{escapar(tipo_visible)} {escapar(numero)}</h2>
@@ -4266,7 +4430,7 @@ def generar_pdf_factura(factura, lineas, cliente):
     <div class="label">Notas</div>
     <div>{escapar(factura.get('notas'))}</div>
   </section>
-  <footer>Documento generado por Samirarte. Módulo de facturación interna.</footer>
+  {pie_html}
 </body>
 </html>"""
     return {
@@ -4482,14 +4646,25 @@ def cargar_factura_detalle_supabase(factura_id):
         return False, "Inicia sesión para cargar documentos.", None, pd.DataFrame(columns=FACTURA_LINEAS_COLUMNAS)
 
     try:
-        respuesta_factura = (
-            supabase
-            .table("facturas")
-            .select(",".join(FACTURAS_COLUMNAS))
-            .eq("id", factura_id_limpio)
-            .limit(1)
-            .execute()
-        )
+        # Intentar con las columnas de snapshot (Fase 5); si no existen, usar base.
+        try:
+            respuesta_factura = (
+                supabase
+                .table("facturas")
+                .select(",".join(FACTURAS_COLUMNAS_DETALLE))
+                .eq("id", factura_id_limpio)
+                .limit(1)
+                .execute()
+            )
+        except Exception:
+            respuesta_factura = (
+                supabase
+                .table("facturas")
+                .select(",".join(FACTURAS_COLUMNAS))
+                .eq("id", factura_id_limpio)
+                .limit(1)
+                .execute()
+            )
         factura = (respuesta_factura.data or [None])[0]
         if not factura:
             return False, "No se encontró el documento seleccionado.", None, pd.DataFrame(columns=FACTURA_LINEAS_COLUMNAS)
@@ -4756,10 +4931,17 @@ def duplicar_factura_supabase(factura_id):
     nueva_factura = dict(factura)
     for campo in ["id", "created_at", "updated_at", "base_imponible", "iva_importe", "retencion_importe", "total"]:
         nueva_factura.pop(campo, None)
+    # Fase 5: una copia es un borrador nuevo sin número ni snapshot de emisor.
+    for campo_emisor in [
+        "emisor_razon_social", "emisor_nif", "emisor_direccion", "emisor_cp_ciudad",
+        "emisor_provincia", "emisor_pais", "emisor_email", "emisor_telefono",
+        "emisor_logo", "emisor_logo_mime", "emisor_notas_pie", "factura_rectificada_id",
+    ]:
+        nueva_factura.pop(campo_emisor, None)
     nueva_factura["user_id"] = user_id_actual
     nueva_factura["estado"] = "borrador"
     nueva_factura["estado_cobro"] = "pendiente"
-    nueva_factura["numero_factura"] = generar_numero_factura(nueva_factura.get("tipo_documento"))
+    nueva_factura["numero_factura"] = None   # se asigna al emitir
 
     lineas = []
     for _, linea in lineas_df.iterrows():
@@ -6516,10 +6698,30 @@ usuario_actual = obtener_usuario_actual()
 if not usuario_actual:
     restaurar_sesion_supabase()
     usuario_actual = obtener_usuario_actual()
-logo_html = (
-    f'<img src="data:image/png;base64,{logo_samirarte_base64()}" alt="Samirarte">'
-    if logo_samirarte_existe()
-    else '<span class="samirarte-brand-fallback">SAMIRARTE</span>'
+# Marca de la cabecera: logo y nombre de la ORGANIZACIÓN ACTIVA (Fase 5).
+# NUNCA se muestra el logo ni el nombre de Samirarte para otra organización.
+# Si no hay organización activa (recién autenticado, sin org), se muestra solo
+# un texto genérico; la marca de plataforma queda reservada a la portada/login.
+_org_activa_id_topbar = obtener_org_activa_id()
+_org_activa_nombre_topbar = obtener_org_activa_nombre()
+_logo_org_b64, _logo_org_mime = (None, None)
+if _org_activa_id_topbar:
+    _logo_org_b64, _logo_org_mime = cargar_logo_org(_org_activa_id_topbar)
+
+if _logo_org_b64:
+    logo_html = (
+        f'<img src="data:{_logo_org_mime};base64,{_logo_org_b64}" '
+        f'alt="{html.escape(_org_activa_nombre_topbar)}">'
+    )
+elif _org_activa_nombre_topbar:
+    logo_html = f'<span class="samirarte-brand-fallback">{html.escape(_org_activa_nombre_topbar)}</span>'
+else:
+    logo_html = '<span class="samirarte-brand-fallback">Gestor de Escandallos</span>'
+
+_titulo_hero = (
+    f"Gestor de Escandallos · {html.escape(_org_activa_nombre_topbar)}"
+    if _org_activa_nombre_topbar
+    else "Gestor de Escandallos"
 )
 usuario_topbar = (usuario_actual or {}).get("email") or "Usuario"
 st.markdown(
@@ -6531,7 +6733,7 @@ st.markdown(
     <div class="samirarte-hero">
         <div class="samirarte-hero-icon">👨‍🍳</div>
         <div>
-            <h1>Gestor de Escandallos Inteligente Samirarte</h1>
+            <h1>{_titulo_hero}</h1>
             <p>Gestiona tus recetas y controla costes de forma eficiente</p>
         </div>
     </div>
@@ -6541,10 +6743,20 @@ st.markdown(
 
 # Panel lateral indicador de conexiones activas
 with st.sidebar:
-    if logo_samirarte_existe():
-        st.image(str(LOGO_SAMIRARTE_PATH), width=160)
+    # Logo/nombre de la organización activa (Fase 5).
+    # Sin org activa (antes de elegir org) → logo de plataforma Samirarte.
+    # Con org activa → logo de la org o, si no tiene, su nombre en texto.
+    _sb_org_id = obtener_org_activa_id()
+    if _sb_org_id:
+        _sb_logo_b64, _sb_logo_mime = cargar_logo_org(_sb_org_id)
+        if _sb_logo_b64:
+            st.image(f"data:{_sb_logo_mime};base64,{_sb_logo_b64}", width=160)
+        else:
+            st.caption(f"🏢 {obtener_org_activa_nombre()}")
     else:
-        st.caption("Logo no disponible")
+        # Antes de tener organización activa: marca de plataforma
+        if logo_samirarte_existe():
+            st.image(str(LOGO_SAMIRARTE_PATH), width=160)
 
     st.header("⚙️ Estado de Conexiones")
     if supabase_disponible:
@@ -8153,6 +8365,151 @@ def _renderizar_miembros_e_invitaciones(org_id, org_nombre):
                                 st.error(f"Error: {e_rv}")
 
 
+def _renderizar_datos_organizacion(org_id):
+    """
+    Pestaña del gerente: datos fiscales + logo de la organización (Fase 5 / 026).
+    El logo se guarda en organizacion_config.logo (bytea) como base64.
+    Requiere que la Fase 5 (026) esté aplicada en Supabase.
+    """
+    st.caption(
+        "Datos fiscales y logotipo de tu organización. Se usan en las facturas, "
+        "presupuestos y en la cabecera de la aplicación."
+    )
+
+    if not usuario_es_gerente_org_activa():
+        st.info("Solo los gerentes pueden editar los datos de la organización. Los chefs pueden consultarlos.")
+
+    # Cargar config existente
+    config = {}
+    try:
+        resp = (
+            supabase.table("organizacion_config")
+            .select("*")
+            .eq("organizacion_id", org_id)
+            .limit(1)
+            .execute()
+        )
+        filas = resp.data or []
+        if filas:
+            config = dict(filas[0])
+    except Exception as e_cfg:
+        _msg = str(e_cfg).lower()
+        if "could not find" in _msg or "does not exist" in _msg or "relation" in _msg:
+            st.info("ℹ️ Los datos de facturación estarán disponibles cuando se aplique la Fase 5 (sql/026).")
+            return
+        st.warning(f"No se pudo cargar la configuración: {str(e_cfg)[:80]}")
+
+    _es_gerente = usuario_es_gerente_org_activa()
+
+    # ── LOGOTIPO ───────────────────────────────────────────────────────────
+    st.markdown("#### Logotipo")
+    _logo_b64_actual, _logo_mime_actual = cargar_logo_org(org_id)
+    if _logo_b64_actual:
+        st.image(f"data:{_logo_mime_actual};base64,{_logo_b64_actual}", width=200)
+        if _es_gerente:
+            if st.button("Quitar logo", key="btn_quitar_logo_org"):
+                try:
+                    supabase.table("organizacion_config").update(
+                        {"logo": None, "logo_mime": None}
+                    ).eq("organizacion_id", org_id).execute()
+                    st.session_state.pop("_org_logo_cache", None)
+                    st.session_state.pop("_org_config_cache", None)
+                    st.success("Logo eliminado.")
+                    st.rerun()
+                except Exception as e_del:
+                    st.error(f"No se pudo quitar el logo: {e_del}")
+    else:
+        st.caption("Sin logotipo. Tu organización se mostrará con su nombre en texto.")
+
+    if _es_gerente:
+        _logo_file = st.file_uploader(
+            "Subir logotipo (PNG, JPG o WEBP, máx. 300 KB)",
+            type=["png", "jpg", "jpeg", "webp"],
+            key="uploader_logo_org",
+        )
+        if _logo_file is not None:
+            _bytes = _logo_file.getvalue()
+            if len(_bytes) > 300 * 1024:
+                st.error("El logo supera los 300 KB. Reduce su tamaño antes de subirlo.")
+            else:
+                # Vista previa antes de guardar
+                st.image(_bytes, width=200, caption="Vista previa")
+                _mime_map = {
+                    "png": "image/png", "jpg": "image/jpeg",
+                    "jpeg": "image/jpeg", "webp": "image/webp",
+                }
+                _ext = (_logo_file.name.rsplit(".", 1)[-1] or "png").lower()
+                _mime = _mime_map.get(_ext, "image/png")
+                if st.button("Guardar logo", key="btn_guardar_logo_org", type="primary"):
+                    try:
+                        # Guardar como bytea: PostgREST acepta hex con prefijo \x
+                        _hex = "\\x" + _bytes.hex()
+                        supabase.table("organizacion_config").upsert({
+                            "organizacion_id": org_id,
+                            "logo": _hex,
+                            "logo_mime": _mime,
+                        }, on_conflict="organizacion_id").execute()
+                        st.session_state.pop("_org_logo_cache", None)
+                        st.session_state.pop("_org_config_cache", None)
+                        st.success("Logo guardado.")
+                        st.rerun()
+                    except Exception as e_up:
+                        st.error(f"No se pudo guardar el logo: {e_up}")
+
+    st.divider()
+
+    # ── DATOS FISCALES ─────────────────────────────────────────────────────
+    st.markdown("#### Datos fiscales")
+    st.caption("Razón social, NIF/CIF y dirección son obligatorios para poder emitir documentos.")
+
+    with st.form("form_datos_org"):
+        _razon   = st.text_input("Razón social *", value=str(config.get("razon_social") or ""), disabled=not _es_gerente)
+        _nif     = st.text_input("NIF / CIF *", value=str(config.get("nif_cif") or ""), disabled=not _es_gerente)
+        _dir     = st.text_input("Dirección fiscal *", value=str(config.get("direccion_fiscal") or ""), disabled=not _es_gerente)
+        _c1, _c2 = st.columns(2)
+        with _c1:
+            _cp      = st.text_input("Código postal", value=str(config.get("codigo_postal_fiscal") or ""), disabled=not _es_gerente)
+            _ciudad  = st.text_input("Ciudad", value=str(config.get("ciudad_fiscal") or ""), disabled=not _es_gerente)
+            _email   = st.text_input("Email", value=str(config.get("email_fiscal") or ""), disabled=not _es_gerente)
+        with _c2:
+            _prov    = st.text_input("Provincia", value=str(config.get("provincia_fiscal") or ""), disabled=not _es_gerente)
+            _tel     = st.text_input("Teléfono", value=str(config.get("telefono_fiscal") or ""), disabled=not _es_gerente)
+            _iva     = st.number_input(
+                "IVA por defecto (%)",
+                min_value=0.0, max_value=100.0, step=0.5,
+                value=float(config.get("tipo_iva_defecto") or 21.0),
+                disabled=not _es_gerente,
+            )
+        _pie = st.text_area(
+            "Texto de pie de factura",
+            value=str(config.get("notas_pie_factura") or ""),
+            disabled=not _es_gerente,
+            height=80,
+        )
+        _guardar = st.form_submit_button("Guardar datos", type="primary", disabled=not _es_gerente)
+
+    if _guardar and _es_gerente:
+        try:
+            supabase.table("organizacion_config").upsert({
+                "organizacion_id":      org_id,
+                "razon_social":         _razon.strip() or None,
+                "nif_cif":              _nif.strip() or None,
+                "direccion_fiscal":     _dir.strip() or None,
+                "codigo_postal_fiscal": _cp.strip() or None,
+                "ciudad_fiscal":        _ciudad.strip() or None,
+                "provincia_fiscal":     _prov.strip() or None,
+                "email_fiscal":         _email.strip() or None,
+                "telefono_fiscal":      _tel.strip() or None,
+                "tipo_iva_defecto":     float(_iva),
+                "notas_pie_factura":    _pie.strip() or None,
+            }, on_conflict="organizacion_id").execute()
+            st.session_state.pop("_org_config_cache", None)
+            st.success("Datos de la organización guardados.")
+            st.rerun()
+        except Exception as e_sv:
+            st.error(f"No se pudieron guardar los datos: {e_sv}")
+
+
 def render_pagina_gerente():
     """
     Pantalla de gestión de la organización activa para gerentes.
@@ -8170,12 +8527,16 @@ def render_pagina_gerente():
 
     st.subheader(f"Gestión de {org_nombre}")
 
-    ger_tab_miembros_inv, ger_tab_inv, ger_tab_compartir = st.tabs([
-        "Miembros e invitaciones", "Inventario propio", "Compartir recetas"
+    ger_tab_miembros_inv, ger_tab_datos, ger_tab_inv, ger_tab_compartir = st.tabs([
+        "Miembros e invitaciones", "Datos de la organización",
+        "Inventario propio", "Compartir recetas"
     ])
 
     with ger_tab_miembros_inv:
         _renderizar_miembros_e_invitaciones(org_id, org_nombre)
+
+    with ger_tab_datos:
+        _renderizar_datos_organizacion(org_id)
 
     with ger_tab_inv:
         _renderizar_inventario_propio(org_id)
@@ -9249,10 +9610,12 @@ with main_tab_facturas:
                                 st.session_state["factura_id_en_edicion"] = None
                                 st.session_state["factura_presupuesto_origen_id"] = factura_guardada_id
                                 st.session_state["factura_tipo_documento"] = "factura"
-                                st.session_state["factura_numero_actual_factura"] = generar_numero_factura("factura")
+                                # Fase 5: borrador sin número (se asigna al emitir)
+                                st.session_state["factura_numero_actual_factura"] = ""
+                                st.session_state["factura_estado"] = "borrador"
                                 st.session_state["factura_documento_feedback"] = (
                                     "success",
-                                    "Factura creada desde el presupuesto con líneas e importes congelados.",
+                                    "Factura creada desde el presupuesto como borrador. Revísala y emítela.",
                                 )
                                 st.rerun()
                             else:
@@ -9295,57 +9658,88 @@ with main_tab_facturas:
 
                 factura_id_en_edicion = st.session_state.get("factura_id_en_edicion")
                 st.markdown("##### Documento actual")
+
+                # Estado del documento en edición (Fase 5): determina si es
+                # solo lectura (emitido/cobrado/anulado) o editable (borrador).
+                _doc_edicion = facturas_por_id.get(str(factura_id_en_edicion), {}) if factura_id_en_edicion else {}
+                _estado_edicion = str(_doc_edicion.get("estado") or "borrador").strip().lower()
+                _numero_edicion = str(_doc_edicion.get("numero_factura") or "").strip()
+                _es_solo_lectura = bool(factura_id_en_edicion) and _estado_edicion in ("emitida", "cobrada", "anulada")
+
                 if factura_id_en_edicion:
-                    st.info(f"Editando documento guardado `{factura_id_en_edicion}`.")
+                    if _es_solo_lectura:
+                        st.info(
+                            f"Documento **{_numero_edicion or 'sin número'}** en estado "
+                            f"**{_estado_edicion}**. Los documentos emitidos no se pueden editar."
+                        )
+                    else:
+                        st.info(f"Editando borrador `{factura_id_en_edicion}` (sin número hasta emitir).")
                 else:
                     st.caption("Crea un documento nuevo o carga uno guardado para editarlo.")
+
                 doc_col1, doc_col2, doc_col3 = st.columns(3)
                 with doc_col1:
                     factura_cliente_id = st.selectbox(
                         "Cliente",
                         opciones_clientes_factura,
                         format_func=lambda cliente_id: clientes_por_id_factura.get(cliente_id, {}).get("nombre", cliente_id),
-                        key="factura_cliente_id"
+                        key="factura_cliente_id",
+                        disabled=_es_solo_lectura,
                     )
                     tipo_documento = st.selectbox(
                         "Tipo de documento",
                         opciones_tipo_documento,
-                        key="factura_tipo_documento"
+                        key="factura_tipo_documento",
+                        disabled=_es_solo_lectura,
                     )
-                    numero_sugerido = generar_numero_factura(tipo_documento)
-                    numero_factura = st.text_input(
-                        "Número de documento",
-                        value=numero_sugerido,
-                        key=f"factura_numero_actual_{tipo_documento}",
-                        disabled=True,
-                        help="Numeración automática: PRE/FAC-AAAA-MMDD-000X"
-                    )
-                    st.caption("Numeración automática conforme a serie y fecha de emisión.")
+                    # Fase 5: los borradores NO llevan número; se asigna al emitir.
+                    if _numero_edicion:
+                        numero_factura = st.text_input(
+                            "Número de documento",
+                            value=_numero_edicion,
+                            key=f"factura_numero_actual_{tipo_documento}",
+                            disabled=True,
+                            help="Número asignado al emitir (anual por organización).",
+                        )
+                    else:
+                        numero_factura = ""
+                        st.text_input(
+                            "Número de documento",
+                            value="Sin número (se asigna al emitir)",
+                            key=f"factura_numero_actual_{tipo_documento}",
+                            disabled=True,
+                            help="Los borradores no llevan número. Se asigna al pulsar «Emitir».",
+                        )
                 with doc_col2:
-                    fecha_emision = st.date_input("Fecha de emisión", key="factura_fecha_emision")
-                    fecha_vencimiento = st.date_input("Fecha de vencimiento", key="factura_fecha_vencimiento")
+                    fecha_emision = st.date_input("Fecha de emisión", key="factura_fecha_emision", disabled=_es_solo_lectura)
+                    fecha_vencimiento = st.date_input("Fecha de vencimiento", key="factura_fecha_vencimiento", disabled=_es_solo_lectura)
+                    # El estado NO se edita libremente (lo controla emitir_documento y las
+                    # transiciones permitidas). Se muestra como solo lectura.
                     estado = st.selectbox(
                         "Estado",
                         opciones_estado_documento,
-                        key="factura_estado"
+                        key="factura_estado",
+                        disabled=True,
                     )
                 with doc_col3:
-                    metodo_pago = st.text_input("Método de pago", key="factura_metodo_pago")
+                    metodo_pago = st.text_input("Método de pago", key="factura_metodo_pago", disabled=_es_solo_lectura)
                     estado_cobro = st.selectbox(
                         "Estado de cobro",
                         opciones_estado_cobro,
-                        key="factura_estado_cobro"
+                        key="factura_estado_cobro",
+                        disabled=_es_solo_lectura,
                     )
                     retencion_pct = st.number_input(
                         "Retención (%)",
                         min_value=0.0,
                         max_value=100.0,
                         step=1.0,
-                        key="factura_retencion_pct"
+                        key="factura_retencion_pct",
+                        disabled=_es_solo_lectura,
                     )
 
-                concepto = st.text_input("Concepto", key="factura_concepto")
-                notas = st.text_area("Notas", key="factura_notas", height=80)
+                concepto = st.text_input("Concepto", key="factura_concepto", disabled=_es_solo_lectura)
+                notas = st.text_area("Notas", key="factura_notas", height=80, disabled=_es_solo_lectura)
 
                 st.markdown("##### Crear documento desde menú")
                 if not factura_cliente_id:
@@ -9572,11 +9966,14 @@ with main_tab_facturas:
                 with total_col6:
                     st.metric("Total", f"{totales_factura['total']:.2f} €")
 
+                # Fase 5: los borradores se guardan SIN número (lo asigna emitir_documento).
+                # Solo se conserva el número si el documento ya estaba emitido.
+                _numero_para_guardar = _numero_edicion if _numero_edicion else None
                 factura_actual = {
                     "cliente_id": factura_cliente_id,
-                    "numero_factura": str(numero_factura or "").strip(),
+                    "numero_factura": _numero_para_guardar,
                     "tipo_documento": tipo_documento,
-                    "estado": estado,
+                    "estado": _estado_edicion if factura_id_en_edicion else "borrador",
                     "fecha_emision": fecha_emision.isoformat() if fecha_emision else None,
                     "fecha_vencimiento": fecha_vencimiento.isoformat() if fecha_vencimiento else None,
                     "concepto": str(concepto or "").strip() or None,
@@ -9598,34 +9995,122 @@ with main_tab_facturas:
                 if menu_id_descarga:
                     factura_actual["menu_nombre_asociado"] = obtener_nombre_menu_por_id(menu_id_descarga)
 
-                descarga_col, guardar_col, actualizar_col = st.columns(3)
-                with descarga_col:
-                    if not cliente_actual_factura or not lineas_validas_descarga:
-                        st.warning("Selecciona un cliente y añade al menos una línea para descargar el documento.")
-                        st.button("Descargar documento", disabled=True, use_container_width=True)
+                # Botón de descarga (siempre disponible si hay cliente + líneas)
+                if not cliente_actual_factura or not lineas_validas_descarga:
+                    st.warning("Selecciona un cliente y añade al menos una línea para descargar el documento.")
+                    st.button("Descargar documento", disabled=True, use_container_width=True)
+                else:
+                    documento_descarga = generar_pdf_factura(
+                        factura_actual,
+                        lineas_validas_descarga,
+                        cliente_actual_factura
+                    )
+                    st.download_button(
+                        documento_descarga["label"],
+                        data=documento_descarga["data"],
+                        file_name=documento_descarga["file_name"],
+                        mime=documento_descarga["mime"],
+                        use_container_width=True
+                    )
+
+                guardar_documento = False
+                actualizar_documento = False
+
+                if _es_solo_lectura:
+                    # ── Documento emitido: solo lectura + transiciones de estado ──
+                    st.markdown("##### Acciones sobre el documento emitido")
+                    _es_gerente_fact = usuario_es_gerente_org_activa()
+                    _tipo_edicion = str(_doc_edicion.get("tipo_documento") or "").strip().lower()
+
+                    if _estado_edicion == "emitida":
+                        _acc_col1, _acc_col2 = st.columns(2)
+                        with _acc_col1:
+                            if st.button("Marcar como cobrado", use_container_width=True):
+                                try:
+                                    supabase.table("facturas").update(
+                                        {"estado": "cobrada"}
+                                    ).eq("id", factura_id_en_edicion).execute()
+                                    cargar_facturas_supabase()  # refresca el cache externo si lo hubiera
+                                    st.success("Documento marcado como cobrado.")
+                                    st.rerun()
+                                except Exception as _e_cob:
+                                    st.error(f"No se pudo marcar como cobrado: {_e_cob}")
+                        with _acc_col2:
+                            if _tipo_edicion == "presupuesto":
+                                if st.button("Anular presupuesto", use_container_width=True):
+                                    try:
+                                        supabase.table("facturas").update(
+                                            {"estado": "anulada"}
+                                        ).eq("id", factura_id_en_edicion).execute()
+                                        st.success("Presupuesto anulado.")
+                                        st.rerun()
+                                    except Exception as _e_anul:
+                                        st.error(f"No se pudo anular: {_e_anul}")
+                            elif _tipo_edicion == "factura" and _es_gerente_fact:
+                                if st.button("Crear rectificativa", use_container_width=True):
+                                    try:
+                                        _resp_rect = supabase.rpc(
+                                            "crear_rectificativa",
+                                            {"p_factura_original": factura_id_en_edicion},
+                                        ).execute()
+                                        _rect_id = _resp_rect.data
+                                        ok_det, msg_det, rect_det, rect_lineas = cargar_factura_detalle_supabase(
+                                            _rect_id if isinstance(_rect_id, str) else str(_rect_id or "")
+                                        )
+                                        if ok_det:
+                                            cargar_factura_en_sesion(rect_det, rect_lineas)
+                                            st.session_state["factura_documento_feedback"] = (
+                                                "success",
+                                                "Borrador rectificativo creado. Edítalo y emítelo cuando esté listo.",
+                                            )
+                                            st.rerun()
+                                        else:
+                                            st.error(msg_det)
+                                    except Exception as _e_rect:
+                                        st.error(f"No se pudo crear la rectificativa: {_e_rect}")
                     else:
-                        documento_descarga = generar_pdf_factura(
-                            factura_actual,
-                            lineas_validas_descarga,
-                            cliente_actual_factura
-                        )
-                        st.download_button(
-                            documento_descarga["label"],
-                            data=documento_descarga["data"],
-                            file_name=documento_descarga["file_name"],
-                            mime=documento_descarga["mime"],
+                        st.caption(f"Documento en estado «{_estado_edicion}». No admite más cambios.")
+                else:
+                    # ── Borrador: guardar / actualizar / emitir ──
+                    guardar_col, actualizar_col = st.columns(2)
+                    with guardar_col:
+                        guardar_documento = st.button("Guardar borrador", type="primary", use_container_width=True)
+                    with actualizar_col:
+                        actualizar_documento = st.button(
+                            "Actualizar borrador",
+                            disabled=not bool(factura_id_en_edicion),
                             use_container_width=True
                         )
 
-                with guardar_col:
-                    guardar_documento = st.button("Guardar documento", type="primary", use_container_width=True)
-
-                with actualizar_col:
-                    actualizar_documento = st.button(
-                        "Actualizar documento seleccionado",
-                        disabled=not bool(st.session_state.get("factura_id_en_edicion")),
-                        use_container_width=True
-                    )
+                    # Botón Emitir: solo para gerente y sobre un borrador ya guardado
+                    if factura_id_en_edicion and usuario_es_gerente_org_activa():
+                        if st.button("📄 Emitir documento", type="primary", use_container_width=True):
+                            try:
+                                _resp_emit = supabase.rpc(
+                                    "emitir_documento",
+                                    {"p_factura_id": factura_id_en_edicion},
+                                ).execute()
+                                _num_emitido = _resp_emit.data
+                                st.session_state["factura_documento_feedback"] = (
+                                    "success",
+                                    f"Documento emitido con número {_num_emitido}.",
+                                )
+                                st.rerun()
+                            except Exception as _e_emit:
+                                _msg_emit = str(_e_emit)
+                                if "Faltan datos fiscales" in _msg_emit or "datos del emisor" in _msg_emit:
+                                    st.error(
+                                        "No se puede emitir: faltan datos fiscales (razón social, NIF y dirección). "
+                                        "Complétalos en Gerente → Datos de la organización."
+                                    )
+                                elif "Solo el gerente" in _msg_emit:
+                                    st.error("Solo el gerente de la organización puede emitir documentos.")
+                                else:
+                                    st.error(f"No se pudo emitir el documento: {_msg_emit[:150]}")
+                    elif factura_id_en_edicion and not usuario_es_gerente_org_activa():
+                        st.caption("Solo el gerente puede emitir el documento (asignar número definitivo).")
+                    elif not factura_id_en_edicion:
+                        st.caption("Guarda el borrador antes de poder emitirlo.")
 
                 if guardar_documento:
                     ok_normativa, mensaje_normativa = validar_factura_normativa_basica(
@@ -9641,7 +10126,7 @@ with main_tab_facturas:
                         st.session_state["factura_lineas_actual"]
                     )
                     if ok_guardar_doc:
-                        st.success(f"{mensaje_guardar_doc} {factura_guardada.get('numero_factura', numero_factura)}")
+                        st.success(f"{mensaje_guardar_doc}")
                         st.session_state["factura_lineas_actual"] = []
                         st.session_state["factura_id_en_edicion"] = None
                         st.session_state["factura_presupuesto_origen_id"] = None
@@ -9656,7 +10141,7 @@ with main_tab_facturas:
                         st.session_state["factura_lineas_actual"]
                     )
                     if ok_actualizar_doc:
-                        st.success(f"{mensaje_actualizar_doc} {factura_actualizada.get('numero_factura', numero_factura)}")
+                        st.success(f"{mensaje_actualizar_doc}")
                         st.rerun()
                     else:
                         st.error(mensaje_actualizar_doc)
