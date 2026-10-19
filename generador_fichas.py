@@ -10190,6 +10190,54 @@ with main_tab_recetas:
     if org_id_compartir and supabase_disponible:
         st.divider()
         st.markdown("##### Recetas compartidas con mi organización")
+
+        # Mostrar resultado de la última copia (guardado en session_state antes
+        # del rerun para que sobreviva el redibujado de la página)
+        _res_copia = st.session_state.pop("_copia_receta_resultado", None)
+        if _res_copia is not None:
+            _cod_nueva = ""
+            try:
+                _cod_nueva_q = (
+                    supabase.table("recetas")
+                    .select("codigo_receta")
+                    .eq("id", _res_copia.get("nueva_receta_id", ""))
+                    .single()
+                    .execute()
+                )
+                _cod_nueva = (_cod_nueva_q.data or {}).get("codigo_receta", "")
+            except Exception:
+                pass
+            _org_nombre = ""
+            try:
+                _org_q = (
+                    supabase.table("organizaciones")
+                    .select("nombre")
+                    .eq("id", org_id_compartir)
+                    .single()
+                    .execute()
+                )
+                _org_nombre = (_org_q.data or {}).get("nombre", "")
+            except Exception:
+                pass
+            _cod_txt = f" como **{_cod_nueva}**" if _cod_nueva else ""
+            _org_txt = f" en **{_org_nombre}**" if _org_nombre else ""
+            st.success(
+                f"✅ Receta copiada{_cod_txt}{_org_txt}. "
+                "Revisa precios y PVP: los márgenes no se copian."
+            )
+            _privados_res = _res_copia.get("privados_pendientes") or []
+            if _privados_res:
+                _lineas_priv = "\n".join(
+                    f"- **{p.get('codigo', '')}** — {p.get('descripcion', '')}"
+                    for p in _privados_res
+                )
+                st.warning(
+                    "⚠️ Los siguientes ingredientes privados se han creado en tu organización "
+                    "con alérgenos pendientes de revisión:\n\n"
+                    + _lineas_priv
+                    + "\n\nRevisa y confirma los alérgenos de estos ingredientes en "
+                    "**Gerente → Inventario propio** antes de usar la receta."
+                )
         try:
             _comp_conmigo = supabase.rpc(
                 "listar_recetas_compartidas_conmigo",
@@ -10290,21 +10338,16 @@ with main_tab_recetas:
                                         "p_org_destino": org_id_compartir,
                                     },
                                 ).execute().data
-                                _nueva_id    = _resultado.get("nueva_receta_id", "")
-                                _privados    = _resultado.get("privados_pendientes", [])
+                                _nueva_id = _resultado.get("nueva_receta_id", "")
+                                _privados = _resultado.get("privados_pendientes", [])
                                 cargar_recetas_supabase.clear()
                                 st.session_state.pop("_vista_previa_receta_compartida", None)
-                                if _privados:
-                                    _nombres_priv = ", ".join(
-                                        p.get("descripcion", p.get("codigo", "")) for p in _privados
-                                    )
-                                    st.warning(
-                                        f"⚠️ Receta copiada. Los siguientes ingredientes privados se han creado en "
-                                        f"tu organización con alérgenos pendientes de revisión: **{_nombres_priv}**. "
-                                        "Ve a **Gerente → Inventario propio** para revisarlos."
-                                    )
-                                else:
-                                    st.success("Receta copiada correctamente a tu organización.")
+                                # Guardar resultado para mostrarlo tras el rerun
+                                # (los st.success/warning antes de rerun se descartan)
+                                st.session_state["_copia_receta_resultado"] = {
+                                    "nueva_receta_id": _nueva_id,
+                                    "privados_pendientes": _privados,
+                                }
                                 st.rerun()
                             except Exception as _e_copy:
                                 st.error(f"No se pudo copiar la receta: {_e_copy}")
