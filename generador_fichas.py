@@ -1091,6 +1091,39 @@ def establecer_org_activa(org_id, org_nombre):
     # Invalidar cachés de config y logo de org (dependen de la org activa)
     st.session_state.pop("_org_config_cache", None)
     st.session_state.pop("_org_logo_cache", None)
+    # Limpiar el estado del documento de facturación en curso para que NADA se
+    # arrastre de la organización anterior (IVA por defecto, líneas, cliente,
+    # snapshots, documento en edición). El siguiente documento nuevo partirá del
+    # IVA por defecto y la config de la organización recién seleccionada.
+    _limpiar_estado_documento_facturacion()
+
+
+def _limpiar_estado_documento_facturacion():
+    """Resetea todo el estado de sesión del módulo de facturación."""
+    for _clave in [
+        "factura_iva_pct",
+        "factura_lineas_actual",
+        "factura_lineas_bd",
+        "factura_id_en_edicion",
+        "factura_presupuesto_origen_id",
+        "factura_detalle_cargado",
+        "factura_cliente_id",
+        "factura_concepto",
+        "factura_notas",
+        "factura_metodo_pago",
+        "factura_estado",
+        "factura_estado_cobro",
+        "factura_retencion_pct",
+        "factura_fecha_emision",
+        "factura_fecha_vencimiento",
+        "factura_tipo_documento",
+        "selector_factura_guardada",
+        "selector_cliente_factura",
+    ]:
+        st.session_state.pop(_clave, None)
+    # Claves de número por tipo (factura_numero_actual_<tipo>)
+    for _tipo in ("factura", "presupuesto", "factura_rectificativa"):
+        st.session_state.pop(f"factura_numero_actual_{_tipo}", None)
 
 
 def vaciar_caches_datos_org():
