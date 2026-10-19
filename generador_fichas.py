@@ -4105,8 +4105,30 @@ def formatear_importe_euros(valor):
 
 
 def iva_documento_actual():
-    """IVA aplicable a presupuestos/facturas desde Parámetros avanzados."""
-    return numero_seguro(st.session_state.get("iva_pct", 21.0), 21.0)
+    """
+    IVA aplicable al documento de facturación actual (Fase 5).
+
+    Prioridad:
+      1. El IVA del documento en edición (st.session_state["factura_iva_pct"]),
+         fijado por el campo "IVA (%)" o cargado de un borrador guardado.
+      2. tipo_iva_defecto de la organización activa (organizacion_config).
+      3. 21 como último recurso.
+    Ya NO depende de st.session_state["iva_pct"] (parámetros avanzados de recetas).
+    """
+    _iva_doc = st.session_state.get("factura_iva_pct")
+    if _iva_doc is not None:
+        return numero_seguro(_iva_doc, 21.0)
+    return iva_defecto_organizacion()
+
+
+def iva_defecto_organizacion():
+    """IVA por defecto de la organización activa (organizacion_config)."""
+    org_id = obtener_org_activa_id()
+    if org_id:
+        config = cargar_config_org(org_id)
+        if config and config.get("tipo_iva_defecto") is not None:
+            return numero_seguro(config.get("tipo_iva_defecto"), 21.0)
+    return 21.0
 
 
 def obtener_datos_fiscales_emisor(factura=None):
@@ -5058,6 +5080,14 @@ def cargar_factura_en_sesion(factura, lineas_df):
     st.session_state["factura_retencion_pct"] = numero_seguro(factura.get("retencion_pct"), 0.0)
     st.session_state["factura_concepto"] = str(factura.get("concepto") or "")
     st.session_state["factura_notas"] = str(factura.get("notas") or "")
+    # IVA del documento: usar el guardado (no el de parámetros de recetas ni la
+    # config actual de la org). Si el documento no tenía iva_pct, caer al de la org.
+    _iva_guardado = factura.get("iva_pct")
+    st.session_state["factura_iva_pct"] = (
+        numero_seguro(_iva_guardado, iva_defecto_organizacion())
+        if _iva_guardado is not None
+        else iva_defecto_organizacion()
+    )
 
     # Guardar el detalle completo (incluye snapshots emisor_*/cliente_snapshot_*
     # y organizacion_id) para que la descarga de documentos emitidos use el
@@ -5066,9 +5096,11 @@ def cargar_factura_en_sesion(factura, lineas_df):
 
     # Guardar las líneas CRUDAS de la BD (con su iva_pct/iva_linea/total_linea)
     # para que el PDF de un documento emitido use exactamente lo guardado, sin
-    # recálculos posteriores que pisan el IVA.
+    # recálculos posteriores que pisan el IVA. Se re-hidrata coste y
+    # menu_nombre_snapshot (ambos auxiliares, no persistidos en factura_lineas).
     if lineas_df is not None and not lineas_df.empty:
-        st.session_state["factura_lineas_bd"] = lineas_df.to_dict(orient="records")
+        _lineas_bd = lineas_df.to_dict(orient="records")
+        st.session_state["factura_lineas_bd"] = _rehidratar_coste_lineas_menu(_lineas_bd)
     else:
         st.session_state["factura_lineas_bd"] = []
 
@@ -5078,10 +5110,9 @@ def cargar_factura_en_sesion(factura, lineas_df):
             lineas.append(calcular_linea_factura(linea.to_dict()))
     lineas = lineas or [linea_factura_vacia()]
 
-    # Re-hidratar el COSTE de las líneas de menú. factura_lineas no persiste
-    # coste_total_menu (es un campo auxiliar), así que al recargar el coste/margen/
-    # food-cost salían a 0. Recomputamos el coste de cada menú de origen desde su
-    # detalle actual y lo asignamos a las líneas de ese menú.
+    # Re-hidratar el COSTE y el NOMBRE DEL MENÚ de las líneas. factura_lineas no
+    # persiste coste_total_menu ni menu_nombre_snapshot (campos auxiliares), así
+    # que al recargar el coste salía a 0 y el menú aparecía como "Menú".
     _lineas = _rehidratar_coste_lineas_menu(lineas)
     st.session_state["factura_lineas_actual"] = _lineas
 
@@ -5106,6 +5137,7 @@ def _rehidratar_coste_lineas_menu(lineas):
         return lineas
 
     costes_por_menu = {}
+    nombres_por_menu = {}
     for mid in menu_ids:
         try:
             cab_menu, lineas_menu_df = cargar_menu_detalle_supabase(mid)
@@ -5115,6 +5147,7 @@ def _rehidratar_coste_lineas_menu(lineas):
                     cab_menu.get("coste_total", _tot.get("coste_total", 0.0)),
                     numero_seguro(_tot.get("coste_total", 0.0), 0.0),
                 )
+                nombres_por_menu[mid] = str(cab_menu.get("nombre") or "").strip()
         except Exception:
             costes_por_menu[mid] = 0.0
 
@@ -5127,6 +5160,12 @@ def _rehidratar_coste_lineas_menu(lineas):
                 linea["coste_linea_menu_documento"] = _coste
                 # asegurar que menu_origen_id queda fijado para extraer_lineas_menu_documento
                 linea.setdefault("menu_origen_id", mid)
+                # Re-hidratar el nombre del menú (menu_nombre_snapshot no se
+                # persiste en factura_lineas). Si el menú ya no existe, conservar
+                # el que hubiera.
+                _nombre_menu = nombres_por_menu.get(mid, "")
+                if _nombre_menu:
+                    linea["menu_nombre_snapshot"] = _nombre_menu
     return lineas
 
 
@@ -9928,6 +9967,20 @@ with main_tab_facturas:
                         key="factura_retencion_pct",
                         disabled=_es_solo_lectura,
                     )
+                    # IVA del documento (Fase 5). Valor inicial: IVA por defecto de
+                    # la organización. Editable solo en borradores; en emitidos se
+                    # muestra el IVA congelado y bloqueado.
+                    if "factura_iva_pct" not in st.session_state:
+                        st.session_state["factura_iva_pct"] = iva_defecto_organizacion()
+                    iva_pct_documento = st.number_input(
+                        "IVA (%)",
+                        min_value=0.0,
+                        max_value=100.0,
+                        step=0.5,
+                        key="factura_iva_pct",
+                        disabled=_es_solo_lectura,
+                        help="IVA aplicado a las líneas del documento. Por defecto, el de la organización.",
+                    )
 
                 concepto = st.text_input("Concepto", key="factura_concepto", disabled=_es_solo_lectura)
                 notas = st.text_area("Notas", key="factura_notas", height=80, disabled=_es_solo_lectura)
@@ -10051,6 +10104,8 @@ with main_tab_facturas:
                         st.session_state["factura_lineas_actual"] = []
                         st.session_state["factura_id_en_edicion"] = None
                         st.session_state["factura_presupuesto_origen_id"] = None
+                        # Reset del IVA del documento al defecto de la org
+                        st.session_state.pop("factura_iva_pct", None)
                         st.rerun()
 
                 columnas_editor_factura = [
@@ -10370,6 +10425,7 @@ with main_tab_facturas:
                         st.session_state["factura_lineas_actual"] = []
                         st.session_state["factura_id_en_edicion"] = None
                         st.session_state["factura_presupuesto_origen_id"] = None
+                        st.session_state.pop("factura_iva_pct", None)
                         st.rerun()
                     else:
                         st.error(mensaje_guardar_doc)
