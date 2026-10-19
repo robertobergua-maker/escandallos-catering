@@ -7680,9 +7680,12 @@ def _renderizar_compartir_recetas(org_id):
                 format_func=lambda rid: _receta_nombres.get(str(rid), str(rid)),
                 key="comp_receta_sel",
             )
-            # Cargar organizaciones destino
+            # Cargar organizaciones destino para la org que comparte
             try:
-                _orgs_resp = supabase.rpc("listar_organizaciones_destino", {}).execute()
+                _orgs_resp = supabase.rpc(
+                    "listar_organizaciones_destino",
+                    {"p_org_origen": str(org_id)}
+                ).execute()
                 _orgs_destino = _orgs_resp.data or []
             except Exception as e_od:
                 st.warning(
@@ -9786,7 +9789,11 @@ with main_tab_recetas:
                     st.markdown(f"**Compartir receta «{_modal_receta_nombre}»**")
                     _orgs_destino = []
                     try:
-                        _orgs_destino = supabase.rpc("listar_organizaciones_destino").execute().data or []
+                        _org_origen_id = obtener_org_activa_id()
+                        _orgs_destino = supabase.rpc(
+                            "listar_organizaciones_destino",
+                            {"p_org_origen": str(_org_origen_id)}
+                        ).execute().data or []
                     except Exception as _e_orgs:
                         _msg_orgs = str(_e_orgs).lower()
                         if "could not find" in _msg_orgs or "does not exist" in _msg_orgs or "pgrst202" in _msg_orgs:
