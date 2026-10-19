@@ -1544,7 +1544,39 @@ def valor_user_id_receta(receta):
     return user_id or None
 
 
+def _valor_organizacion_id(obj):
+    """Devuelve organizacion_id normalizado de un dict/row, o None."""
+    if obj is None:
+        return None
+    org_id = obj.get("organizacion_id") if isinstance(obj, dict) else getattr(obj, "organizacion_id", None)
+    if org_id is None:
+        return None
+    try:
+        if pd.isna(org_id):
+            return None
+    except TypeError:
+        pass
+    org_id = str(org_id).strip()
+    return org_id or None
+
+
+def _objeto_pertenece_a_org_activa(obj):
+    """
+    Criterio multiorganización: un objeto (receta/menú/cliente/factura) es
+    accesible/modificable si pertenece a la organización activa. Los registros
+    antiguos sin organizacion_id (NULL) se aceptan también (migración pendiente).
+    RLS en la BD es la barrera real; esto solo decide la UI.
+    """
+    org_activa = obtener_org_activa_id()
+    obj_org = _valor_organizacion_id(obj)
+    return obj_org in (org_activa, None)
+
+
 def receta_es_propia_o_antigua(receta):
+    # Con organización activa (Fase 2+): basta con que la receta sea de la org
+    # (o antigua sin org). Sin org activa: criterio legacy por user_id.
+    if obtener_org_activa_id():
+        return _objeto_pertenece_a_org_activa(receta)
     user_id_actual = obtener_user_id_actual()
     receta_user_id = valor_user_id_receta(receta)
     if user_id_actual:
@@ -1553,6 +1585,8 @@ def receta_es_propia_o_antigua(receta):
 
 
 def receta_es_modificable(receta):
+    if obtener_org_activa_id():
+        return _objeto_pertenece_a_org_activa(receta)
     user_id_actual = obtener_user_id_actual()
     receta_user_id = valor_user_id_receta(receta)
     if user_id_actual:
@@ -1561,7 +1595,7 @@ def receta_es_modificable(receta):
 
 
 def mensaje_receta_no_modificable():
-    return "No puedes modificar una receta de otro usuario"
+    return "No puedes modificar una receta de otra organización"
 
 
 def valor_user_id_menu(menu):
@@ -1580,6 +1614,8 @@ def valor_user_id_menu(menu):
 
 
 def menu_es_propio_o_antiguo(menu):
+    if obtener_org_activa_id():
+        return _objeto_pertenece_a_org_activa(menu)
     user_id_actual = obtener_user_id_actual()
     menu_user_id = valor_user_id_menu(menu)
     if user_id_actual:
@@ -1588,6 +1624,8 @@ def menu_es_propio_o_antiguo(menu):
 
 
 def menu_es_modificable(menu):
+    if obtener_org_activa_id():
+        return _objeto_pertenece_a_org_activa(menu)
     user_id_actual = obtener_user_id_actual()
     menu_user_id = valor_user_id_menu(menu)
     if user_id_actual:
@@ -1596,6 +1634,8 @@ def menu_es_modificable(menu):
 
 
 def mensaje_menu_no_modificable(menu):
+    if obtener_org_activa_id():
+        return "No puedes modificar un menú de otra organización"
     if obtener_user_id_actual() and valor_user_id_menu(menu) is None:
         return "Este menú antiguo no tiene propietario. Duplica el menú para guardarlo en tu cuenta."
     return "No puedes modificar un menú de otro usuario"
@@ -3621,7 +3661,11 @@ def cargar_menu_detalle_supabase(menu_id):
             .execute()
         )
         cabecera = (respuesta_menu.data or [{}])[0] if respuesta_menu.data else {}
-        if cabecera and not menu_es_propio_o_antiguo(cabecera):
+        # Con organización activa (Fase 2+), el acceso lo controla RLS
+        # (es_miembro_org): cualquier miembro puede abrir menús de su org, sin
+        # importar qué usuario los creó. Solo en modo legacy (sin org activa) se
+        # aplica el filtro por propietario/antigüedad.
+        if cabecera and not obtener_org_activa_id() and not menu_es_propio_o_antiguo(cabecera):
             return {}, lineas_vacias
 
         columnas_menu_recetas_nuevas = (
@@ -4690,9 +4734,11 @@ def cargar_factura_detalle_supabase(factura_id):
             return False, "No se encontró el documento seleccionado.", None, pd.DataFrame(columns=FACTURA_LINEAS_COLUMNAS)
 
         factura = preparar_factura_compatibilidad(factura)
+        # Multiorganización (Fase 2+): el acceso lo controla RLS (es_miembro_org)
+        # y el trigger de 026 (los emitidos son inmutables). Cualquier miembro de
+        # la org puede cargar y editar borradores de su organización; no se filtra
+        # por user_id.
         factura_user_id = str(factura.get("user_id") or "").strip()
-        if factura_user_id and factura_user_id != user_id_actual:
-            return False, "No puedes editar documentos de otro usuario.", None, pd.DataFrame(columns=FACTURA_LINEAS_COLUMNAS)
 
         respuesta_lineas = (
             supabase
@@ -4711,7 +4757,9 @@ def cargar_factura_detalle_supabase(factura_id):
         # Las líneas de menú se guardan como factura_lineas ordinarias.
 
         mensaje = "Documento cargado correctamente."
-        if not factura_user_id:
+        # Solo avisar de "documento antiguo sin propietario" si NO hay organización
+        # activa (modo legacy). Con org activa, la pertenencia la da organizacion_id.
+        if not factura_user_id and not obtener_org_activa_id():
             mensaje = (
                 "Documento antiguo sin usuario asignado. Puedes revisarlo, "
                 "pero duplica el documento para guardarlo en tu cuenta."
@@ -4864,11 +4912,13 @@ def actualizar_factura_supabase(factura_id, factura, lineas):
     if not ok_detalle:
         return False, mensaje_detalle, None
 
+    # Multiorganización: el acceso y la inmutabilidad los garantizan RLS
+    # (es_miembro_org) y el trigger de 026 (emitidos no editables). No se filtra
+    # por user_id. En modo legacy sin org activa, exigir duplicar los documentos
+    # antiguos sin propietario.
     factura_user_id = str((factura_existente or {}).get("user_id") or "").strip()
-    if not factura_user_id:
+    if not obtener_org_activa_id() and not factura_user_id:
         return False, "Este documento antiguo debe duplicarse antes de guardarse en tu cuenta.", None
-    if factura_user_id != user_id_actual:
-        return False, "No puedes editar documentos de otro usuario.", None
 
     documento_valido, mensaje_validacion = validar_documento_con_menus(factura, lineas)
     if not documento_valido:
@@ -8408,6 +8458,15 @@ def _renderizar_datos_organizacion(org_id):
     if not usuario_es_gerente_org_activa():
         st.info("Solo los gerentes pueden editar los datos de la organización. Los chefs pueden consultarlos.")
 
+    # Mensaje de confirmación persistido tras el st.rerun de guardar/eliminar
+    _feedback_datos_org = st.session_state.pop("_datos_org_feedback", None)
+    if _feedback_datos_org:
+        _tipo_fb, _msg_fb = _feedback_datos_org
+        if _tipo_fb == "success":
+            st.success(_msg_fb)
+        else:
+            st.error(_msg_fb)
+
     # Cargar config existente
     config = {}
     try:
@@ -8443,7 +8502,7 @@ def _renderizar_datos_organizacion(org_id):
                     ).eq("organizacion_id", org_id).execute()
                     st.session_state.pop("_org_logo_cache", None)
                     st.session_state.pop("_org_config_cache", None)
-                    st.success("Logo eliminado.")
+                    st.session_state["_datos_org_feedback"] = ("success", "Logo eliminado.")
                     st.rerun()
                 except Exception as e_del:
                     st.error(f"No se pudo quitar el logo: {e_del}")
@@ -8480,7 +8539,7 @@ def _renderizar_datos_organizacion(org_id):
                         }, on_conflict="organizacion_id").execute()
                         st.session_state.pop("_org_logo_cache", None)
                         st.session_state.pop("_org_config_cache", None)
-                        st.success("Logo guardado.")
+                        st.session_state["_datos_org_feedback"] = ("success", "Logo guardado.")
                         st.rerun()
                     except Exception as e_up:
                         st.error(f"No se pudo guardar el logo: {e_up}")
@@ -8533,7 +8592,7 @@ def _renderizar_datos_organizacion(org_id):
                 "notas_pie_factura":    _pie.strip() or None,
             }, on_conflict="organizacion_id").execute()
             st.session_state.pop("_org_config_cache", None)
-            st.success("Datos de la organización guardados.")
+            st.session_state["_datos_org_feedback"] = ("success", "Datos de la organización guardados.")
             st.rerun()
         except Exception as e_sv:
             st.error(f"No se pudieron guardar los datos: {e_sv}")
@@ -9571,17 +9630,23 @@ with main_tab_facturas:
                         if row.get("id")
                     }
                     opciones_facturas = list(facturas_por_id.keys())
+
+                    def _etiqueta_documento_guardado(factura_id):
+                        _d = facturas_por_id.get(factura_id, {})
+                        _num = str(_d.get("numero_factura") or "").strip() or "Borrador"
+                        return (
+                            f"{_num} · "
+                            f"{_d.get('tipo_documento', '')} · "
+                            f"{_d.get('cliente', '')} · "
+                            f"{_d.get('fecha_emision', '')} · "
+                            f"{_d.get('estado', '')} · "
+                            f"{numero_seguro(_d.get('total'), 0.0):.2f} €"
+                        )
+
                     factura_guardada_id = st.selectbox(
-                        "Documentos del usuario conectado",
+                        f"Documentos de {obtener_org_activa_nombre() or 'tu organización'}",
                         opciones_facturas,
-                        format_func=lambda factura_id: (
-                            f"{facturas_por_id.get(factura_id, {}).get('numero_factura', '')} · "
-                            f"{facturas_por_id.get(factura_id, {}).get('tipo_documento', '')} · "
-                            f"{facturas_por_id.get(factura_id, {}).get('cliente', '')} · "
-                            f"{facturas_por_id.get(factura_id, {}).get('fecha_emision', '')} · "
-                            f"{facturas_por_id.get(factura_id, {}).get('estado', '')} · "
-                            f"{numero_seguro(facturas_por_id.get(factura_id, {}).get('total'), 0.0):.2f} €"
-                        ),
+                        format_func=_etiqueta_documento_guardado,
                         key="selector_factura_guardada"
                     )
                     ok_origen_doc, _, _, lineas_origen_doc = cargar_factura_detalle_supabase(factura_guardada_id)
@@ -9830,7 +9895,10 @@ with main_tab_facturas:
                                 st.stop()
                             cabecera_menu, lineas_menu_df = cargar_menu_detalle_supabase(menu_factura_id)
                             if not cabecera_menu:
-                                st.error("No se pudo cargar el menú seleccionado.")
+                                st.error(
+                                    "No se pudo cargar el menú seleccionado. "
+                                    "Comprueba que pertenece a tu organización activa."
+                                )
                             elif lineas_menu_df.empty:
                                 st.warning("El menú seleccionado no tiene recetas guardadas.")
                             else:
@@ -10206,6 +10274,10 @@ with main_tab_facturas:
                     facturas_resumen["cliente"] = facturas_resumen["cliente_id"].apply(
                         lambda cliente_id: nombres_clientes_factura.get(str(cliente_id), "")
                     )
+                    # Los borradores no tienen número: mostrar "Borrador" en su lugar.
+                    facturas_resumen["numero_factura"] = facturas_resumen["numero_factura"].apply(
+                        lambda v: str(v).strip() if str(v or "").strip() else "Borrador"
+                    )
                     facturas_resumen = facturas_resumen[[
                         "numero_factura", "tipo_documento", "cliente",
                         "fecha_emision", "estado", "total"
@@ -10481,7 +10553,7 @@ with main_tab_recetas:
                 if receta_id_a_cargar:
                     receta_seleccionada = recetas_por_id.get(str(receta_id_a_cargar), {})
                     if receta_seleccionada and not receta_es_propia_o_antigua(receta_seleccionada):
-                        st.error("No puedes modificar una receta de otro usuario")
+                        st.error(mensaje_receta_no_modificable())
                     else:
                         ok_carga, mensaje_carga = cargar_receta_guardada_en_sesion(
                             receta_id_a_cargar
@@ -10680,8 +10752,8 @@ with main_tab_recetas:
         elif not receta_id_para_eliminar:
             st.info("Selecciona o carga una receta antes de intentar eliminarla.")
         elif receta_para_eliminar and not receta_es_modificable(receta_para_eliminar):
-            st.warning("No puedes modificar una receta de otro usuario")
-            if valor_user_id_receta(receta_para_eliminar) is None:
+            st.warning(mensaje_receta_no_modificable())
+            if not obtener_org_activa_id() and valor_user_id_receta(receta_para_eliminar) is None:
                 st.info("Esta receta antigua no tiene propietario. Cierra sesión para eliminarla o duplícala en tu cuenta.")
         else:
             codigo_eliminar = str(
@@ -10953,7 +11025,7 @@ with main_tab_menus:
                 if cargar_menu_btn:
                     menu_seleccionado = menus_por_id.get(str(menu_id_seleccionado), {})
                     if menu_seleccionado and not menu_es_propio_o_antiguo(menu_seleccionado):
-                        st.error("No puedes modificar un menú de otro usuario")
+                        st.error(mensaje_menu_no_modificable(menu_seleccionado))
                     else:
                         cabecera_menu, lineas_menu_df = cargar_menu_detalle_supabase(menu_id_seleccionado)
                         if not cabecera_menu:
