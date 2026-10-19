@@ -110,7 +110,12 @@ create table if not exists public.organizacion_config (
   created_at            timestamptz not null default now(),
 
   constraint org_config_iva_rango
-    check (tipo_iva_defecto >= 0 and tipo_iva_defecto <= 100)
+    check (tipo_iva_defecto >= 0 and tipo_iva_defecto <= 100),
+  -- Logo: máximo 300 KB y solo PNG/JPG/WEBP
+  constraint org_config_logo_tamano
+    check (logo is null or octet_length(logo) <= 307200),
+  constraint org_config_logo_mime
+    check (logo_mime is null or logo_mime in ('image/png', 'image/jpeg', 'image/webp'))
 );
 
 comment on table public.organizacion_config
@@ -151,6 +156,7 @@ create policy org_config_update
 -- ===========================================================================
 
 alter table public.facturas
+  -- Snapshot del EMISOR al emitir (NULL en borradores)
   add column if not exists emisor_razon_social    text,
   add column if not exists emisor_nif             text,
   add column if not exists emisor_direccion       text,
@@ -162,6 +168,16 @@ alter table public.facturas
   add column if not exists emisor_logo            bytea,
   add column if not exists emisor_logo_mime       text,
   add column if not exists emisor_notas_pie       text,
+  -- Snapshot del CLIENTE al emitir (NULL en borradores)
+  add column if not exists cliente_snapshot_nombre     text,
+  add column if not exists cliente_snapshot_nif        text,
+  add column if not exists cliente_snapshot_direccion  text,
+  add column if not exists cliente_snapshot_cp         text,
+  add column if not exists cliente_snapshot_ciudad     text,
+  add column if not exists cliente_snapshot_provincia  text,
+  add column if not exists cliente_snapshot_pais       text,
+  add column if not exists cliente_snapshot_email      text,
+  -- Enlace de rectificativa
   add column if not exists factura_rectificada_id uuid
     references public.facturas(id) on delete set null;
 
@@ -169,14 +185,29 @@ comment on column public.facturas.emisor_razon_social
   is 'Snapshot de la razón social del emisor al emitir. NULL en borradores.';
 comment on column public.facturas.emisor_logo
   is 'Snapshot del logo del emisor (bytea) al emitir. NULL en borradores.';
+comment on column public.facturas.cliente_snapshot_nombre
+  is 'Snapshot del cliente al emitir (inmutable). NULL en borradores; '
+     'los borradores usan la ficha actual del cliente.';
 comment on column public.facturas.factura_rectificada_id
   is 'FK a la factura original que rectifica (solo tipo factura_rectificativa).';
 
 
 -- ===========================================================================
--- 4. ÍNDICE ÚNICO (organizacion_id, numero_factura) WHERE numero IS NOT NULL
+-- 4. NORMALIZAR BORRADORES ANTIGUOS + ÍNDICE ÚNICO
 -- ===========================================================================
 
+-- Los borradores de la app anterior se guardaban con un número diario ya
+-- asignado. En el nuevo modelo los borradores NO llevan número (se asigna al
+-- emitir). Antes de crear el índice único, limpiamos el número de todos los
+-- borradores para que no bloqueen el índice ni se confundan con emitidos.
+-- La auditoría de la sección 0 lista estos documentos. Los documentos ya
+-- emitidos/cobrados/anulados conservan su número tal cual.
+update public.facturas
+set numero_factura = null
+where estado = 'borrador'
+  and numero_factura is not null;
+
+-- Índice único: un número no puede repetirse dentro de una organización.
 create unique index if not exists idx_facturas_org_numero_unique
   on public.facturas (organizacion_id, numero_factura)
   where numero_factura is not null;
@@ -252,10 +283,15 @@ security definer
 set search_path = public
 as $$
 declare
-  v_doc     record;
-  v_config  record;
-  v_numero  text;
-  v_fecha   date;
+  v_doc        record;
+  v_config     record;
+  v_cli        record;
+  v_numero     text;
+  v_fecha      date;
+  v_n_lineas   integer;
+  v_base       numeric;
+  v_iva        numeric;
+  v_total      numeric;
 begin
   -- Fecha de emisión en zona horaria del negocio
   v_fecha := (current_timestamp at time zone 'Europe/Madrid')::date;
@@ -283,6 +319,42 @@ begin
     raise exception 'Este documento ya tiene número asignado: %.', v_doc.numero_factura;
   end if;
 
+  -- Las facturas y rectificativas exigen cliente
+  if v_doc.tipo_documento in ('factura', 'factura_rectificativa')
+     and v_doc.cliente_id is null then
+    raise exception 'Una factura o rectificativa debe tener cliente antes de emitirse.';
+  end if;
+
+  -- Exigir al menos una línea
+  select count(*),
+         coalesce(sum(base_linea), 0),
+         coalesce(sum(iva_linea), 0),
+         coalesce(sum(total_linea), 0)
+  into v_n_lineas, v_base, v_iva, v_total
+  from public.factura_lineas
+  where factura_id = p_factura_id;
+
+  if v_n_lineas = 0 then
+    raise exception 'El documento no tiene líneas. Añade al menos una línea antes de emitir.';
+  end if;
+
+  -- Validar que los totales de cabecera cuadran con la suma de líneas (tol. 0,01 €).
+  -- Nota: el total de cabecera resta la retención; la suma de líneas no la incluye,
+  -- por eso se compara base + IVA de líneas contra base_imponible + iva_importe.
+  if abs(coalesce(v_doc.base_imponible, 0) - v_base) > 0.01
+     or abs(coalesce(v_doc.iva_importe, 0) - v_iva) > 0.01
+     or abs((coalesce(v_doc.base_imponible, 0) + coalesce(v_doc.iva_importe, 0)
+             - coalesce(v_doc.retencion_importe, 0)) - coalesce(v_doc.total, 0)) > 0.01 then
+    raise exception
+      'Los totales del documento no cuadran con las líneas '
+      '(base líneas: %, IVA líneas: %; cabecera base: %, IVA: %, total: %). '
+      'Vuelve a guardar el documento para recalcular.',
+      round(v_base, 2), round(v_iva, 2),
+      round(coalesce(v_doc.base_imponible, 0), 2),
+      round(coalesce(v_doc.iva_importe, 0), 2),
+      round(coalesce(v_doc.total, 0), 2);
+  end if;
+
   -- Cargar config fiscal de la org
   select * into v_config
   from public.organizacion_config
@@ -299,6 +371,11 @@ begin
       'Configúralos en Gerente → Datos de la organización antes de emitir.';
   end if;
 
+  -- Cargar el cliente para el snapshot (si hay)
+  select * into v_cli
+  from public.clientes
+  where id = v_doc.cliente_id;
+
   -- Reservar número
   v_numero := public._reservar_numero_documento(
     v_doc.organizacion_id,
@@ -306,24 +383,34 @@ begin
     v_fecha
   );
 
-  -- Emitir: número, fecha, estado y snapshot del emisor
+  -- Emitir: número, fecha, estado, snapshot del emisor y snapshot del cliente
   update public.facturas
   set
-    numero_factura        = v_numero,
-    estado                = 'emitida',
-    fecha_emision         = v_fecha,
-    emisor_razon_social   = v_config.razon_social,
-    emisor_nif            = v_config.nif_cif,
-    emisor_direccion      = v_config.direccion_fiscal,
-    emisor_cp_ciudad      = coalesce(v_config.codigo_postal_fiscal, '') || ' ' || coalesce(v_config.ciudad_fiscal, ''),
-    emisor_provincia      = v_config.provincia_fiscal,
-    emisor_pais           = coalesce(v_config.pais_fiscal, 'España'),
-    emisor_email          = v_config.email_fiscal,
-    emisor_telefono       = v_config.telefono_fiscal,
-    emisor_logo           = v_config.logo,
-    emisor_logo_mime      = v_config.logo_mime,
-    emisor_notas_pie      = v_config.notas_pie_factura,
-    updated_at            = now()
+    numero_factura            = v_numero,
+    estado                    = 'emitida',
+    fecha_emision             = v_fecha,
+    -- Snapshot emisor
+    emisor_razon_social       = v_config.razon_social,
+    emisor_nif                = v_config.nif_cif,
+    emisor_direccion          = v_config.direccion_fiscal,
+    emisor_cp_ciudad          = coalesce(v_config.codigo_postal_fiscal, '') || ' ' || coalesce(v_config.ciudad_fiscal, ''),
+    emisor_provincia          = v_config.provincia_fiscal,
+    emisor_pais               = coalesce(v_config.pais_fiscal, 'España'),
+    emisor_email              = v_config.email_fiscal,
+    emisor_telefono           = v_config.telefono_fiscal,
+    emisor_logo               = v_config.logo,
+    emisor_logo_mime          = v_config.logo_mime,
+    emisor_notas_pie          = v_config.notas_pie_factura,
+    -- Snapshot cliente (NULL si el documento no tiene cliente, p.ej. presupuesto)
+    cliente_snapshot_nombre    = v_cli.nombre,
+    cliente_snapshot_nif       = v_cli.nif_cif,
+    cliente_snapshot_direccion = v_cli.direccion,
+    cliente_snapshot_cp        = v_cli.codigo_postal,
+    cliente_snapshot_ciudad    = v_cli.ciudad,
+    cliente_snapshot_provincia = v_cli.provincia,
+    cliente_snapshot_pais      = v_cli.pais,
+    cliente_snapshot_email     = v_cli.email,
+    updated_at                 = now()
   where id = p_factura_id;
 
   return v_numero;
@@ -456,47 +543,134 @@ returns trigger
 language plpgsql
 set search_path = public
 as $$
+declare
+  v_es_usuario boolean := current_user in ('anon', 'authenticated');
+  v_rect       record;
+  v_old_json   jsonb;
+  v_new_json   jsonb;
+  v_permitidas text[] := array['estado', 'estado_cobro', 'metodo_pago', 'updated_at'];
 begin
-  -- ── DELETE ──────────────────────────────────────────────────────────────
+  -- =========================================================================
+  -- INSERT (P1): desde roles de usuario solo se crean BORRADORES limpios.
+  -- Las funciones SECURITY DEFINER (emitir_documento, crear_rectificativa,
+  -- corren como postgres) no pasan por estas restricciones.
+  -- =========================================================================
+  if tg_op = 'INSERT' then
+    if v_es_usuario then
+      if coalesce(new.estado, 'borrador') <> 'borrador' then
+        raise exception 'Solo se pueden crear documentos en estado borrador (recibido: %).', new.estado;
+      end if;
+      if new.numero_factura is not null then
+        raise exception 'Un borrador no puede llevar número; se asigna con emitir_documento().';
+      end if;
+      -- Los snapshots de emisor y cliente solo los rellena emitir_documento()
+      if new.emisor_razon_social is not null or new.emisor_nif is not null
+         or new.emisor_direccion is not null or new.emisor_cp_ciudad is not null
+         or new.emisor_provincia is not null or new.emisor_pais is not null
+         or new.emisor_email is not null or new.emisor_telefono is not null
+         or new.emisor_logo is not null or new.emisor_logo_mime is not null
+         or new.emisor_notas_pie is not null then
+        raise exception 'Los datos del emisor (emisor_*) solo se rellenan al emitir.';
+      end if;
+      if new.cliente_snapshot_nombre is not null or new.cliente_snapshot_nif is not null
+         or new.cliente_snapshot_direccion is not null or new.cliente_snapshot_cp is not null
+         or new.cliente_snapshot_ciudad is not null or new.cliente_snapshot_provincia is not null
+         or new.cliente_snapshot_pais is not null or new.cliente_snapshot_email is not null then
+        raise exception 'El snapshot del cliente (cliente_snapshot_*) solo se rellena al emitir.';
+      end if;
+      -- Si enlaza una rectificativa, validar la factura original
+      if new.factura_rectificada_id is not null then
+        select * into v_rect from public.facturas where id = new.factura_rectificada_id;
+        if not found then
+          raise exception 'La factura rectificada no existe.';
+        end if;
+        if v_rect.organizacion_id <> new.organizacion_id then
+          raise exception 'La factura rectificada debe ser de la misma organización.';
+        end if;
+        if v_rect.tipo_documento <> 'factura' or v_rect.estado not in ('emitida', 'cobrada') then
+          raise exception 'Solo se puede rectificar una factura emitida o cobrada.';
+        end if;
+      end if;
+    end if;
+    return new;
+  end if;
+
+  -- =========================================================================
+  -- DELETE: no-borradores no se borran desde roles de usuario
+  -- =========================================================================
   if tg_op = 'DELETE' then
-    if current_user in ('anon', 'authenticated')
-       and old.estado in ('emitida', 'cobrada', 'anulada') then
+    if v_es_usuario and old.estado in ('emitida', 'cobrada', 'anulada') then
       raise exception
         'No se puede borrar un documento en estado %. Solo los borradores se pueden eliminar.', old.estado;
     end if;
     return old;
   end if;
 
-  -- ── UPDATE ──────────────────────────────────────────────────────────────
+  -- =========================================================================
+  -- UPDATE (P2): lista blanca. postgres (SECURITY DEFINER) pasa libre.
+  -- =========================================================================
   if tg_op = 'UPDATE' then
-
-    -- Bloquear cambio de numero_factura desde roles de usuario
-    if new.numero_factura is distinct from old.numero_factura
-       and current_user in ('anon', 'authenticated') then
-      raise exception
-        'numero_factura solo puede asignarse mediante emitir_documento().';
+    if not v_es_usuario then
+      return new;   -- emitir_documento / crear_rectificativa operan sin trabas
     end if;
 
-    -- Máquina de estados (solo para roles de usuario; postgres pasa libre)
-    if current_user in ('anon', 'authenticated') then
+    -- numero_factura nunca cambia desde la app
+    if new.numero_factura is distinct from old.numero_factura then
+      raise exception 'numero_factura solo puede asignarse mediante emitir_documento().';
+    end if;
 
-      -- anulada es final
-      if old.estado = 'anulada' and new.estado <> 'anulada' then
+    -- ── BORRADOR ───────────────────────────────────────────────────────────
+    if old.estado = 'borrador' then
+      -- Un borrador solo puede seguir siendo borrador desde la app.
+      -- (pasar a emitida/cobrada/anulada SOLO vía emitir_documento, que es postgres)
+      if new.estado <> 'borrador' then
+        raise exception
+          'Un borrador solo cambia de estado mediante emitir_documento(). '
+          'Transición % → % no permitida desde la aplicación.', old.estado, new.estado;
+      end if;
+      -- No se pueden rellenar los snapshots desde la app
+      if new.emisor_razon_social is not null or new.emisor_nif is not null
+         or new.emisor_direccion is not null or new.emisor_logo is not null
+         or new.cliente_snapshot_nombre is not null or new.cliente_snapshot_nif is not null then
+        raise exception 'Los datos de snapshot (emisor_*/cliente_snapshot_*) solo se rellenan al emitir.';
+      end if;
+      -- No se puede convertir a/desde rectificativa rompiendo el enlace
+      if new.tipo_documento is distinct from old.tipo_documento then
+        if new.tipo_documento = 'factura_rectificativa' or old.tipo_documento = 'factura_rectificativa' then
+          raise exception 'No se puede cambiar el tipo a/desde factura_rectificativa en un borrador.';
+        end if;
+      end if;
+      if new.factura_rectificada_id is distinct from old.factura_rectificada_id then
+        raise exception 'No se puede cambiar el enlace de rectificativa de un borrador.';
+      end if;
+      return new;
+    end if;
+
+    -- ── NO-BORRADOR (emitida / cobrada / anulada): LISTA BLANCA ─────────────
+    -- Solo se permiten cambios en: estado, estado_cobro, metodo_pago, updated_at.
+    -- Cualquier otra diferencia entre new y old se rechaza.
+    v_old_json := to_jsonb(old) - v_permitidas;
+    v_new_json := to_jsonb(new) - v_permitidas;
+    if v_old_json is distinct from v_new_json then
+      raise exception
+        'Un documento en estado % es inmutable: solo se permiten cambios de estado, '
+        'estado_cobro y método de pago.', old.estado;
+    end if;
+
+    -- Máquina de estados
+    if new.estado is distinct from old.estado then
+      -- anulada y cobrada son finales
+      if old.estado = 'anulada' then
         raise exception 'Un documento anulado no puede cambiar de estado.';
       end if;
-
-      -- cobrada es final
-      if old.estado = 'cobrada' and new.estado <> 'cobrada' then
+      if old.estado = 'cobrada' then
         raise exception 'Un documento cobrado no puede cambiar de estado.';
       end if;
-
-      -- emitida: solo → cobrada (cualquier tipo) o → anulada (SOLO presupuestos)
-      if old.estado = 'emitida' and new.estado <> old.estado then
+      -- emitida → cobrada (cualquier tipo) o → anulada (SOLO presupuestos)
+      if old.estado = 'emitida' then
         if new.estado = 'cobrada' then
-          -- OK: emitida → cobrada
           null;
         elsif new.estado = 'anulada' and old.tipo_documento = 'presupuesto' then
-          -- OK: presupuesto emitida → anulada
           null;
         else
           raise exception
@@ -506,21 +680,10 @@ begin
             old.estado, new.estado;
         end if;
       end if;
-
-      -- bloquear cambios de contenido en documentos no-borrador
-      if old.estado in ('emitida', 'cobrada', 'anulada') then
-        if new.cliente_id is distinct from old.cliente_id then
-          raise exception 'No se puede cambiar el cliente de un documento emitido.';
-        end if;
-        if new.organizacion_id is distinct from old.organizacion_id then
-          raise exception 'No se puede cambiar la organización de un documento emitido.';
-        end if;
-        if new.base_imponible is distinct from old.base_imponible
-           or new.iva_importe  is distinct from old.iva_importe
-           or new.total         is distinct from old.total
-           or new.fecha_emision is distinct from old.fecha_emision then
-          raise exception 'No se pueden modificar importes ni fecha de un documento emitido.';
-        end if;
+      -- El cambio a cobrada/anulada solo lo puede hacer el GERENTE de la org
+      if new.estado in ('cobrada', 'anulada')
+         and not public.es_gerente_org(old.organizacion_id) then
+        raise exception 'Solo el gerente de la organización puede marcar como % un documento.', new.estado;
       end if;
     end if;
 
@@ -535,7 +698,7 @@ revoke execute on function public._trg_proteger_factura() from public, anon;
 
 drop trigger if exists trg_proteger_factura on public.facturas;
 create trigger trg_proteger_factura
-  before update or delete on public.facturas
+  before insert or update or delete on public.facturas
   for each row execute function public._trg_proteger_factura();
 
 

@@ -155,9 +155,14 @@ values (
   200, 21, 42, 0, 0, 242
 ) on conflict (id) do nothing;
 
--- ── Líneas de ejemplo (necesarias para que factura_lineas trigger no falle) ──
+-- ── Líneas de ejemplo (necesarias: emitir_documento exige >=1 línea y que los
+--    totales de cabecera cuadren con la suma de líneas, tolerancia 0,01 €) ──
 insert into public.factura_lineas (factura_id, descripcion, cantidad, precio_unitario, base_linea, iva_pct, iva_linea, total_linea, orden)
-values ('ffffffff-0026-0026-0026-000000000001', 'Servicio TEST', 1, 1000, 1000, 10, 100, 1100, 1)
+values
+  ('ffffffff-0026-0026-0026-000000000001', 'Servicio TEST', 1, 1000, 1000, 10, 100, 1100, 1),
+  ('ffffffff-0026-0026-0026-000000000002', 'Servicio TEST 2', 1,  500,  500, 10,  50,  550, 1),
+  ('ffffffff-0026-0026-0026-000000000003', 'Servicio TEST 3', 1,  800,  800, 10,  80,  880, 1),
+  ('ffffffff-0026-0026-0026-000000000004', 'Servicio TEST 4', 1,  200,  200, 21,  42,  242, 1)
 on conflict do nothing;
 
 
@@ -293,7 +298,7 @@ begin
   set nif_cif = '', razon_social = '', direccion_fiscal = ''
   where organizacion_id = '4bdf1328-958e-4b0b-97de-38ba157a5e2e';
 
-  -- Crear borrador sin número
+  -- Crear borrador sin número, con línea que cuadra (para llegar al check de config)
   insert into public.facturas (id, organizacion_id, user_id, cliente_id, tipo_documento, estado,
     base_imponible, iva_pct, iva_importe, retencion_pct, retencion_importe, total)
   values (v_fid, '4bdf1328-958e-4b0b-97de-38ba157a5e2e',
@@ -301,6 +306,9 @@ begin
     'cccccccc-0026-0026-0026-000000000001',
     'factura', 'borrador', 100, 10, 10, 0, 0, 110)
   on conflict (id) do nothing;
+  insert into public.factura_lineas (factura_id, descripcion, cantidad, precio_unitario, base_linea, iva_pct, iva_linea, total_linea, orden)
+  values (v_fid, 'Servicio TEST 9', 1, 100, 100, 10, 10, 110, 1)
+  on conflict do nothing;
 
   select id into v_uid from u where clave = 'gerente_samirarte';
   set local role authenticated;
@@ -808,6 +816,394 @@ begin
     'select=0 update=0filas',
     'select=' || v_n_logo || ' update=' || v_err,
     v_n_logo = 0 and v_err not ilike '%ERROR%'
+  );
+end $$;
+reset role;
+
+-- =============================================================================
+-- P22: INSERT directo de una factura con estado 'emitida' FALLA (trigger INSERT)
+-- =============================================================================
+do $$
+declare
+  v_uid uuid;
+  v_err text := 'no lanzó excepción';
+begin
+  select id into v_uid from u where clave = 'gerente_samirarte';
+  set local role authenticated;
+  perform set_config('request.jwt.claims', '{"sub":"' || v_uid || '","role":"authenticated"}', true);
+
+  begin
+    insert into public.facturas (organizacion_id, user_id, cliente_id, tipo_documento, estado,
+      base_imponible, iva_pct, iva_importe, retencion_pct, retencion_importe, total)
+    values ('4bdf1328-958e-4b0b-97de-38ba157a5e2e', v_uid,
+      'cccccccc-0026-0026-0026-000000000001', 'factura', 'emitida',
+      100, 10, 10, 0, 0, 110);
+  exception when others then
+    v_err := sqlerrm;
+  end;
+
+  insert into r values (
+    'P22 INSERT estado emitida falla',
+    'exc: solo borrador',
+    v_err,
+    v_err ilike '%borrador%'
+  );
+end $$;
+reset role;
+
+-- =============================================================================
+-- P23: INSERT directo con numero_factura FALLA (trigger INSERT)
+-- =============================================================================
+do $$
+declare
+  v_uid uuid;
+  v_err text := 'no lanzó excepción';
+begin
+  select id into v_uid from u where clave = 'gerente_samirarte';
+  set local role authenticated;
+  perform set_config('request.jwt.claims', '{"sub":"' || v_uid || '","role":"authenticated"}', true);
+
+  begin
+    insert into public.facturas (organizacion_id, user_id, cliente_id, tipo_documento, estado,
+      numero_factura, base_imponible, iva_pct, iva_importe, retencion_pct, retencion_importe, total)
+    values ('4bdf1328-958e-4b0b-97de-38ba157a5e2e', v_uid,
+      'cccccccc-0026-0026-0026-000000000001', 'factura', 'borrador',
+      'FAC-2099-0001', 100, 10, 10, 0, 0, 110);
+  exception when others then
+    v_err := sqlerrm;
+  end;
+
+  insert into r values (
+    'P23 INSERT con numero_factura falla',
+    'exc: un borrador no puede llevar número',
+    v_err,
+    v_err ilike '%número%' or v_err ilike '%numero%'
+  );
+end $$;
+reset role;
+
+-- =============================================================================
+-- P24: UPDATE directo borrador→emitida FALLA (solo vía emitir_documento)
+-- =============================================================================
+do $$
+declare
+  v_uid uuid;
+  v_err text := 'no lanzó excepción';
+  v_fid uuid := 'ffffffff-0026-0026-0026-000000000024';
+begin
+  -- Crear un borrador como postgres
+  insert into public.facturas (id, organizacion_id, user_id, cliente_id, tipo_documento, estado,
+    base_imponible, iva_pct, iva_importe, retencion_pct, retencion_importe, total)
+  values (v_fid, '4bdf1328-958e-4b0b-97de-38ba157a5e2e',
+    (select id from u where clave='gerente_samirarte'),
+    'cccccccc-0026-0026-0026-000000000001', 'factura', 'borrador',
+    100, 10, 10, 0, 0, 110)
+  on conflict (id) do nothing;
+
+  select id into v_uid from u where clave = 'gerente_samirarte';
+  set local role authenticated;
+  perform set_config('request.jwt.claims', '{"sub":"' || v_uid || '","role":"authenticated"}', true);
+
+  begin
+    update public.facturas set estado = 'emitida' where id = v_fid;
+  exception when others then
+    v_err := sqlerrm;
+  end;
+
+  insert into r values (
+    'P24 UPDATE borrador→emitida directo falla',
+    'exc: solo mediante emitir_documento',
+    v_err,
+    v_err ilike '%emitir_documento%'
+  );
+end $$;
+reset role;
+
+-- =============================================================================
+-- P25: en emitida, cambiar tipo_documento FALLA (lista blanca)
+-- =============================================================================
+do $$
+declare
+  v_uid uuid;
+  v_err text := 'no lanzó excepción';
+begin
+  select id into v_uid from u where clave = 'gerente_samirarte';
+  set local role authenticated;
+  perform set_config('request.jwt.claims', '{"sub":"' || v_uid || '","role":"authenticated"}', true);
+
+  -- 0002 está emitida (FAC-AAAA-0002)
+  begin
+    update public.facturas set tipo_documento = 'presupuesto'
+    where id = 'ffffffff-0026-0026-0026-000000000002';
+  exception when others then
+    v_err := sqlerrm;
+  end;
+
+  insert into r values (
+    'P25 emitida: cambiar tipo_documento falla',
+    'exc: inmutable',
+    v_err,
+    v_err ilike '%inmutable%'
+  );
+end $$;
+reset role;
+
+-- =============================================================================
+-- P26: en emitida, cambiar iva_pct FALLA (lista blanca)
+-- =============================================================================
+do $$
+declare
+  v_uid uuid;
+  v_err text := 'no lanzó excepción';
+begin
+  select id into v_uid from u where clave = 'gerente_samirarte';
+  set local role authenticated;
+  perform set_config('request.jwt.claims', '{"sub":"' || v_uid || '","role":"authenticated"}', true);
+
+  begin
+    update public.facturas set iva_pct = 4
+    where id = 'ffffffff-0026-0026-0026-000000000002';
+  exception when others then
+    v_err := sqlerrm;
+  end;
+
+  insert into r values (
+    'P26 emitida: cambiar iva_pct falla',
+    'exc: inmutable',
+    v_err,
+    v_err ilike '%inmutable%'
+  );
+end $$;
+reset role;
+
+-- =============================================================================
+-- P27: en emitida, cambiar concepto FALLA (lista blanca)
+-- =============================================================================
+do $$
+declare
+  v_uid uuid;
+  v_err text := 'no lanzó excepción';
+begin
+  select id into v_uid from u where clave = 'gerente_samirarte';
+  set local role authenticated;
+  perform set_config('request.jwt.claims', '{"sub":"' || v_uid || '","role":"authenticated"}', true);
+
+  begin
+    update public.facturas set concepto = 'CAMBIO ILEGAL'
+    where id = 'ffffffff-0026-0026-0026-000000000002';
+  exception when others then
+    v_err := sqlerrm;
+  end;
+
+  insert into r values (
+    'P27 emitida: cambiar concepto falla',
+    'exc: inmutable',
+    v_err,
+    v_err ilike '%inmutable%'
+  );
+end $$;
+reset role;
+
+-- =============================================================================
+-- P28: en emitida, cambiar emisor_nif y cliente_snapshot_nombre FALLA
+-- =============================================================================
+do $$
+declare
+  v_uid uuid;
+  v_err1 text := 'no lanzó excepción';
+  v_err2 text := 'no lanzó excepción';
+begin
+  select id into v_uid from u where clave = 'gerente_samirarte';
+  set local role authenticated;
+  perform set_config('request.jwt.claims', '{"sub":"' || v_uid || '","role":"authenticated"}', true);
+
+  begin
+    update public.facturas set emisor_nif = 'X0000000X'
+    where id = 'ffffffff-0026-0026-0026-000000000002';
+  exception when others then v_err1 := sqlerrm; end;
+
+  begin
+    update public.facturas set cliente_snapshot_nombre = 'OTRO CLIENTE'
+    where id = 'ffffffff-0026-0026-0026-000000000002';
+  exception when others then v_err2 := sqlerrm; end;
+
+  insert into r values (
+    'P28 emitida: cambiar emisor_nif / cliente_snapshot_nombre falla',
+    'ambos inmutables',
+    'emisor=' || (v_err1 ilike '%inmutable%')::text || ' cliente=' || (v_err2 ilike '%inmutable%')::text,
+    v_err1 ilike '%inmutable%' and v_err2 ilike '%inmutable%'
+  );
+end $$;
+reset role;
+
+-- =============================================================================
+-- P29: chef NO puede pasar emitida→cobrada; gerente SÍ
+-- =============================================================================
+do $$
+declare
+  v_uid_c uuid;
+  v_uid_g uuid;
+  v_err   text := 'no lanzó excepción';
+  v_estado text;
+  v_fid   uuid := 'ffffffff-0026-0026-0026-000000000029';
+  v_num   text;
+begin
+  -- Crear y emitir (como gerente) una factura para la prueba de transición
+  insert into public.facturas (id, organizacion_id, user_id, cliente_id, tipo_documento, estado,
+    base_imponible, iva_pct, iva_importe, retencion_pct, retencion_importe, total)
+  values (v_fid, '4bdf1328-958e-4b0b-97de-38ba157a5e2e',
+    (select id from u where clave='gerente_samirarte'),
+    'cccccccc-0026-0026-0026-000000000001', 'factura', 'borrador',
+    100, 10, 10, 0, 0, 110)
+  on conflict (id) do nothing;
+  insert into public.factura_lineas (factura_id, descripcion, cantidad, precio_unitario, base_linea, iva_pct, iva_linea, total_linea, orden)
+  values (v_fid, 'Servicio 29', 1, 100, 100, 10, 10, 110, 1)
+  on conflict do nothing;
+
+  select id into v_uid_g from u where clave = 'gerente_samirarte';
+  set local role authenticated;
+  perform set_config('request.jwt.claims', '{"sub":"' || v_uid_g || '","role":"authenticated"}', true);
+  v_num := public.emitir_documento(v_fid);
+
+  -- Chef intenta marcar como cobrada → falla
+  reset role;
+  select id into v_uid_c from u where clave = 'chef_samirarte';
+  set local role authenticated;
+  perform set_config('request.jwt.claims', '{"sub":"' || v_uid_c || '","role":"authenticated"}', true);
+  begin
+    update public.facturas set estado = 'cobrada' where id = v_fid;
+  exception when others then v_err := sqlerrm; end;
+
+  -- Gerente marca como cobrada → OK
+  reset role;
+  set local role authenticated;
+  perform set_config('request.jwt.claims', '{"sub":"' || v_uid_g || '","role":"authenticated"}', true);
+  update public.facturas set estado = 'cobrada' where id = v_fid;
+  select estado into v_estado from public.facturas where id = v_fid;
+
+  insert into r values (
+    'P29 chef NO pasa emitida→cobrada; gerente SÍ',
+    'chef falla; gerente cobrada',
+    'chef_err=' || (v_err ilike '%gerente%')::text || ' estado=' || v_estado,
+    (v_err ilike '%gerente%') and v_estado = 'cobrada'
+  );
+end $$;
+reset role;
+
+-- =============================================================================
+-- P30: emitir sin líneas FALLA; emitir con totales descuadrados FALLA
+-- =============================================================================
+do $$
+declare
+  v_uid uuid;
+  v_err_sin   text := 'no lanzó excepción';
+  v_err_desc  text := 'no lanzó excepción';
+  v_fid_sin   uuid := 'ffffffff-0026-0026-0026-000000000030';
+  v_fid_desc  uuid := 'ffffffff-0026-0026-0026-000000000031';
+begin
+  -- Borrador SIN líneas
+  insert into public.facturas (id, organizacion_id, user_id, cliente_id, tipo_documento, estado,
+    base_imponible, iva_pct, iva_importe, retencion_pct, retencion_importe, total)
+  values (v_fid_sin, '4bdf1328-958e-4b0b-97de-38ba157a5e2e',
+    (select id from u where clave='gerente_samirarte'),
+    'cccccccc-0026-0026-0026-000000000001', 'factura', 'borrador',
+    100, 10, 10, 0, 0, 110)
+  on conflict (id) do nothing;
+
+  -- Borrador con líneas que NO cuadran con la cabecera
+  insert into public.facturas (id, organizacion_id, user_id, cliente_id, tipo_documento, estado,
+    base_imponible, iva_pct, iva_importe, retencion_pct, retencion_importe, total)
+  values (v_fid_desc, '4bdf1328-958e-4b0b-97de-38ba157a5e2e',
+    (select id from u where clave='gerente_samirarte'),
+    'cccccccc-0026-0026-0026-000000000001', 'factura', 'borrador',
+    999, 10, 99, 0, 0, 1098)   -- cabecera dice 999 pero la línea será 100
+  on conflict (id) do nothing;
+  insert into public.factura_lineas (factura_id, descripcion, cantidad, precio_unitario, base_linea, iva_pct, iva_linea, total_linea, orden)
+  values (v_fid_desc, 'Servicio descuadrado', 1, 100, 100, 10, 10, 110, 1)
+  on conflict do nothing;
+
+  select id into v_uid from u where clave = 'gerente_samirarte';
+  set local role authenticated;
+  perform set_config('request.jwt.claims', '{"sub":"' || v_uid || '","role":"authenticated"}', true);
+
+  begin
+    perform public.emitir_documento(v_fid_sin);
+  exception when others then v_err_sin := sqlerrm; end;
+
+  begin
+    perform public.emitir_documento(v_fid_desc);
+  exception when others then v_err_desc := sqlerrm; end;
+
+  insert into r values (
+    'P30 emitir sin líneas / con totales descuadrados falla',
+    'ambas fallan',
+    'sin_lineas=' || (v_err_sin ilike '%líneas%' or v_err_sin ilike '%linea%')::text
+      || ' descuadre=' || (v_err_desc ilike '%no cuadran%' or v_err_desc ilike '%totales%')::text,
+    (v_err_sin ilike '%líneas%' or v_err_sin ilike '%linea%')
+      and (v_err_desc ilike '%no cuadran%' or v_err_desc ilike '%totales%')
+  );
+end $$;
+reset role;
+
+-- =============================================================================
+-- P31: snapshot del cliente NO cambia al editar la ficha del cliente
+-- =============================================================================
+do $$
+declare
+  v_uid           uuid;
+  v_snap_antes    text;
+  v_snap_despues  text;
+begin
+  -- Snapshot guardado al emitir 0002 (su cliente es cccccccc-...0001)
+  select cliente_snapshot_nombre into v_snap_antes
+  from public.facturas where id = 'ffffffff-0026-0026-0026-000000000002';
+
+  -- Editar la ficha del cliente como gerente
+  select id into v_uid from u where clave = 'gerente_samirarte';
+  set local role authenticated;
+  perform set_config('request.jwt.claims', '{"sub":"' || v_uid || '","role":"authenticated"}', true);
+  update public.clientes set nombre = 'Cliente TEST 026 RENOMBRADO'
+  where id = 'cccccccc-0026-0026-0026-000000000001';
+
+  -- El snapshot de la factura emitida no debe cambiar
+  select cliente_snapshot_nombre into v_snap_despues
+  from public.facturas where id = 'ffffffff-0026-0026-0026-000000000002';
+
+  insert into r values (
+    'P31 snapshot cliente no cambia al editar la ficha del cliente',
+    v_snap_antes,
+    v_snap_despues,
+    v_snap_antes = v_snap_despues and v_snap_antes = 'Cliente TEST 026'
+  );
+end $$;
+reset role;
+
+-- =============================================================================
+-- P32: logo > 300 KB FALLA (constraint org_config_logo_tamano)
+-- =============================================================================
+do $$
+declare
+  v_uid uuid;
+  v_err text := 'no lanzó excepción';
+begin
+  select id into v_uid from u where clave = 'gerente_samirarte';
+  set local role authenticated;
+  perform set_config('request.jwt.claims', '{"sub":"' || v_uid || '","role":"authenticated"}', true);
+
+  begin
+    -- 300 KB + 1 byte de ceros → supera el límite 307200
+    update public.organizacion_config
+    set logo = decode(repeat('00', 307201), 'hex'), logo_mime = 'image/png'
+    where organizacion_id = '4bdf1328-958e-4b0b-97de-38ba157a5e2e';
+  exception when others then
+    v_err := sqlerrm;
+  end;
+
+  insert into r values (
+    'P32 logo > 300 KB falla (constraint)',
+    'exc: check constraint',
+    v_err,
+    v_err <> 'no lanzó excepción'
   );
 end $$;
 reset role;

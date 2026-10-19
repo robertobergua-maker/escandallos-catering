@@ -2753,7 +2753,11 @@ FACTURAS_COLUMNAS = [
 FACTURAS_COLUMNAS_EMISOR = [
     "emisor_razon_social", "emisor_nif", "emisor_direccion", "emisor_cp_ciudad",
     "emisor_provincia", "emisor_pais", "emisor_email", "emisor_telefono",
-    "emisor_logo", "emisor_logo_mime", "emisor_notas_pie", "factura_rectificada_id",
+    "emisor_logo", "emisor_logo_mime", "emisor_notas_pie",
+    "cliente_snapshot_nombre", "cliente_snapshot_nif", "cliente_snapshot_direccion",
+    "cliente_snapshot_cp", "cliente_snapshot_ciudad", "cliente_snapshot_provincia",
+    "cliente_snapshot_pais", "cliente_snapshot_email",
+    "factura_rectificada_id",
 ]
 
 # Columnas para SELECT de detalle (incluye snapshot del emisor si la Fase 5 está aplicada)
@@ -4068,9 +4072,18 @@ def obtener_datos_fiscales_emisor(factura=None):
     Prioridad:
       1. Si `factura` trae snapshot (emisor_razon_social no vacío) → usar el snapshot
          guardado al emitir (inmutable, no cambia si luego se edita la config).
-      2. Si hay organización activa → leer organizacion_config vía RPC.
-      3. Fallback a st.secrets (solo útil en entornos sin Fase 5).
+      2. Si no, leer organizacion_config de la organización DE LA FACTURA
+         (no de la org activa). Si la factura no indica org, se usa la activa.
+
+    NO hay fallback a st.secrets: si no hay snapshot ni config, se devuelven
+    campos vacíos y la app debe avisar «Configura los datos de la organización».
+    NUNCA se usan datos de Samirarte para otra organización.
     """
+    _vacio = {
+        "nombre": "", "nif": "", "direccion": "", "cp_ciudad": "",
+        "provincia": "", "pais": "España", "email": "", "telefono": "", "notas_pie": "",
+    }
+
     # 1. Snapshot de un documento ya emitido
     if factura and str(factura.get("emisor_razon_social") or "").strip():
         return {
@@ -4085,8 +4098,8 @@ def obtener_datos_fiscales_emisor(factura=None):
             "notas_pie": str(factura.get("emisor_notas_pie") or "").strip(),
         }
 
-    # 2. Config de la organización activa
-    org_id = obtener_org_activa_id()
+    # 2. Config de la organización DE LA FACTURA (o la activa si no se indica)
+    org_id = (factura or {}).get("organizacion_id") or obtener_org_activa_id()
     if org_id:
         config = cargar_config_org(org_id)
         if config:
@@ -4104,18 +4117,8 @@ def obtener_datos_fiscales_emisor(factura=None):
                 "notas_pie": str(config.get("notas_pie_factura") or "").strip(),
             }
 
-    # 3. Fallback a secrets (sin Fase 5)
-    return {
-        "nombre": str(st.secrets.get("EMISOR_NOMBRE_FISCAL", "") or "").strip(),
-        "nif": str(st.secrets.get("EMISOR_NIF", "") or "").strip(),
-        "direccion": str(st.secrets.get("EMISOR_DIRECCION", "") or "").strip(),
-        "cp_ciudad": str(st.secrets.get("EMISOR_CP_CIUDAD", "") or "").strip(),
-        "provincia": str(st.secrets.get("EMISOR_PROVINCIA", "") or "").strip(),
-        "pais": str(st.secrets.get("EMISOR_PAIS", "España") or "España").strip(),
-        "email": "",
-        "telefono": "",
-        "notas_pie": "",
-    }
+    # 3. Sin datos: la app mostrará el aviso correspondiente. Nunca secrets.
+    return dict(_vacio)
 
 
 def validar_factura_normativa_basica(factura, cliente, lineas):
@@ -4182,20 +4185,37 @@ def generar_pdf_factura(factura, lineas, cliente):
     if menu_id_asociado and not nombre_menu_asociado:
         nombre_menu_asociado = obtener_nombre_menu_por_id(menu_id_asociado) or ""
 
-    datos_cliente = [
-        cliente.get("nombre"),
-        cliente.get("nif_cif"),
-        cliente.get("email"),
-        cliente.get("telefono"),
-        cliente.get("direccion"),
-        " ".join(
-            str(valor or "").strip()
-            for valor in [cliente.get("codigo_postal"), cliente.get("ciudad")]
-            if str(valor or "").strip()
-        ),
-        cliente.get("provincia"),
-        cliente.get("pais"),
-    ]
+    # Cliente: si el documento está emitido (tiene snapshot), usar SIEMPRE el
+    # snapshot congelado al emitir. Los borradores usan la ficha actual del cliente.
+    if str(factura.get("cliente_snapshot_nombre") or "").strip():
+        datos_cliente = [
+            factura.get("cliente_snapshot_nombre"),
+            factura.get("cliente_snapshot_nif"),
+            factura.get("cliente_snapshot_email"),
+            factura.get("cliente_snapshot_direccion"),
+            " ".join(
+                str(valor or "").strip()
+                for valor in [factura.get("cliente_snapshot_cp"), factura.get("cliente_snapshot_ciudad")]
+                if str(valor or "").strip()
+            ),
+            factura.get("cliente_snapshot_provincia"),
+            factura.get("cliente_snapshot_pais"),
+        ]
+    else:
+        datos_cliente = [
+            cliente.get("nombre"),
+            cliente.get("nif_cif"),
+            cliente.get("email"),
+            cliente.get("telefono"),
+            cliente.get("direccion"),
+            " ".join(
+                str(valor or "").strip()
+                for valor in [cliente.get("codigo_postal"), cliente.get("ciudad")]
+                if str(valor or "").strip()
+            ),
+            cliente.get("provincia"),
+            cliente.get("pais"),
+        ]
     datos_cliente = [str(valor).strip() for valor in datos_cliente if str(valor or "").strip()]
 
     # ── Emisor y logo (Fase 5): snapshot de la factura o config de la org ──────
@@ -4931,13 +4951,17 @@ def duplicar_factura_supabase(factura_id):
     nueva_factura = dict(factura)
     for campo in ["id", "created_at", "updated_at", "base_imponible", "iva_importe", "retencion_importe", "total"]:
         nueva_factura.pop(campo, None)
-    # Fase 5: una copia es un borrador nuevo sin número ni snapshot de emisor.
-    for campo_emisor in [
+    # Fase 5: una copia es un borrador nuevo sin número ni snapshots (emisor/cliente).
+    for campo_snapshot in [
         "emisor_razon_social", "emisor_nif", "emisor_direccion", "emisor_cp_ciudad",
         "emisor_provincia", "emisor_pais", "emisor_email", "emisor_telefono",
-        "emisor_logo", "emisor_logo_mime", "emisor_notas_pie", "factura_rectificada_id",
+        "emisor_logo", "emisor_logo_mime", "emisor_notas_pie",
+        "cliente_snapshot_nombre", "cliente_snapshot_nif", "cliente_snapshot_direccion",
+        "cliente_snapshot_cp", "cliente_snapshot_ciudad", "cliente_snapshot_provincia",
+        "cliente_snapshot_pais", "cliente_snapshot_email",
+        "factura_rectificada_id",
     ]:
-        nueva_factura.pop(campo_emisor, None)
+        nueva_factura.pop(campo_snapshot, None)
     nueva_factura["user_id"] = user_id_actual
     nueva_factura["estado"] = "borrador"
     nueva_factura["estado_cobro"] = "pendiente"
@@ -4975,6 +4999,11 @@ def cargar_factura_en_sesion(factura, lineas_df):
     st.session_state["factura_retencion_pct"] = numero_seguro(factura.get("retencion_pct"), 0.0)
     st.session_state["factura_concepto"] = str(factura.get("concepto") or "")
     st.session_state["factura_notas"] = str(factura.get("notas") or "")
+
+    # Guardar el detalle completo (incluye snapshots emisor_*/cliente_snapshot_*
+    # y organizacion_id) para que la descarga de documentos emitidos use el
+    # snapshot congelado y el logo de la org correcta.
+    st.session_state["factura_detalle_cargado"] = dict(factura or {})
 
     lineas = []
     if lineas_df is not None and not lineas_df.empty:
@@ -9985,6 +10014,21 @@ with main_tab_facturas:
                 }
                 if tipo_documento != "presupuesto" and st.session_state.get("factura_presupuesto_origen_id"):
                     factura_actual["presupuesto_id"] = st.session_state["factura_presupuesto_origen_id"]
+
+                # Fase 5: para el PDF/HTML, incorporar organizacion_id y, si el
+                # documento está emitido, los snapshots congelados (emisor_* y
+                # cliente_snapshot_*) desde el detalle cargado. Así el PDF usa el
+                # emisor/cliente/logo del momento de emisión, no la config actual.
+                _detalle_cargado = st.session_state.get("factura_detalle_cargado") or {}
+                if _detalle_cargado.get("id") and str(_detalle_cargado.get("id")) == str(factura_id_en_edicion or ""):
+                    factura_actual["organizacion_id"] = _detalle_cargado.get("organizacion_id")
+                    if _es_solo_lectura:
+                        for _k in (FACTURAS_COLUMNAS_EMISOR):
+                            if _k in _detalle_cargado:
+                                factura_actual[_k] = _detalle_cargado.get(_k)
+                if not factura_actual.get("organizacion_id"):
+                    factura_actual["organizacion_id"] = obtener_org_activa_id()
+
                 cliente_actual_factura = clientes_por_id_factura.get(str(factura_cliente_id), {})
                 lineas_validas_descarga = [
                     calcular_linea_factura(linea)
@@ -9994,6 +10038,14 @@ with main_tab_facturas:
                 menu_id_descarga = obtener_menu_id_desde_lineas_factura(lineas_validas_descarga)
                 if menu_id_descarga:
                     factura_actual["menu_nombre_asociado"] = obtener_nombre_menu_por_id(menu_id_descarga)
+
+                # Aviso si la organización no tiene datos de emisor configurados
+                _emisor_doc = obtener_datos_fiscales_emisor(factura_actual)
+                if not _emisor_doc.get("nombre"):
+                    st.warning(
+                        "⚠️ Configura los datos de la organización (Gerente → Datos de la "
+                        "organización) para que aparezcan en el documento."
+                    )
 
                 # Botón de descarga (siempre disponible si hay cliente + líneas)
                 if not cliente_actual_factura or not lineas_validas_descarga:
