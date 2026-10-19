@@ -1,22 +1,3 @@
--- =============================================================================
--- 026_emitir_documento.sql
--- Versión de public.emitir_documento(uuid) YA APLICADA en la base de datos.
---
--- Respecto a la versión original de 026_facturacion_por_org.sql añade:
---   · Ajuste de fecha_vencimiento a la fecha de emisión si era anterior
---     (no se rechaza la emisión por ese descuadre menor).
---   · Validación de que el cliente, si lo hay, pertenece a la misma
---     organización que el documento.
---
--- Es un CREATE OR REPLACE idempotente: se puede volver a aplicar sin efectos
--- secundarios. Requiere que 026_facturacion_por_org.sql ya esté aplicado
--- (tablas, columnas snapshot y _reservar_numero_documento).
---
--- NO ejecutar automáticamente. Revisar y aplicar manualmente en Supabase.
--- =============================================================================
-
-begin;
-
 create or replace function public.emitir_documento(
   p_factura_id uuid
 )
@@ -182,5 +163,3 @@ comment on function public.emitir_documento(uuid)
      'exige cliente de la org para factura/rectificativa, >=1 línea y totales '
      'cuadrados; guarda snapshot de emisor y cliente; ajusta fecha_vencimiento '
      'a la fecha de emisión si era anterior. Devuelve el número.';
-
-commit;
