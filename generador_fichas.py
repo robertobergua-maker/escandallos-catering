@@ -5,11 +5,14 @@ import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill
 from openpyxl.utils import get_column_letter
 import io
+import os
 import base64
 import html
 import json
 import re
+import smtplib
 import unicodedata
+from email.message import EmailMessage
 from pathlib import Path
 from difflib import SequenceMatcher
 from urllib.parse import urlsplit, urlunsplit
@@ -8456,6 +8459,139 @@ def _renderizar_inventario_propio(org_id):
                         st.error(f"Error: {e_p}")
 
 
+APP_URL_PUBLICA = "https://escandallos.samirarte.com"
+
+
+def _leer_config_smtp():
+    """
+    Lee la configuración SMTP de variables de entorno (y, como respaldo, de
+    st.secrets para entornos sin variables de entorno). NO devuelve nunca los
+    valores en logs. Devuelve un dict o None si falta algo obligatorio.
+    """
+    def _valor(clave):
+        valor = os.environ.get(clave)
+        if valor is None:
+            try:
+                valor = st.secrets.get(clave)
+            except Exception:
+                valor = None
+        return str(valor).strip() if valor is not None else ""
+
+    host = _valor("SMTP_HOST")
+    puerto = _valor("SMTP_PORT")
+    usuario = _valor("SMTP_USER")
+    password = _valor("SMTP_PASSWORD")
+    remitente = _valor("SMTP_FROM")
+
+    # Obligatorios: host, usuario, contraseña y remitente. Puerto por defecto 587.
+    if not host or not usuario or not password or not remitente:
+        return None
+    try:
+        puerto_int = int(puerto) if puerto else 587
+    except ValueError:
+        puerto_int = 587
+
+    return {
+        "host": host,
+        "port": puerto_int,
+        "user": usuario,
+        "password": password,
+        "from": remitente,
+    }
+
+
+def _construir_correo_invitacion(destinatario, org_nombre, rol, codigo, dias_validez):
+    """
+    Construye (asunto, cuerpo_texto, cuerpo_html) de la invitación en español.
+    Todos los datos dinámicos se escapan con html.escape en la versión HTML.
+    """
+    org_e    = html.escape(str(org_nombre or ""))
+    rol_e    = html.escape(str(rol or ""))
+    codigo_e = html.escape(str(codigo or ""))
+    dias_e   = html.escape(str(dias_validez))
+    url_e    = html.escape(APP_URL_PUBLICA)
+
+    asunto = f"Invitación a {org_nombre} · Gestor de Escandallos"
+
+    cuerpo_texto = (
+        f"Hola,\n\n"
+        f"Te han invitado a unirte a la organización «{org_nombre}» "
+        f"en el Gestor de Escandallos con el rol de {rol}.\n\n"
+        f"Código de invitación: {codigo}\n"
+        f"Validez: {dias_validez} días\n\n"
+        f"Cómo canjear la invitación:\n"
+        f"1. Entra en {APP_URL_PUBLICA}\n"
+        f"2. Inicia sesión (o regístrate) con este correo electrónico.\n"
+        f"3. Abre la opción «Tengo una invitación» y pega el código de arriba.\n\n"
+        f"Si no esperabas esta invitación, puedes ignorar este mensaje.\n\n"
+        f"Gestor de Escandallos"
+    )
+
+    cuerpo_html = (
+        '<div style="font-family:Arial,Helvetica,sans-serif;color:#14264a;'
+        'max-width:560px;margin:0 auto;">'
+        f'<h2 style="margin:0 0 12px;">Invitación a {org_e}</h2>'
+        f'<p>Te han invitado a unirte a la organización <strong>{org_e}</strong> '
+        f'en el Gestor de Escandallos con el rol de <strong>{rol_e}</strong>.</p>'
+        '<p style="margin:16px 0;padding:12px 16px;background:#f7f9fc;'
+        'border:1px solid #e4e9f2;border-radius:8px;">'
+        f'Código de invitación:<br><strong style="font-size:1.25rem;'
+        f'letter-spacing:1px;">{codigo_e}</strong><br>'
+        f'<span style="color:#60708d;">Validez: {dias_e} días</span></p>'
+        '<p><strong>Cómo canjear la invitación:</strong></p>'
+        '<ol>'
+        f'<li>Entra en <a href="{url_e}">{url_e}</a></li>'
+        '<li>Inicia sesión (o regístrate) con este correo electrónico.</li>'
+        '<li>Abre la opción «Tengo una invitación» y pega el código de arriba.</li>'
+        '</ol>'
+        '<p style="color:#60708d;font-size:0.9rem;">Si no esperabas esta '
+        'invitación, puedes ignorar este mensaje.</p>'
+        '<p style="color:#60708d;font-size:0.85rem;margin-top:24px;">'
+        'Gestor de Escandallos</p>'
+        '</div>'
+    )
+    return asunto, cuerpo_texto, cuerpo_html
+
+
+def enviar_email_invitacion(destinatario, org_nombre, rol, codigo, dias_validez):
+    """
+    Envía el correo de invitación por SMTP con STARTTLS.
+    Devuelve (ok: bool, mensaje: str). NUNCA registra el código ni la
+    contraseña SMTP. Si falta configuración o falla el envío, devuelve
+    (False, motivo) sin lanzar excepción.
+    """
+    config = _leer_config_smtp()
+    if config is None:
+        return False, "No hay configuración SMTP (faltan variables SMTP_*)."
+
+    destinatario = str(destinatario or "").strip()
+    if not destinatario:
+        return False, "Falta el email del destinatario."
+
+    asunto, cuerpo_texto, cuerpo_html = _construir_correo_invitacion(
+        destinatario, org_nombre, rol, codigo, dias_validez
+    )
+
+    mensaje = EmailMessage()
+    mensaje["Subject"] = asunto
+    mensaje["From"] = config["from"]
+    mensaje["To"] = destinatario
+    mensaje.set_content(cuerpo_texto)
+    mensaje.add_alternative(cuerpo_html, subtype="html")
+
+    try:
+        with smtplib.SMTP(config["host"], config["port"], timeout=15) as servidor:
+            servidor.ehlo()
+            servidor.starttls()
+            servidor.ehlo()
+            servidor.login(config["user"], config["password"])
+            servidor.send_message(mensaje)
+        return True, f"Invitación enviada a {destinatario}"
+    except Exception as e:
+        # No incluir el código ni la contraseña en el mensaje de error.
+        return False, f"No se pudo enviar el correo: {type(e).__name__}."
+
+
 def _renderizar_miembros_e_invitaciones(org_id, org_nombre):
     """
     Componente reutilizable: lista miembros y gestiona invitaciones de una org.
@@ -8534,26 +8670,53 @@ def _renderizar_miembros_e_invitaciones(org_id, org_nombre):
             "Días de validez", min_value=1, max_value=30, value=7,
             key=f"inv_dias_{org_id[:8]}",
         )
+        # Resultado de la última invitación creada (persistido para sobrevivir
+        # al rerun): incluye el código (que la RPC no vuelve a devolver) y el
+        # aviso del envío de correo.
+        _inv_resultado = st.session_state.pop(f"_inv_resultado_{org_id}", None)
+        if _inv_resultado:
+            st.success(
+                f"Invitación creada para {_inv_resultado['email']}. "
+                "**Copia el código ahora** — no se vuelve a mostrar."
+            )
+            st.code(_inv_resultado["codigo"], language=None)
+            st.caption(
+                f"El invitado abre la app, inicia sesión con {_inv_resultado['email']} "
+                "y pega este código en 'Tengo una invitación'."
+            )
+            if _inv_resultado["envio_ok"]:
+                st.success(_inv_resultado["envio_msg"])
+            else:
+                st.warning(
+                    "La invitación se creó, pero no se pudo enviar el correo a "
+                    f"{_inv_resultado['email']}. Comparte el código manualmente. "
+                    f"({_inv_resultado['envio_msg']})"
+                )
+
         if st.button("Generar invitación", key=f"btn_inv_{org_id[:8]}"):
             if not inv_email:
                 st.warning("Introduce el email del invitado.")
             else:
+                _email_dest = inv_email.strip().lower()
                 try:
                     codigo = supabase.rpc("crear_invitacion", {
                         "p_organizacion_id": org_id,
-                        "p_email":          inv_email.strip().lower(),
+                        "p_email":          _email_dest,
                         "p_rol":            inv_rol,
                         "p_dias_validez":   int(inv_dias),
                     }).execute().data
-                    st.success(
-                        f"Invitación creada para {inv_email}. "
-                        "**Copia el código ahora** — no se vuelve a mostrar."
+                    # Intentar enviar el correo. Si falla o falta config, la
+                    # invitación ya está creada y el código se mostrará igual.
+                    ok_envio, msg_envio = enviar_email_invitacion(
+                        _email_dest, org_nombre, inv_rol, codigo, int(inv_dias)
                     )
-                    st.code(codigo, language=None)
-                    st.caption(
-                        f"El invitado abre la app, inicia sesión con {inv_email} "
-                        "y pega este código en 'Tengo una invitación'."
-                    )
+                    st.session_state[f"_inv_resultado_{org_id}"] = {
+                        "email":    _email_dest,
+                        "codigo":   codigo,
+                        "envio_ok": ok_envio,
+                        "envio_msg": msg_envio,
+                    }
+                    st.rerun()
                 except Exception as e_inv:
                     st.error(f"Error al crear la invitación: {e_inv}")
 

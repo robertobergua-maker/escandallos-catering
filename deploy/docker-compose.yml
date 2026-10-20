@@ -15,6 +15,14 @@ services:
       # Mismo secrets.toml que se usaba en Streamlit Cloud. Vive fuera del
       # repo (/opt/escandallos/secrets), con permisos 600 y dueño UID 10001.
       - ${SECRETS_FILE:-/opt/escandallos/secrets/secrets.toml}:/app/.streamlit/secrets.toml:ro
+    # SMTP para los correos de invitación. Se toman del deploy/.env; si faltan,
+    # la app crea la invitación igual pero no envía correo.
+    environment:
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_FROM=${SMTP_FROM:-}
     # Solo accesible desde la red interna de Docker; la entrada pública es Caddy.
     expose:
       - "8501"
@@ -41,6 +49,12 @@ services:
     restart: unless-stopped
     volumes:
       - ${SECRETS_FILE_PRUEBAS:-/opt/escandallos/secrets/secrets-pruebas.toml}:/app/.streamlit/secrets.toml:ro
+    environment:
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_FROM=${SMTP_FROM:-}
     expose:
       - "8501"
     healthcheck:
