@@ -1850,11 +1850,22 @@ def cargar_inventario_supabase(trigger, organizacion_activa_id=None):
     # ── Fase 3+: obtener catálogo + precios propios vía RPC ──────────────
     if organizacion_activa_id:
         try:
-            respuesta = supabase.rpc(
-                "obtener_inventario_para_org",
-                {"p_organizacion_id": organizacion_activa_id},
-            ).execute()
-            df = pd.DataFrame(respuesta.data or [])
+            # PostgREST corta a 1000 filas por defecto. Paginamos con .range()
+            # hasta traer todo el catálogo (global + privados).
+            PAGE = 1000
+            todos = []
+            inicio = 0
+            while True:
+                bloque = supabase.rpc(
+                    "obtener_inventario_para_org",
+                    {"p_organizacion_id": organizacion_activa_id},
+                ).range(inicio, inicio + PAGE - 1).execute()
+                datos = bloque.data or []
+                todos.extend(datos)
+                if len(datos) < PAGE:
+                    break
+                inicio += PAGE
+            df = pd.DataFrame(todos)
             if df.empty:
                 return pd.DataFrame(columns=cols_deseadas)
             # Normalizar columnas (la RPC devuelve columnas distintas de las del SELECT)
@@ -8371,13 +8382,28 @@ def _renderizar_inventario_propio(org_id):
     """
     st.caption("Precios propios sobre el catálogo global e ingredientes privados de tu organización.")
 
-    # Cargar inventario con precios resueltos vía RPC
+    # Mostrar el mensaje de éxito guardado antes del último st.rerun()
+    # (los st.success llamados justo antes de rerun() se pierden en la recarga).
+    _msg_exito_inv = st.session_state.pop("_inv_propio_exito", None)
+    if _msg_exito_inv:
+        st.success(_msg_exito_inv)
+
+    # Cargar inventario con precios resueltos vía RPC (catálogo global + precios org).
+    # PostgREST corta a 1000 filas — paginamos para traer el catálogo completo.
     try:
-        resp = supabase.rpc(
-            "obtener_inventario_para_org",
-            {"p_organizacion_id": org_id},
-        ).execute()
-        inv_data = resp.data or []
+        PAGE = 1000
+        inv_data = []
+        inicio = 0
+        while True:
+            bloque = supabase.rpc(
+                "obtener_inventario_para_org",
+                {"p_organizacion_id": org_id},
+            ).range(inicio, inicio + PAGE - 1).execute()
+            datos = bloque.data or []
+            inv_data.extend(datos)
+            if len(datos) < PAGE:
+                break
+            inicio += PAGE
     except Exception as e_inv:
         _msg = str(e_inv).lower()
         if "could not find" in _msg or "does not exist" in _msg or "pgrst202" in _msg:
@@ -8389,7 +8415,30 @@ def _renderizar_inventario_propio(org_id):
             st.warning(f"No se pudo cargar el inventario propio: {e_inv}")
         return
 
-    inv_privados = [r for r in inv_data if r.get("es_privado")]
+    # Los ingredientes privados se cargan APARTE con una query directa sobre
+    # inventario filtrando por organizacion_id. Así no dependemos del límite de
+    # 1000 filas de la RPC: un catálogo global grande puede cortar la lista de
+    # privados aunque existan (P-<slug>-NNNN quedan fuera del bloque paginado si
+    # los globales ya llenan las páginas).
+    inv_privados_raw = []
+    try:
+        _priv_resp = (
+            supabase.table("inventario")
+            .select("codigo, descripcion, familia, unidad_medida, merma, "
+                    "precio_unidad, alergenos_revisados, sin_alergenos, organizacion_id")
+            .eq("organizacion_id", org_id)
+            .order("codigo")
+            .execute()
+        )
+        inv_privados_raw = _priv_resp.data or []
+    except Exception as e_priv:
+        st.warning(f"No se pudieron cargar los ingredientes privados: {e_priv}")
+
+    # Los privados de la RPC ya tienen es_privado=True; los de la query directa
+    # no tienen ese campo, así que los construimos directamente.
+    inv_privados = [{**r, "es_privado": True} for r in inv_privados_raw]
+    # Para los globales usamos los datos de la RPC (incluyen precio efectivo y
+    # precio_es_propio). Excluimos los privados que pudieran aparecer en ella.
     inv_globales = [r for r in inv_data if not r.get("es_privado")]
 
     # ── Ingredientes privados ─────────────────────────────────────────────
@@ -8421,7 +8470,7 @@ def _renderizar_inventario_propio(org_id):
                                 "p_sin_alergenos": True,
                             }).execute()
                             cargar_inventario_supabase.clear()
-                            st.success("Marcado como sin alérgenos de los 14.")
+                            st.session_state["_inv_propio_exito"] = "Marcado como sin alérgenos de los 14."
                             st.rerun()
                         except Exception as e_rev:
                             st.error(f"Error: {e_rev}")
@@ -8436,7 +8485,7 @@ def _renderizar_inventario_propio(org_id):
                             "codigo", row["codigo"]
                         ).execute()
                         cargar_inventario_supabase.clear()
-                        st.success(f"Ingrediente {row['codigo']} eliminado.")
+                        st.session_state["_inv_propio_exito"] = f"Ingrediente {row['codigo']} eliminado."
                         st.rerun()
                     except Exception as e_del:
                         # El trigger del 024 lanza la excepción si está en uso
@@ -8506,7 +8555,7 @@ def _renderizar_inventario_propio(org_id):
                 "alergeno_ids": _alergeno_ids_priv,
             })
             if ok:
-                st.success(msg)
+                st.session_state["_inv_propio_exito"] = msg
                 cargar_inventario_supabase.clear()
                 st.rerun()
             else:
@@ -8561,7 +8610,7 @@ def _renderizar_inventario_propio(org_id):
                             "merma":             nuevo_merma if nuevo_merma > 0 else None,
                         }, on_conflict="organizacion_id,codigo_ingrediente").execute()
                         cargar_inventario_supabase.clear()
-                        st.success(f"Precio propio guardado para {row['codigo']}.")
+                        st.session_state["_inv_propio_exito"] = f"Precio propio guardado para {row['codigo']}."
                         st.rerun()
                     except Exception as e_p:
                         st.error(f"Error: {e_p}")
