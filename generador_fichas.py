@@ -1850,11 +1850,22 @@ def cargar_inventario_supabase(trigger, organizacion_activa_id=None):
     # ── Fase 3+: obtener catálogo + precios propios vía RPC ──────────────
     if organizacion_activa_id:
         try:
-            respuesta = supabase.rpc(
-                "obtener_inventario_para_org",
-                {"p_organizacion_id": organizacion_activa_id},
-            ).execute()
-            df = pd.DataFrame(respuesta.data or [])
+            # PostgREST corta a 1000 filas por defecto. Paginamos con .range()
+            # hasta traer todo el catálogo (global + privados).
+            PAGE = 1000
+            todos = []
+            inicio = 0
+            while True:
+                bloque = supabase.rpc(
+                    "obtener_inventario_para_org",
+                    {"p_organizacion_id": organizacion_activa_id},
+                ).range(inicio, inicio + PAGE - 1).execute()
+                datos = bloque.data or []
+                todos.extend(datos)
+                if len(datos) < PAGE:
+                    break
+                inicio += PAGE
+            df = pd.DataFrame(todos)
             if df.empty:
                 return pd.DataFrame(columns=cols_deseadas)
             # Normalizar columnas (la RPC devuelve columnas distintas de las del SELECT)
@@ -1898,7 +1909,11 @@ def cargar_inventario_supabase(trigger, organizacion_activa_id=None):
                     "cantidad_formato_compra", "precio_formato_compra",
                 ) else ""
         df = df[cols_deseadas].copy()
-        df["codigo"]       = df["codigo"].fillna("").astype(str).str.strip().str.upper()
+        # Sin .upper(): conservar el código EXACTO tal cual está en la BD. Los
+        # globales históricos ya están en mayúsculas (ING-/REC-); los privados
+        # son P-<slug>-NNNN con el slug en minúsculas. Forzar mayúsculas rompía
+        # el emparejamiento de alérgenos de los privados (seguridad alimentaria).
+        df["codigo"]       = df["codigo"].fillna("").astype(str).str.strip()
         df["familia"]      = df["familia"].fillna("").astype(str).str.strip()
         df["descripcion"]  = df["descripcion"].fillna("").astype(str).str.strip()
         df["unidad_medida"] = df["unidad_medida"].fillna("").astype(str).str.strip()
@@ -1921,7 +1936,9 @@ if not inventario_df.empty:
     for _, row in inventario_df.iterrows():
         codigo_raw = row.get("codigo", None)
         if codigo_raw is not None and pd.notna(codigo_raw):
-            codigo_str = str(codigo_raw).strip().upper()
+            # Sin .upper(): la clave del dict debe ser el código EXACTO de la BD
+            # para que casen los privados P-<slug>-NNNN (slug en minúsculas).
+            codigo_str = str(codigo_raw).strip()
             inventario_dict[codigo_str] = {
                 "familia": row.get("familia", "VARIOS"),
                 "descripcion": row.get("descripcion", ""),
@@ -2035,7 +2052,9 @@ def sugerir_ingredientes_similares(descripcion, inventario, limite=8, umbral=0.3
                 score += 0.35
         if score >= umbral:
             sugerencias.append({
-                "codigo": str(row.get("codigo", "")).strip().upper(),
+                # Sin .upper(): el código debe casar exacto con inventario_dict
+                # (privados P-<slug>-NNNN en minúsculas).
+                "codigo": str(row.get("codigo", "")).strip(),
                 "familia": str(row.get("familia", "")).strip(),
                 "descripcion": desc_bd,
                 "unidad_medida": str(row.get("unidad_medida", "") or "").strip(),
@@ -2103,7 +2122,7 @@ def buscar_ingredientes_inventario(texto, limite=12):
             limite=limite,
             umbral=0.25,
         ):
-            codigo = str(sugerencia.get("codigo", "") or "").strip().upper()
+            codigo = str(sugerencia.get("codigo", "") or "").strip()
             if not codigo or codigo in codigos_incluidos:
                 continue
             resultados.append(sugerencia)
@@ -2171,7 +2190,9 @@ def cargar_ingrediente_alergenos_supabase(trigger=0):
         for col in ["codigo_ingrediente", "alergeno_id"]:
             if col not in relaciones.columns:
                 relaciones[col] = ""
-        relaciones["codigo_ingrediente"] = relaciones["codigo_ingrediente"].fillna("").astype(str).str.strip().str.upper()
+        # NO forzar mayúsculas: el código debe conservarse EXACTO (los privados
+        # P-<slug>-NNNN llevan el slug en minúsculas). Solo se normaliza espacio.
+        relaciones["codigo_ingrediente"] = relaciones["codigo_ingrediente"].fillna("").astype(str).str.strip()
         relaciones["alergeno_id"] = relaciones["alergeno_id"].fillna("").astype(str)
 
         catalogo = cargar_alergenos_supabase(obtener_user_id_actual())
@@ -2213,9 +2234,10 @@ def obtener_mapa_alergenos_ingredientes(codigos_ingrediente=None):
         return mapa
     codigos_filtrar = None
     if codigos_ingrediente is not None:
-        codigos_filtrar = {str(c or "").strip().upper() for c in codigos_ingrediente if str(c or "").strip()}
+        # Conservar el código exacto (privados en minúsculas). Sin .upper().
+        codigos_filtrar = {str(c or "").strip() for c in codigos_ingrediente if str(c or "").strip()}
     for _, fila in df.iterrows():
-        codigo_ing = str(fila.get("codigo_ingrediente", "") or "").strip().upper()
+        codigo_ing = str(fila.get("codigo_ingrediente", "") or "").strip()
         if not codigo_ing or (codigos_filtrar is not None and codigo_ing not in codigos_filtrar):
             continue
         item = _alergeno_item_desde_fila(fila)
@@ -2228,7 +2250,8 @@ def obtener_mapa_alergenos_ingredientes(codigos_ingrediente=None):
 
 
 def cargar_alergenos_ingrediente(codigo_ingrediente):
-    codigo = str(codigo_ingrediente or "").strip().upper()
+    # Sin .upper(): el código debe coincidir exacto con inventario/ingrediente_alergenos.
+    codigo = str(codigo_ingrediente or "").strip()
     if not codigo:
         return []
     return obtener_mapa_alergenos_ingredientes([codigo]).get(codigo, [])
@@ -2268,7 +2291,9 @@ def alergeno_ids_desde_nombres(nombres):
 
 def enriquecer_ingrediente_con_alergenos(ingrediente):
     datos = dict(ingrediente or {})
-    codigo = str(datos.get("codigo", datos.get("codigo_ingrediente", "")) or "").strip().upper()
+    # Sin .upper(): conservar el código exacto para buscar sus alérgenos
+    # (privados P-<slug>-NNNN en minúsculas).
+    codigo = str(datos.get("codigo", datos.get("codigo_ingrediente", "")) or "").strip()
     alergenos = datos.get("alergenos")
     if not isinstance(alergenos, list):
         alergenos = []
@@ -2285,7 +2310,10 @@ def enriquecer_inventario_dict_con_alergenos():
         return
     mapa = obtener_mapa_alergenos_ingredientes(inventario_dict.keys())
     for codigo, item in inventario_dict.items():
-        alergenos = mapa.get(str(codigo).strip().upper(), [])
+        # Sin .upper(): el mapa está indexado por el código EXACTO de
+        # inventario. Los privados P-<slug>-NNNN van en minúsculas; con
+        # .upper() no casaban y aparecían como "sin alérgenos".
+        alergenos = mapa.get(str(codigo).strip(), [])
         item["alergenos"] = alergenos
         item["alergeno_ids"] = [a.get("id") for a in alergenos if a.get("id")]
         item["alergenos_texto"] = formatear_alergenos(alergenos)
@@ -2299,7 +2327,11 @@ def guardar_alergenos_ingrediente(codigo_ingrediente, alergeno_ids):
     solo puede añadir (sql/021): se insertan los que faltan ignorando
     duplicados, y si se intenta quitar alguno se mantiene y se avisa.
     """
-    codigo = str(codigo_ingrediente or "").strip().upper()
+    # NO convertir a mayúsculas: el código debe coincidir EXACTAMENTE con
+    # inventario.codigo. Los ingredientes privados usan P-<slug>-NNNN con el
+    # slug en minúsculas; con .upper() el RLS/FK de ingrediente_alergenos no
+    # encontraba la fila y los alérgenos no se guardaban.
+    codigo = str(codigo_ingrediente or "").strip()
     if not codigo_ingrediente_valido(codigo):
         return True, ""
     if not supabase_disponible or supabase is None:
@@ -2367,7 +2399,11 @@ def calcular_alergenos_desde_ingredientes(ingredientes):
     for ingrediente in ingredientes or []:
         datos = dict(ingrediente or {})
         alergenos = datos.get("alergenos") if isinstance(datos.get("alergenos"), list) else []
-        codigo = str(datos.get("codigo", "") or "").strip().upper()
+        # Sin .upper() sobre el código de INGREDIENTE: debe coincidir exacto
+        # con inventario/ingrediente_alergenos para recuperar los alérgenos de
+        # los privados (P-<slug>-NNNN en minúsculas). El .upper() de más abajo
+        # es sobre identificadores de ALÉRGENO, no del ingrediente.
+        codigo = str(datos.get("codigo", "") or "").strip()
         if not alergenos and codigo_ingrediente_valido(codigo):
             codigos_sin_alergenos.append(codigo)
         for alergeno in alergenos:
@@ -2539,7 +2575,10 @@ def datos_ficha_ingrediente(ingrediente=None):
     ingrediente = enriquecer_ingrediente_con_alergenos(dict(ingrediente or {}))
     unidad = str(ingrediente.get("unidad_medida", "") or "").strip()
     return {
-        "codigo": str(ingrediente.get("codigo", "S/C") or "S/C").strip().upper(),
+        # Sin .upper(): conservar el código exacto. Un privado P-<slug>-NNNN
+        # debe mantener el slug en minúsculas para casar con inventario y con
+        # sus alérgenos (seguridad alimentaria).
+        "codigo": str(ingrediente.get("codigo", "S/C") or "S/C").strip(),
         "descripcion": str(ingrediente.get("descripcion", "") or "").strip(),
         "familia": str(ingrediente.get("familia", "SIN CLASIFICAR") or "SIN CLASIFICAR").strip(),
         "unidad_medida": unidad,
@@ -2633,21 +2672,36 @@ def guardar_ficha_en_inventario(datos):
                 "p_unidad_medida": str(datos.get("unidad_medida") or "kg").strip(),
             }).execute().data
 
-            # Guardar alérgenos
+            # Guardar alérgenos. SEGURIDAD ALIMENTARIA: el ingrediente ya se ha
+            # creado en la BD; si el guardado de alérgenos falla NO podemos
+            # dejarlo como si estuviera bien. Avisamos de forma explícita de
+            # que el ingrediente existe pero SIN sus alérgenos, y no lo
+            # marcamos como revisado (queda pendiente de revisión).
             if alergeno_ids:
                 ok_a, msg_a = guardar_alergenos_ingrediente(codigo, alergeno_ids)
                 if not ok_a:
-                    return False, msg_a, None
+                    return False, (
+                        f"⚠️ El ingrediente privado '{descripcion}' se CREÓ con código "
+                        f"{codigo}, pero NO se pudieron guardar sus alérgenos: {msg_a} "
+                        "El ingrediente queda SIN alérgenos declarados y marcado como "
+                        "pendiente de revisión. Vuelve a declarar sus alérgenos desde la "
+                        "ficha del ingrediente antes de usarlo en recetas."
+                    ), None
 
             # Marcar alérgenos revisados vía función SECURITY DEFINER
-            # (el trigger bloquea el UPDATE directo de estas columnas)
+            # (el trigger bloquea el UPDATE directo de estas columnas).
+            # Solo se llega aquí si el guardado de alérgenos fue correcto.
             try:
                 supabase.rpc("marcar_alergenos_revisados", {
                     "p_codigo":        codigo,
                     "p_sin_alergenos": sin_alergenos_flag and not alergeno_ids,
                 }).execute()
             except Exception as e_rev:
-                return False, f"Error al marcar alérgenos como revisados: {e_rev}", None
+                return False, (
+                    f"⚠️ El ingrediente privado '{descripcion}' se creó con código "
+                    f"{codigo} y sus alérgenos se guardaron, pero NO se pudo marcar como "
+                    f"revisado: {e_rev} Revísalo desde la ficha del ingrediente."
+                ), None
 
             # Guardar precio propio si se indicó
             precio = datos.get("precio_unidad")
@@ -2709,7 +2763,9 @@ def anadir_ficha_a_receta(datos):
 
     if codigo_ingrediente_valido(codigo):
         for idx, existente in enumerate(st.session_state["ingredientes"]):
-            if str(existente.get("codigo", "")).strip().upper() == codigo:
+            # Comparación por código exacto (sin .upper()): los privados van en
+            # minúsculas y ambos lados ya conservan el caso real de la BD.
+            if str(existente.get("codigo", "")).strip() == codigo:
                 cantidad_anterior = numero_seguro(existente.get("cantidad_bruta", 0.0), 0.0)
                 ingrediente["cantidad_bruta"] += cantidad_anterior
                 st.session_state["ingredientes"][idx] = ingrediente
@@ -2725,7 +2781,9 @@ def anadir_ficha_a_receta(datos):
 
 
 def usar_ingrediente_inventario_en_alta(codigo):
-    codigo = str(codigo or "").strip().upper()
+    # Sin .upper(): el código viene del inventario (clave exacta del dict);
+    # forzar mayúsculas rompería la búsqueda de los privados P-<slug>-NNNN.
+    codigo = str(codigo or "").strip()
     if codigo not in inventario_dict:
         return False, "La coincidencia seleccionada ya no está disponible."
 
@@ -2738,7 +2796,7 @@ def usar_ingrediente_inventario_en_alta(codigo):
     })
 
     for idx, existente in enumerate(st.session_state["ingredientes"]):
-        if str(existente.get("codigo", "") or "").strip().upper() != codigo:
+        if str(existente.get("codigo", "") or "").strip() != codigo:
             continue
         cantidad_nueva = numero_seguro(ingrediente.get("cantidad_bruta", 0.0), 0.0)
         if cantidad_nueva > 0:
@@ -2775,7 +2833,7 @@ def actualizar_fila_receta_desde_ficha(datos):
         for otro_idx, ingrediente in enumerate(st.session_state["ingredientes"]):
             if otro_idx == int(idx):
                 continue
-            if str(ingrediente.get("codigo", "")).strip().upper() == codigo_actualizado:
+            if str(ingrediente.get("codigo", "")).strip() == codigo_actualizado:
                 return False, "Ese código ya está en otra fila de la receta. Edita la fila existente."
     st.session_state["ingredientes"][int(idx)] = ingrediente_actualizado
     activar_ficha_ingrediente("fila_receta", st.session_state["ingredientes"][int(idx)], int(idx))
@@ -3088,7 +3146,10 @@ def calcular_datos_ingrediente_receta(ing, orden=0):
     """
     Convierte un ingrediente de la app al formato de public.receta_ingredientes.
     """
-    codigo = str(ing.get("codigo", "")).strip().upper()
+    # Sin .upper(): se guarda el código EXACTO en receta_ingredientes. Un
+    # privado P-<slug>-NNNN debe conservar el slug en minúsculas para que al
+    # recargar la receta se recuperen sus alérgenos (seguridad alimentaria).
+    codigo = str(ing.get("codigo", "")).strip()
     cantidad_bruta = numero_seguro(ing.get("cantidad_bruta", 0.0))
     merma = numero_seguro(ing.get("merma", 0.0))
     precio_unidad = numero_seguro(ing.get("precio_unidad", 0.0))
@@ -5401,6 +5462,16 @@ def normalizar_lineas_menu(lineas_menu):
         linea_normalizada = dict(linea)
         linea_normalizada["orden"] = int(numero_seguro(linea_normalizada.get("orden", orden), orden))
         linea_normalizada["seccion"] = str(linea_normalizada.get("seccion", "") or "").strip()
+        # Las líneas que vienen de cargar_menu_detalle_supabase traen el PVP de
+        # la receta en precio_receta_sin_iva / precio_receta_con_iva, pero
+        # recalcular_linea_menu lee la clave 'precio_receta'. Sin este mapeo, el
+        # precio de venta se perdía y la venta neta del documento caía al coste.
+        if linea_normalizada.get("precio_receta") is None:
+            _pvp = linea_normalizada.get("precio_receta_sin_iva")
+            if _pvp is None or pd.isna(_pvp):
+                _pvp = linea_normalizada.get("precio_receta_con_iva")
+            if _pvp is not None and not pd.isna(_pvp):
+                linea_normalizada["precio_receta"] = float(numero_seguro(_pvp, 0.0))
         lineas.append(recalcular_linea_menu(linea_normalizada))
 
     lineas = sorted(lineas, key=lambda item: int(numero_seguro(item.get("orden", 0), 0)))
@@ -5906,7 +5977,9 @@ def preparar_ingredientes_receta_para_sesion(ingredientes_df):
 
     ingredientes = []
     for _, fila in ingredientes_df.iterrows():
-        codigo = str(fila.get("codigo_ingrediente", "") or "").strip().upper()
+        # Sin .upper(): conservar el código exacto para recuperar los alérgenos
+        # de los privados (P-<slug>-NNNN en minúsculas) y casar con inventario.
+        codigo = str(fila.get("codigo_ingrediente", "") or "").strip()
         ingredientes.append(enriquecer_ingrediente_con_alergenos({
             "codigo": codigo if codigo else "S/C",
             "descripcion": str(fila.get("descripcion_ingrediente", "") or "").strip(),
@@ -7416,13 +7489,14 @@ with st.sidebar:
                     st.error(mensaje)
                 else:
                     indice_ficha = st.session_state.get("ingrediente_ficha_indice")
-                    codigo_ficha_norm = str(codigo_ficha or "").strip().upper()
+                    # Sin .upper(): comparar por código exacto (privados en minúsculas).
+                    codigo_ficha_norm = str(codigo_ficha or "").strip()
                     codigo_repetido_receta = (
                         modo_ficha == "fila_receta"
                         and codigo_ingrediente_valido(codigo_ficha_norm)
                         and any(
                             otro_idx != int(indice_ficha)
-                            and str(ingrediente.get("codigo", "") or "").strip().upper()
+                            and str(ingrediente.get("codigo", "") or "").strip()
                             == codigo_ficha_norm
                             for otro_idx, ingrediente in enumerate(st.session_state["ingredientes"])
                         )
@@ -7818,7 +7892,9 @@ def obtener_lookups_admin():
 
     inv_df = inventario.copy() if isinstance(inventario, pd.DataFrame) else pd.DataFrame()
     if not inv_df.empty:
-        inv_df["codigo"] = inv_df["codigo"].fillna("").astype(str).str.strip().str.upper()
+        # Sin .upper(): conservar el código exacto para que los privados
+        # P-<slug>-NNNN (minúsculas) casen con ingrediente_alergenos/recetas.
+        inv_df["codigo"] = inv_df["codigo"].fillna("").astype(str).str.strip()
     ingrediente_por_codigo, codigo_por_ingrediente, opciones_ingredientes = mapas(
         inv_df, "codigo", ["descripcion", "codigo", "familia"]
     )
@@ -7883,7 +7959,8 @@ def preparar_tabla_admin_intuitiva(nombre_tabla, df):
             editor_df[col] = ""
 
     if nombre_tabla == "ingrediente_alergenos":
-        editor_df["ingrediente"] = editor_df.get("codigo_ingrediente", "").fillna("").astype(str).str.upper().map(
+        # Sin .upper(): el código debe coincidir exacto con inv_df (privados en minúsculas).
+        editor_df["ingrediente"] = editor_df.get("codigo_ingrediente", "").fillna("").astype(str).str.strip().map(
             lookups["ingrediente_por_codigo"]
         ).fillna(editor_df.get("codigo_ingrediente", ""))
         editor_df["alergeno"] = editor_df.get("alergeno_id", "").fillna("").astype(str).map(
@@ -7893,7 +7970,7 @@ def preparar_tabla_admin_intuitiva(nombre_tabla, df):
         editor_df["receta"] = editor_df.get("receta_id", "").fillna("").astype(str).map(
             lookups["receta_por_id"]
         ).fillna("")
-        codigo_ing = editor_df.get("codigo_ingrediente", "").fillna("").astype(str).str.upper()
+        codigo_ing = editor_df.get("codigo_ingrediente", "").fillna("").astype(str).str.strip()
         editor_df["ingrediente"] = codigo_ing.map(lookups["ingrediente_por_codigo"]).fillna(
             editor_df.get("descripcion_ingrediente", "")
         )
@@ -8232,6 +8309,7 @@ def _renderizar_compartir_recetas(org_id):
         # Cargar nombres de recetas en segunda query (objeto_id no tiene FK a recetas
         # en PostgREST, así que el embed directo falla con PGRST200)
         _nombres_recetas = {}
+        _nombres_orgs = {}
         if _comps:
             try:
                 _ids_recetas = list({c["objeto_id"] for c in _comps if c.get("objeto_id")})
@@ -8248,15 +8326,34 @@ def _renderizar_compartir_recetas(org_id):
                 }
             except Exception:
                 pass
+            # Nombres de las organizaciones destino (para no mostrar el UUID).
+            # Usamos la RPC listar_organizaciones_destino (025c), que devuelve
+            # id+nombre de las orgs activas distintas a la propia, en lugar de
+            # leer la tabla organizaciones directamente (la app no accede a esa
+            # tabla salvo por RPC con control de gerente).
+            try:
+                _resp_orgs = supabase.rpc(
+                    "listar_organizaciones_destino",
+                    {"p_org_origen": str(org_id)},
+                ).execute()
+                _nombres_orgs = {
+                    o["id"]: o["nombre"]
+                    for o in (_resp_orgs.data or [])
+                    if o.get("id")
+                }
+            except Exception:
+                pass
 
         if not _comps:
             st.info("No hay comparticiones activas.")
         else:
             for _c in _comps:
                 _nombre_r   = _nombres_recetas.get(_c.get("objeto_id", ""), _c.get("objeto_id", "—"))
-                _dest_texto = "Todas las orgs" if _c.get("destino") == "todas" else (
-                    _c.get("destino_organizacion_id", "?")
-                )
+                if _c.get("destino") == "todas":
+                    _dest_texto = "Todas las orgs"
+                else:
+                    _dest_org_id = _c.get("destino_organizacion_id")
+                    _dest_texto = _nombres_orgs.get(_dest_org_id, _dest_org_id or "?")
                 _estado = "✅ Activa" if _c.get("activa") else "🔴 Desactivada"
                 col1, col2, col3, col4 = st.columns([3, 2, 1, 1])
                 with col1:
@@ -8285,13 +8382,28 @@ def _renderizar_inventario_propio(org_id):
     """
     st.caption("Precios propios sobre el catálogo global e ingredientes privados de tu organización.")
 
-    # Cargar inventario con precios resueltos vía RPC
+    # Mostrar el mensaje de éxito guardado antes del último st.rerun()
+    # (los st.success llamados justo antes de rerun() se pierden en la recarga).
+    _msg_exito_inv = st.session_state.pop("_inv_propio_exito", None)
+    if _msg_exito_inv:
+        st.success(_msg_exito_inv)
+
+    # Cargar inventario con precios resueltos vía RPC (catálogo global + precios org).
+    # PostgREST corta a 1000 filas — paginamos para traer el catálogo completo.
     try:
-        resp = supabase.rpc(
-            "obtener_inventario_para_org",
-            {"p_organizacion_id": org_id},
-        ).execute()
-        inv_data = resp.data or []
+        PAGE = 1000
+        inv_data = []
+        inicio = 0
+        while True:
+            bloque = supabase.rpc(
+                "obtener_inventario_para_org",
+                {"p_organizacion_id": org_id},
+            ).range(inicio, inicio + PAGE - 1).execute()
+            datos = bloque.data or []
+            inv_data.extend(datos)
+            if len(datos) < PAGE:
+                break
+            inicio += PAGE
     except Exception as e_inv:
         _msg = str(e_inv).lower()
         if "could not find" in _msg or "does not exist" in _msg or "pgrst202" in _msg:
@@ -8303,7 +8415,30 @@ def _renderizar_inventario_propio(org_id):
             st.warning(f"No se pudo cargar el inventario propio: {e_inv}")
         return
 
-    inv_privados = [r for r in inv_data if r.get("es_privado")]
+    # Los ingredientes privados se cargan APARTE con una query directa sobre
+    # inventario filtrando por organizacion_id. Así no dependemos del límite de
+    # 1000 filas de la RPC: un catálogo global grande puede cortar la lista de
+    # privados aunque existan (P-<slug>-NNNN quedan fuera del bloque paginado si
+    # los globales ya llenan las páginas).
+    inv_privados_raw = []
+    try:
+        _priv_resp = (
+            supabase.table("inventario")
+            .select("codigo, descripcion, familia, unidad_medida, merma, "
+                    "precio_unidad, alergenos_revisados, organizacion_id")
+            .eq("organizacion_id", org_id)
+            .order("codigo")
+            .execute()
+        )
+        inv_privados_raw = _priv_resp.data or []
+    except Exception as e_priv:
+        st.warning(f"No se pudieron cargar los ingredientes privados: {e_priv}")
+
+    # Los privados de la RPC ya tienen es_privado=True; los de la query directa
+    # no tienen ese campo, así que los construimos directamente.
+    inv_privados = [{**r, "es_privado": True} for r in inv_privados_raw]
+    # Para los globales usamos los datos de la RPC (incluyen precio efectivo y
+    # precio_es_propio). Excluimos los privados que pudieran aparecer en ella.
     inv_globales = [r for r in inv_data if not r.get("es_privado")]
 
     # ── Ingredientes privados ─────────────────────────────────────────────
@@ -8335,7 +8470,7 @@ def _renderizar_inventario_propio(org_id):
                                 "p_sin_alergenos": True,
                             }).execute()
                             cargar_inventario_supabase.clear()
-                            st.success("Marcado como sin alérgenos de los 14.")
+                            st.session_state["_inv_propio_exito"] = "Marcado como sin alérgenos de los 14."
                             st.rerun()
                         except Exception as e_rev:
                             st.error(f"Error: {e_rev}")
@@ -8350,7 +8485,7 @@ def _renderizar_inventario_propio(org_id):
                             "codigo", row["codigo"]
                         ).execute()
                         cargar_inventario_supabase.clear()
-                        st.success(f"Ingrediente {row['codigo']} eliminado.")
+                        st.session_state["_inv_propio_exito"] = f"Ingrediente {row['codigo']} eliminado."
                         st.rerun()
                     except Exception as e_del:
                         # El trigger del 024 lanza la excepción si está en uso
@@ -8362,6 +8497,12 @@ def _renderizar_inventario_propio(org_id):
 
     # ── Crear ingrediente privado ──────────────────────────────────────────
     st.markdown("#### Añadir ingrediente privado")
+    # Catálogo de alérgenos (14 de la UE) desde Supabase, igual que la ficha normal.
+    _catalogo_alergenos_priv = cargar_alergenos_supabase(obtener_user_id_actual())
+    _opciones_alergenos_priv = (
+        _catalogo_alergenos_priv["nombre"].dropna().astype(str).tolist()
+        if not _catalogo_alergenos_priv.empty else []
+    )
     with st.form("form_ingrediente_privado"):
         new_desc    = st.text_input("Descripción *", key="priv_desc")
         # Familia obligatoria: selectbox con opciones comunes + libre
@@ -8375,6 +8516,13 @@ def _renderizar_inventario_propio(org_id):
         if new_familia == "Otro":
             new_familia = st.text_input("Familia (escribe la tuya)", key="priv_familia_libre")
         new_unidad  = st.selectbox("Unidad de medida", ["kg", "l", "ud", "g", "ml"], key="priv_unidad")
+        new_alergenos_nombres = st.multiselect(
+            "Alérgenos (de los 14 de la UE)",
+            options=_opciones_alergenos_priv,
+            key="priv_alergenos",
+            help="Se guardan en ingrediente_alergenos. Déjalo vacío solo si marcas "
+                 "'No contiene ninguno'.",
+        )
         new_sin_alerg = st.checkbox(
             "No contiene ninguno de los 14 alérgenos de la UE",
             key="priv_sin_alerg",
@@ -8382,20 +8530,32 @@ def _renderizar_inventario_propio(org_id):
         submitted = st.form_submit_button("Crear ingrediente privado")
 
     if submitted:
+        # Si marca "No contiene ninguno", el multiselect debe estar vacío.
+        _alergeno_ids_priv = alergeno_ids_desde_nombres(new_alergenos_nombres)
         if not new_desc:
             st.error("Introduce una descripción.")
         elif not new_familia:
             st.error("Selecciona una familia antes de guardar.")
+        elif new_sin_alerg and _alergeno_ids_priv:
+            st.error(
+                "Has marcado 'No contiene ninguno de los 14 alérgenos' pero has "
+                "seleccionado alérgenos. Quita la marca o vacía la lista."
+            )
+        elif not new_sin_alerg and not _alergeno_ids_priv:
+            st.error(
+                "Declara al menos un alérgeno o marca 'No contiene ninguno de los "
+                "14 alérgenos' antes de guardar."
+            )
         else:
             ok, msg, codigo_nuevo = guardar_ficha_en_inventario({
                 "descripcion":  new_desc,
                 "familia":      new_familia,
                 "unidad_medida": new_unidad,
                 "sin_alergenos": new_sin_alerg,
-                "alergeno_ids": [],
+                "alergeno_ids": _alergeno_ids_priv,
             })
             if ok:
-                st.success(msg)
+                st.session_state["_inv_propio_exito"] = msg
                 cargar_inventario_supabase.clear()
                 st.rerun()
             else:
@@ -8450,7 +8610,7 @@ def _renderizar_inventario_propio(org_id):
                             "merma":             nuevo_merma if nuevo_merma > 0 else None,
                         }, on_conflict="organizacion_id,codigo_ingrediente").execute()
                         cargar_inventario_supabase.clear()
-                        st.success(f"Precio propio guardado para {row['codigo']}.")
+                        st.session_state["_inv_propio_exito"] = f"Precio propio guardado para {row['codigo']}."
                         st.rerun()
                     except Exception as e_p:
                         st.error(f"Error: {e_p}")
@@ -8466,44 +8626,66 @@ def _renderizar_miembros_e_invitaciones(org_id, org_nombre):
     tab_m, tab_i = st.tabs(["Miembros", "Invitaciones"])
 
     with tab_m:
+        # Preferir la RPC listar_miembros_org (027): resuelve email/nombre de
+        # todos los miembros aunque el RLS de usuarios_app no deje al gerente leer
+        # las filas de otros usuarios. Si no está disponible, usar el método
+        # anterior (dos queries) como respaldo.
+        miembros = []
+        _usar_fallback = False
         try:
-            resp_m = (
-                supabase
-                .table("organizacion_miembros")
-                .select("id, user_id, rol, activo, joined_at")
-                .eq("organizacion_id", org_id)
-                .order("joined_at")
-                .execute()
-            )
-            miembros = resp_m.data or []
-        except Exception as e_m:
-            st.error(f"Error al cargar miembros: {e_m}")
-            miembros = []
+            resp_lm = supabase.rpc("listar_miembros_org", {"p_org": org_id}).execute()
+            miembros = resp_lm.data or []
+        except Exception as e_lm:
+            _msg_lm = str(e_lm).lower()
+            if ("could not find" in _msg_lm or "does not exist" in _msg_lm
+                    or "pgrst202" in _msg_lm or "function" in _msg_lm):
+                _usar_fallback = True
+            else:
+                st.error(f"Error al cargar miembros: {e_lm}")
+                miembros = []
 
-        _emails_uid = {}
-        if miembros:
+        if _usar_fallback:
             try:
-                _uids = [m["user_id"] for m in miembros if m.get("user_id")]
-                resp_ua = (
-                    supabase.table("usuarios_app")
-                    .select("user_id, email, nombre")
-                    .in_("user_id", _uids)
+                resp_m = (
+                    supabase
+                    .table("organizacion_miembros")
+                    .select("id, user_id, rol, activo, joined_at")
+                    .eq("organizacion_id", org_id)
+                    .order("joined_at")
                     .execute()
                 )
-                _emails_uid = {r["user_id"]: r for r in (resp_ua.data or [])}
-            except Exception:
-                pass
+                miembros = resp_m.data or []
+            except Exception as e_m:
+                st.error(f"Error al cargar miembros: {e_m}")
+                miembros = []
+
+            _emails_uid = {}
+            if miembros:
+                try:
+                    _uids = [m["user_id"] for m in miembros if m.get("user_id")]
+                    resp_ua = (
+                        supabase.table("usuarios_app")
+                        .select("user_id, email, nombre")
+                        .in_("user_id", _uids)
+                        .execute()
+                    )
+                    _emails_uid = {r["user_id"]: r for r in (resp_ua.data or [])}
+                except Exception:
+                    pass
+            for m in miembros:
+                ua = _emails_uid.get(m.get("user_id"), {})
+                m.setdefault("email", ua.get("email"))
+                m.setdefault("nombre", ua.get("nombre"))
 
         if not miembros:
             st.info("No hay miembros en esta organización todavía.")
         else:
             for m in miembros:
-                ua     = _emails_uid.get(m.get("user_id"), {})
-                email  = ua.get("email") or m.get("user_id", "")
-                nombre = ua.get("nombre") or ""
+                email  = m.get("email") or m.get("user_id", "")
+                nombre = m.get("nombre") or ""
                 rol    = m.get("rol", "chef")
                 activo = m.get("activo", True)
-                col1, col2, col3, col4 = st.columns([3, 2, 1, 1])
+                col1, col2, col3, col4 = st.columns([4, 2, 2, 2])
                 with col1:
                     st.write(f"**{email}**" + (f" ({nombre})" if nombre else ""))
                 with col2:
@@ -8512,7 +8694,7 @@ def _renderizar_miembros_e_invitaciones(org_id, org_nombre):
                     st.write("✅ activo" if activo else "❌ inactivo")
                 with col4:
                     if activo and m.get("user_id") != obtener_user_id_actual():
-                        if st.button("Desactivar", key=f"desact_m_{org_id}_{m['id']}"):
+                        if st.button("Desactivar", key=f"desact_m_{org_id}_{m['id']}", use_container_width=True):
                             try:
                                 supabase.table("organizacion_miembros").update(
                                     {"activo": False}
@@ -9424,7 +9606,9 @@ with main_tab_recetas:
         if not descripcion_editada:
             descripcion_editada = str(original.get("descripcion", "") or "").strip()
             fila_existente_invalida = True
-        codigo_editado = str(fila.get("codigo", "S/C") or "S/C").strip().upper() or "S/C"
+        # Sin .upper(): conservar el código exacto para casar con inventario y
+        # alérgenos (privados P-<slug>-NNNN en minúsculas).
+        codigo_editado = str(fila.get("codigo", "S/C") or "S/C").strip() or "S/C"
         original.update({
             "codigo": codigo_editado,
             "descripcion": descripcion_editada,
@@ -9447,7 +9631,7 @@ with main_tab_recetas:
     fila_nueva = tabla_ingredientes.iloc[len(ingredientes_activos)]
     borrador_actualizado = datos_ficha_ingrediente({
         **borrador_alta,
-        "codigo": str(fila_nueva.get("codigo", "S/C") or "S/C").strip().upper() or "S/C",
+        "codigo": str(fila_nueva.get("codigo", "S/C") or "S/C").strip() or "S/C",
         "descripcion": str(fila_nueva.get("descripcion", "") or "").strip(),
         "cantidad_bruta": parse_numero_usuario(fila_nueva.get("cantidad_bruta_txt", ""), 0.0, minimo=0.0),
         "unidad_medida": str(fila_nueva.get("unidad_medida", "") or "").strip(),
@@ -9479,7 +9663,7 @@ with main_tab_recetas:
             st.session_state["ingrediente_ficha_indice"] = indice_elegido
             st.session_state["ingrediente_ficha_datos"] = datos_ficha_ingrediente({
                 **inventario_dict.get(
-                    str(ingrediente_seleccionado.get("codigo", "")).strip().upper(),
+                    str(ingrediente_seleccionado.get("codigo", "")).strip(),
                     {},
                 ),
                 **ingrediente_seleccionado,
@@ -9750,6 +9934,49 @@ with main_tab_clientes:
 with main_tab_facturas:
     st.subheader("Facturas")
     usuario_id_facturas = obtener_user_id_actual()
+
+    # Documento pendiente de cargar (patrón para no modificar claves de widgets
+    # ya instanciados): los botones Cargar/Duplicar/Rectificativa/Crear-desde-
+    # presupuesto guardan aquí el id y hacen rerun; aquí, ANTES de pintar ningún
+    # widget del formulario, se carga en sesión.
+    _doc_pendiente = st.session_state.pop("_doc_pendiente_cargar", None)
+    if _doc_pendiente:
+        _pd_id    = _doc_pendiente.get("factura_id")
+        _pd_modo  = _doc_pendiente.get("modo", "cargar")  # cargar | crear_factura_desde_presupuesto
+
+        def _poner_feedback_carga(tipo, mensaje):
+            # No pisar un feedback ya presente (p.ej. "Documento emitido con número…"):
+            # solo establecer el mensaje de carga cuando no haya otro.
+            if st.session_state.get("factura_documento_feedback") is None:
+                st.session_state["factura_documento_feedback"] = (tipo, mensaje)
+
+        try:
+            _ok_pd, _msg_pd, _fac_pd, _lin_pd = cargar_factura_detalle_supabase(_pd_id)
+            if _ok_pd:
+                if _pd_modo == "crear_factura_desde_presupuesto":
+                    # Si el presupuesto no tiene líneas, no lo convertimos.
+                    if _lin_pd is None or _lin_pd.empty:
+                        _poner_feedback_carga("warning", "El presupuesto no contiene menús.")
+                    else:
+                        cargar_factura_en_sesion(_fac_pd, _lin_pd)
+                        # Convertir el presupuesto cargado en una nueva factura borrador
+                        st.session_state["factura_id_en_edicion"] = None
+                        st.session_state["factura_presupuesto_origen_id"] = _pd_id
+                        st.session_state["factura_tipo_documento"] = "factura"
+                        st.session_state["factura_numero_actual_factura"] = ""
+                        st.session_state["factura_estado"] = "borrador"
+                        _poner_feedback_carga(
+                            "success",
+                            "Factura creada desde el presupuesto como borrador. Revísala y emítela.",
+                        )
+                else:
+                    cargar_factura_en_sesion(_fac_pd, _lin_pd)
+                    _poner_feedback_carga("success", _msg_pd)
+            else:
+                _poner_feedback_carga("warning", _msg_pd)
+        except Exception as _e_pd:
+            _poner_feedback_carga("warning", f"No se pudo cargar el documento: {_e_pd}")
+
     if not usuario_id_facturas:
         st.info("Inicia sesión para crear presupuestos y facturas en tu cuenta")
     else:
@@ -9830,26 +10057,27 @@ with main_tab_facturas:
                             st.info(etiqueta_menu_documento)
                     cargar_col, duplicar_col, facturar_col = st.columns(3)
                     with cargar_col:
+                        # Guardar el documento pendiente y recargar: la carga real
+                        # ocurre al principio del rerun, antes de pintar los widgets,
+                        # para no modificar claves de widgets ya instanciados.
                         if st.button("Cargar documento", use_container_width=True):
-                            ok_detalle, mensaje_detalle, factura_detalle, lineas_detalle = cargar_factura_detalle_supabase(
-                                factura_guardada_id
-                            )
-                            if ok_detalle:
-                                cargar_factura_en_sesion(factura_detalle, lineas_detalle)
-                                st.session_state["factura_documento_feedback"] = ("success", mensaje_detalle)
-                                st.rerun()
-                            else:
-                                st.error(mensaje_detalle)
+                            st.session_state["_doc_pendiente_cargar"] = {
+                                "factura_id": factura_guardada_id,
+                                "modo": "cargar",
+                            }
+                            st.rerun()
                     with duplicar_col:
                         if st.button("Duplicar documento", use_container_width=True):
+                            # Duplicar crea un documento nuevo en BD y devuelve su id;
+                            # ese nuevo borrador se carga mediante el patrón pendiente.
                             ok_duplicar, mensaje_duplicar, factura_duplicada = duplicar_factura_supabase(
                                 factura_guardada_id
                             )
                             if ok_duplicar:
-                                st.session_state["factura_documento_feedback"] = (
-                                    "success",
-                                    f"{mensaje_duplicar} {factura_duplicada.get('numero_factura', '')}"
-                                )
+                                st.session_state["_doc_pendiente_cargar"] = {
+                                    "factura_id": str((factura_duplicada or {}).get("id") or "").strip(),
+                                    "modo": "cargar",
+                                }
                                 st.rerun()
                             else:
                                 st.error(mensaje_duplicar)
@@ -9864,24 +10092,11 @@ with main_tab_facturas:
                             disabled=not es_presupuesto_seleccionado,
                             use_container_width=True,
                         ):
-                            ok_detalle, mensaje_detalle, presupuesto_detalle, lineas_detalle = cargar_factura_detalle_supabase(
-                                factura_guardada_id
-                            )
-                            if ok_detalle and not lineas_detalle.empty:
-                                cargar_factura_en_sesion(presupuesto_detalle, lineas_detalle)
-                                st.session_state["factura_id_en_edicion"] = None
-                                st.session_state["factura_presupuesto_origen_id"] = factura_guardada_id
-                                st.session_state["factura_tipo_documento"] = "factura"
-                                # Fase 5: borrador sin número (se asigna al emitir)
-                                st.session_state["factura_numero_actual_factura"] = ""
-                                st.session_state["factura_estado"] = "borrador"
-                                st.session_state["factura_documento_feedback"] = (
-                                    "success",
-                                    "Factura creada desde el presupuesto como borrador. Revísala y emítela.",
-                                )
-                                st.rerun()
-                            else:
-                                st.error(mensaje_detalle or "El presupuesto no contiene menús.")
+                            st.session_state["_doc_pendiente_cargar"] = {
+                                "factura_id": factura_guardada_id,
+                                "modo": "crear_factura_desde_presupuesto",
+                            }
+                            st.rerun()
 
                     columnas_documentos = [
                         "numero_factura", "tipo_documento", "cliente",
@@ -9909,6 +10124,15 @@ with main_tab_facturas:
                 if st.session_state.get("factura_cliente_id") not in opciones_clientes_factura:
                     st.session_state["factura_cliente_id"] = opciones_clientes_factura[0]
                 opciones_tipo_documento = ["presupuesto", "factura"]
+                # Si el documento cargado es una rectificativa, su tipo debe
+                # poder MOSTRARSE y CONSERVARSE (no es un tipo que se elija al
+                # crear: nace de rectificar una factura). Lo añadimos a las
+                # opciones para que el selector lo refleje sin resetearlo a
+                # "presupuesto"; más abajo el selector se muestra no editable.
+                _tipo_doc_actual = str(st.session_state.get("factura_tipo_documento") or "").strip()
+                _es_rectificativa = _tipo_doc_actual == "factura_rectificativa"
+                if _es_rectificativa:
+                    opciones_tipo_documento = ["presupuesto", "factura", "factura_rectificativa"]
                 opciones_estado_documento = ["borrador", "emitida", "cobrada", "anulada"]
                 opciones_estado_cobro = ["pendiente", "parcial", "cobrado"]
                 if st.session_state.get("factura_tipo_documento") not in opciones_tipo_documento:
@@ -9948,11 +10172,19 @@ with main_tab_facturas:
                         key="factura_cliente_id",
                         disabled=_es_solo_lectura,
                     )
+                    _etiquetas_tipo_doc = {
+                        "presupuesto": "Presupuesto",
+                        "factura": "Factura",
+                        "factura_rectificativa": "Factura rectificativa",
+                    }
                     tipo_documento = st.selectbox(
                         "Tipo de documento",
                         opciones_tipo_documento,
                         key="factura_tipo_documento",
-                        disabled=_es_solo_lectura,
+                        format_func=lambda t: _etiquetas_tipo_doc.get(t, t),
+                        # Una rectificativa conserva su tipo y NO es editable
+                        # (nace de rectificar una factura, no se elige a mano).
+                        disabled=_es_solo_lectura or _es_rectificativa,
                     )
                     # Fase 5: los borradores NO llevan número; se asigna al emitir.
                     if _numero_edicion:
@@ -10002,17 +10234,28 @@ with main_tab_facturas:
                     # IVA del documento (Fase 5). Valor inicial: IVA por defecto de
                     # la organización. Editable solo en borradores; en emitidos se
                     # muestra el IVA congelado y bloqueado.
-                    if "factura_iva_pct" not in st.session_state:
-                        st.session_state["factura_iva_pct"] = iva_defecto_organizacion()
+                    #
+                    # Al volver de la página Gerente, Streamlit recicla el estado
+                    # del widget (no se renderizó) y, como el number_input tiene
+                    # min_value=0.0 y antes no recibía value=, el IVA caía a 0.
+                    # Para que siga siendo el de iva_defecto_organizacion() lo
+                    # sembramos SIEMPRE con un valor válido y le pasamos value=
+                    # explícito (mismo patrón que el formulario de Gerente).
+                    _iva_doc_actual = st.session_state.get("factura_iva_pct")
+                    if _iva_doc_actual is None:
+                        _iva_doc_actual = iva_defecto_organizacion()
+                    _iva_doc_actual = numero_seguro(_iva_doc_actual, iva_defecto_organizacion())
+                    st.session_state["factura_iva_pct"] = _iva_doc_actual
                     iva_pct_documento = st.number_input(
                         "IVA (%)",
                         min_value=0.0,
                         max_value=100.0,
                         step=0.5,
-                        key="factura_iva_pct",
+                        value=float(_iva_doc_actual),
                         disabled=_es_solo_lectura,
                         help="IVA aplicado a las líneas del documento. Por defecto, el de la organización.",
                     )
+                    st.session_state["factura_iva_pct"] = float(iva_pct_documento)
 
                 concepto = st.text_input("Concepto", key="factura_concepto", disabled=_es_solo_lectura)
                 notas = st.text_area("Notas", key="factura_notas", height=80, disabled=_es_solo_lectura)
@@ -10063,6 +10306,7 @@ with main_tab_facturas:
                                 "Añadir menú",
                                 type="primary",
                                 use_container_width=True,
+                                disabled=_es_solo_lectura,
                             )
 
                         st.caption("Cada presupuesto o factura puede incluir uno o más menús. Cada menú se desglosa por sus recetas y raciones.")
@@ -10114,7 +10358,7 @@ with main_tab_facturas:
 
                 lineas_accion_col1, lineas_accion_col2 = st.columns(2)
                 with lineas_accion_col1:
-                    if st.button("Quitar último menú", use_container_width=True):
+                    if st.button("Quitar último menú", use_container_width=True, disabled=_es_solo_lectura):
                         lineas_actuales_doc = [
                             dict(linea) for linea in st.session_state.get("factura_lineas_actual", [])
                             if str(linea.get("descripcion", "") or "").strip()
@@ -10132,7 +10376,7 @@ with main_tab_facturas:
                         else:
                             st.info("No hay menú para quitar.")
                 with lineas_accion_col2:
-                    if st.button("Limpiar documento", use_container_width=True):
+                    if st.button("Limpiar documento", use_container_width=True, disabled=_es_solo_lectura):
                         st.session_state["factura_lineas_actual"] = []
                         st.session_state["factura_id_en_edicion"] = None
                         st.session_state["factura_presupuesto_origen_id"] = None
@@ -10357,22 +10601,51 @@ with main_tab_facturas:
                                     supabase.table("facturas").update(
                                         {"estado": "cobrada"}
                                     ).eq("id", factura_id_en_edicion).execute()
-                                    cargar_facturas_supabase()  # refresca el cache externo si lo hubiera
-                                    st.success("Documento marcado como cobrado.")
+                                    # Recargar el documento para reflejar estado real
+                                    st.session_state["_doc_pendiente_cargar"] = {
+                                        "factura_id": factura_id_en_edicion, "modo": "cargar",
+                                    }
+                                    st.session_state["factura_documento_feedback"] = (
+                                        "success", "Documento marcado como cobrado.",
+                                    )
                                     st.rerun()
                                 except Exception as _e_cob:
                                     st.error(f"No se pudo marcar como cobrado: {_e_cob}")
                         with _acc_col2:
                             if _tipo_edicion == "presupuesto":
+                                # Anular presupuesto pide confirmación (patrón de "Limpiar todos")
+                                _clave_conf_anular = f"_confirmar_anular_{factura_id_en_edicion}"
                                 if st.button("Anular presupuesto", use_container_width=True):
-                                    try:
-                                        supabase.table("facturas").update(
-                                            {"estado": "anulada"}
-                                        ).eq("id", factura_id_en_edicion).execute()
-                                        st.success("Presupuesto anulado.")
-                                        st.rerun()
-                                    except Exception as _e_anul:
-                                        st.error(f"No se pudo anular: {_e_anul}")
+                                    st.session_state[_clave_conf_anular] = True
+                                if st.session_state.get(_clave_conf_anular, False):
+                                    st.warning(
+                                        "Vas a anular este presupuesto emitido. "
+                                        "La anulación no se puede deshacer."
+                                    )
+                                    _anul_c1, _anul_c2 = st.columns(2)
+                                    with _anul_c1:
+                                        if st.button("Sí, anular presupuesto", type="primary",
+                                                     use_container_width=True,
+                                                     key=f"btn_conf_anular_{factura_id_en_edicion}"):
+                                            try:
+                                                supabase.table("facturas").update(
+                                                    {"estado": "anulada"}
+                                                ).eq("id", factura_id_en_edicion).execute()
+                                                st.session_state.pop(_clave_conf_anular, None)
+                                                st.session_state["_doc_pendiente_cargar"] = {
+                                                    "factura_id": factura_id_en_edicion, "modo": "cargar",
+                                                }
+                                                st.session_state["factura_documento_feedback"] = (
+                                                    "success", "Presupuesto anulado.",
+                                                )
+                                                st.rerun()
+                                            except Exception as _e_anul:
+                                                st.error(f"No se pudo anular: {_e_anul}")
+                                    with _anul_c2:
+                                        if st.button("Cancelar", use_container_width=True,
+                                                     key=f"btn_cancel_anular_{factura_id_en_edicion}"):
+                                            st.session_state.pop(_clave_conf_anular, None)
+                                            st.rerun()
                             elif _tipo_edicion == "factura" and _es_gerente_fact:
                                 if st.button("Crear rectificativa", use_container_width=True):
                                     try:
@@ -10381,18 +10654,17 @@ with main_tab_facturas:
                                             {"p_factura_original": factura_id_en_edicion},
                                         ).execute()
                                         _rect_id = _resp_rect.data
-                                        ok_det, msg_det, rect_det, rect_lineas = cargar_factura_detalle_supabase(
-                                            _rect_id if isinstance(_rect_id, str) else str(_rect_id or "")
+                                        # Cargar el borrador rectificativo mediante el
+                                        # patrón pendiente (no modificar widgets ya pintados).
+                                        st.session_state["_doc_pendiente_cargar"] = {
+                                            "factura_id": _rect_id if isinstance(_rect_id, str) else str(_rect_id or ""),
+                                            "modo": "cargar",
+                                        }
+                                        st.session_state["factura_documento_feedback"] = (
+                                            "success",
+                                            "Borrador rectificativo creado. Edítalo y emítelo cuando esté listo.",
                                         )
-                                        if ok_det:
-                                            cargar_factura_en_sesion(rect_det, rect_lineas)
-                                            st.session_state["factura_documento_feedback"] = (
-                                                "success",
-                                                "Borrador rectificativo creado. Edítalo y emítelo cuando esté listo.",
-                                            )
-                                            st.rerun()
-                                        else:
-                                            st.error(msg_det)
+                                        st.rerun()
                                     except Exception as _e_rect:
                                         st.error(f"No se pudo crear la rectificativa: {_e_rect}")
                     else:
@@ -10418,6 +10690,11 @@ with main_tab_facturas:
                                     {"p_factura_id": factura_id_en_edicion},
                                 ).execute()
                                 _num_emitido = _resp_emit.data
+                                # Recargar el documento para que los widgets muestren
+                                # el número, estado y estado de cobro reales.
+                                st.session_state["_doc_pendiente_cargar"] = {
+                                    "factura_id": factura_id_en_edicion, "modo": "cargar",
+                                }
                                 st.session_state["factura_documento_feedback"] = (
                                     "success",
                                     f"Documento emitido con número {_num_emitido}.",
