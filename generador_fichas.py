@@ -1898,7 +1898,11 @@ def cargar_inventario_supabase(trigger, organizacion_activa_id=None):
                     "cantidad_formato_compra", "precio_formato_compra",
                 ) else ""
         df = df[cols_deseadas].copy()
-        df["codigo"]       = df["codigo"].fillna("").astype(str).str.strip().str.upper()
+        # Sin .upper(): conservar el código EXACTO tal cual está en la BD. Los
+        # globales históricos ya están en mayúsculas (ING-/REC-); los privados
+        # son P-<slug>-NNNN con el slug en minúsculas. Forzar mayúsculas rompía
+        # el emparejamiento de alérgenos de los privados (seguridad alimentaria).
+        df["codigo"]       = df["codigo"].fillna("").astype(str).str.strip()
         df["familia"]      = df["familia"].fillna("").astype(str).str.strip()
         df["descripcion"]  = df["descripcion"].fillna("").astype(str).str.strip()
         df["unidad_medida"] = df["unidad_medida"].fillna("").astype(str).str.strip()
@@ -1921,7 +1925,9 @@ if not inventario_df.empty:
     for _, row in inventario_df.iterrows():
         codigo_raw = row.get("codigo", None)
         if codigo_raw is not None and pd.notna(codigo_raw):
-            codigo_str = str(codigo_raw).strip().upper()
+            # Sin .upper(): la clave del dict debe ser el código EXACTO de la BD
+            # para que casen los privados P-<slug>-NNNN (slug en minúsculas).
+            codigo_str = str(codigo_raw).strip()
             inventario_dict[codigo_str] = {
                 "familia": row.get("familia", "VARIOS"),
                 "descripcion": row.get("descripcion", ""),
@@ -2035,7 +2041,9 @@ def sugerir_ingredientes_similares(descripcion, inventario, limite=8, umbral=0.3
                 score += 0.35
         if score >= umbral:
             sugerencias.append({
-                "codigo": str(row.get("codigo", "")).strip().upper(),
+                # Sin .upper(): el código debe casar exacto con inventario_dict
+                # (privados P-<slug>-NNNN en minúsculas).
+                "codigo": str(row.get("codigo", "")).strip(),
                 "familia": str(row.get("familia", "")).strip(),
                 "descripcion": desc_bd,
                 "unidad_medida": str(row.get("unidad_medida", "") or "").strip(),
@@ -2103,7 +2111,7 @@ def buscar_ingredientes_inventario(texto, limite=12):
             limite=limite,
             umbral=0.25,
         ):
-            codigo = str(sugerencia.get("codigo", "") or "").strip().upper()
+            codigo = str(sugerencia.get("codigo", "") or "").strip()
             if not codigo or codigo in codigos_incluidos:
                 continue
             resultados.append(sugerencia)
@@ -2171,7 +2179,9 @@ def cargar_ingrediente_alergenos_supabase(trigger=0):
         for col in ["codigo_ingrediente", "alergeno_id"]:
             if col not in relaciones.columns:
                 relaciones[col] = ""
-        relaciones["codigo_ingrediente"] = relaciones["codigo_ingrediente"].fillna("").astype(str).str.strip().str.upper()
+        # NO forzar mayúsculas: el código debe conservarse EXACTO (los privados
+        # P-<slug>-NNNN llevan el slug en minúsculas). Solo se normaliza espacio.
+        relaciones["codigo_ingrediente"] = relaciones["codigo_ingrediente"].fillna("").astype(str).str.strip()
         relaciones["alergeno_id"] = relaciones["alergeno_id"].fillna("").astype(str)
 
         catalogo = cargar_alergenos_supabase(obtener_user_id_actual())
@@ -2213,9 +2223,10 @@ def obtener_mapa_alergenos_ingredientes(codigos_ingrediente=None):
         return mapa
     codigos_filtrar = None
     if codigos_ingrediente is not None:
-        codigos_filtrar = {str(c or "").strip().upper() for c in codigos_ingrediente if str(c or "").strip()}
+        # Conservar el código exacto (privados en minúsculas). Sin .upper().
+        codigos_filtrar = {str(c or "").strip() for c in codigos_ingrediente if str(c or "").strip()}
     for _, fila in df.iterrows():
-        codigo_ing = str(fila.get("codigo_ingrediente", "") or "").strip().upper()
+        codigo_ing = str(fila.get("codigo_ingrediente", "") or "").strip()
         if not codigo_ing or (codigos_filtrar is not None and codigo_ing not in codigos_filtrar):
             continue
         item = _alergeno_item_desde_fila(fila)
@@ -2228,7 +2239,8 @@ def obtener_mapa_alergenos_ingredientes(codigos_ingrediente=None):
 
 
 def cargar_alergenos_ingrediente(codigo_ingrediente):
-    codigo = str(codigo_ingrediente or "").strip().upper()
+    # Sin .upper(): el código debe coincidir exacto con inventario/ingrediente_alergenos.
+    codigo = str(codigo_ingrediente or "").strip()
     if not codigo:
         return []
     return obtener_mapa_alergenos_ingredientes([codigo]).get(codigo, [])
@@ -2268,7 +2280,9 @@ def alergeno_ids_desde_nombres(nombres):
 
 def enriquecer_ingrediente_con_alergenos(ingrediente):
     datos = dict(ingrediente or {})
-    codigo = str(datos.get("codigo", datos.get("codigo_ingrediente", "")) or "").strip().upper()
+    # Sin .upper(): conservar el código exacto para buscar sus alérgenos
+    # (privados P-<slug>-NNNN en minúsculas).
+    codigo = str(datos.get("codigo", datos.get("codigo_ingrediente", "")) or "").strip()
     alergenos = datos.get("alergenos")
     if not isinstance(alergenos, list):
         alergenos = []
@@ -2285,7 +2299,10 @@ def enriquecer_inventario_dict_con_alergenos():
         return
     mapa = obtener_mapa_alergenos_ingredientes(inventario_dict.keys())
     for codigo, item in inventario_dict.items():
-        alergenos = mapa.get(str(codigo).strip().upper(), [])
+        # Sin .upper(): el mapa está indexado por el código EXACTO de
+        # inventario. Los privados P-<slug>-NNNN van en minúsculas; con
+        # .upper() no casaban y aparecían como "sin alérgenos".
+        alergenos = mapa.get(str(codigo).strip(), [])
         item["alergenos"] = alergenos
         item["alergeno_ids"] = [a.get("id") for a in alergenos if a.get("id")]
         item["alergenos_texto"] = formatear_alergenos(alergenos)
@@ -2299,7 +2316,11 @@ def guardar_alergenos_ingrediente(codigo_ingrediente, alergeno_ids):
     solo puede añadir (sql/021): se insertan los que faltan ignorando
     duplicados, y si se intenta quitar alguno se mantiene y se avisa.
     """
-    codigo = str(codigo_ingrediente or "").strip().upper()
+    # NO convertir a mayúsculas: el código debe coincidir EXACTAMENTE con
+    # inventario.codigo. Los ingredientes privados usan P-<slug>-NNNN con el
+    # slug en minúsculas; con .upper() el RLS/FK de ingrediente_alergenos no
+    # encontraba la fila y los alérgenos no se guardaban.
+    codigo = str(codigo_ingrediente or "").strip()
     if not codigo_ingrediente_valido(codigo):
         return True, ""
     if not supabase_disponible or supabase is None:
@@ -2367,7 +2388,11 @@ def calcular_alergenos_desde_ingredientes(ingredientes):
     for ingrediente in ingredientes or []:
         datos = dict(ingrediente or {})
         alergenos = datos.get("alergenos") if isinstance(datos.get("alergenos"), list) else []
-        codigo = str(datos.get("codigo", "") or "").strip().upper()
+        # Sin .upper() sobre el código de INGREDIENTE: debe coincidir exacto
+        # con inventario/ingrediente_alergenos para recuperar los alérgenos de
+        # los privados (P-<slug>-NNNN en minúsculas). El .upper() de más abajo
+        # es sobre identificadores de ALÉRGENO, no del ingrediente.
+        codigo = str(datos.get("codigo", "") or "").strip()
         if not alergenos and codigo_ingrediente_valido(codigo):
             codigos_sin_alergenos.append(codigo)
         for alergeno in alergenos:
@@ -2539,7 +2564,10 @@ def datos_ficha_ingrediente(ingrediente=None):
     ingrediente = enriquecer_ingrediente_con_alergenos(dict(ingrediente or {}))
     unidad = str(ingrediente.get("unidad_medida", "") or "").strip()
     return {
-        "codigo": str(ingrediente.get("codigo", "S/C") or "S/C").strip().upper(),
+        # Sin .upper(): conservar el código exacto. Un privado P-<slug>-NNNN
+        # debe mantener el slug en minúsculas para casar con inventario y con
+        # sus alérgenos (seguridad alimentaria).
+        "codigo": str(ingrediente.get("codigo", "S/C") or "S/C").strip(),
         "descripcion": str(ingrediente.get("descripcion", "") or "").strip(),
         "familia": str(ingrediente.get("familia", "SIN CLASIFICAR") or "SIN CLASIFICAR").strip(),
         "unidad_medida": unidad,
@@ -2633,21 +2661,36 @@ def guardar_ficha_en_inventario(datos):
                 "p_unidad_medida": str(datos.get("unidad_medida") or "kg").strip(),
             }).execute().data
 
-            # Guardar alérgenos
+            # Guardar alérgenos. SEGURIDAD ALIMENTARIA: el ingrediente ya se ha
+            # creado en la BD; si el guardado de alérgenos falla NO podemos
+            # dejarlo como si estuviera bien. Avisamos de forma explícita de
+            # que el ingrediente existe pero SIN sus alérgenos, y no lo
+            # marcamos como revisado (queda pendiente de revisión).
             if alergeno_ids:
                 ok_a, msg_a = guardar_alergenos_ingrediente(codigo, alergeno_ids)
                 if not ok_a:
-                    return False, msg_a, None
+                    return False, (
+                        f"⚠️ El ingrediente privado '{descripcion}' se CREÓ con código "
+                        f"{codigo}, pero NO se pudieron guardar sus alérgenos: {msg_a} "
+                        "El ingrediente queda SIN alérgenos declarados y marcado como "
+                        "pendiente de revisión. Vuelve a declarar sus alérgenos desde la "
+                        "ficha del ingrediente antes de usarlo en recetas."
+                    ), None
 
             # Marcar alérgenos revisados vía función SECURITY DEFINER
-            # (el trigger bloquea el UPDATE directo de estas columnas)
+            # (el trigger bloquea el UPDATE directo de estas columnas).
+            # Solo se llega aquí si el guardado de alérgenos fue correcto.
             try:
                 supabase.rpc("marcar_alergenos_revisados", {
                     "p_codigo":        codigo,
                     "p_sin_alergenos": sin_alergenos_flag and not alergeno_ids,
                 }).execute()
             except Exception as e_rev:
-                return False, f"Error al marcar alérgenos como revisados: {e_rev}", None
+                return False, (
+                    f"⚠️ El ingrediente privado '{descripcion}' se creó con código "
+                    f"{codigo} y sus alérgenos se guardaron, pero NO se pudo marcar como "
+                    f"revisado: {e_rev} Revísalo desde la ficha del ingrediente."
+                ), None
 
             # Guardar precio propio si se indicó
             precio = datos.get("precio_unidad")
@@ -2709,7 +2752,9 @@ def anadir_ficha_a_receta(datos):
 
     if codigo_ingrediente_valido(codigo):
         for idx, existente in enumerate(st.session_state["ingredientes"]):
-            if str(existente.get("codigo", "")).strip().upper() == codigo:
+            # Comparación por código exacto (sin .upper()): los privados van en
+            # minúsculas y ambos lados ya conservan el caso real de la BD.
+            if str(existente.get("codigo", "")).strip() == codigo:
                 cantidad_anterior = numero_seguro(existente.get("cantidad_bruta", 0.0), 0.0)
                 ingrediente["cantidad_bruta"] += cantidad_anterior
                 st.session_state["ingredientes"][idx] = ingrediente
@@ -2725,7 +2770,9 @@ def anadir_ficha_a_receta(datos):
 
 
 def usar_ingrediente_inventario_en_alta(codigo):
-    codigo = str(codigo or "").strip().upper()
+    # Sin .upper(): el código viene del inventario (clave exacta del dict);
+    # forzar mayúsculas rompería la búsqueda de los privados P-<slug>-NNNN.
+    codigo = str(codigo or "").strip()
     if codigo not in inventario_dict:
         return False, "La coincidencia seleccionada ya no está disponible."
 
@@ -2738,7 +2785,7 @@ def usar_ingrediente_inventario_en_alta(codigo):
     })
 
     for idx, existente in enumerate(st.session_state["ingredientes"]):
-        if str(existente.get("codigo", "") or "").strip().upper() != codigo:
+        if str(existente.get("codigo", "") or "").strip() != codigo:
             continue
         cantidad_nueva = numero_seguro(ingrediente.get("cantidad_bruta", 0.0), 0.0)
         if cantidad_nueva > 0:
@@ -2775,7 +2822,7 @@ def actualizar_fila_receta_desde_ficha(datos):
         for otro_idx, ingrediente in enumerate(st.session_state["ingredientes"]):
             if otro_idx == int(idx):
                 continue
-            if str(ingrediente.get("codigo", "")).strip().upper() == codigo_actualizado:
+            if str(ingrediente.get("codigo", "")).strip() == codigo_actualizado:
                 return False, "Ese código ya está en otra fila de la receta. Edita la fila existente."
     st.session_state["ingredientes"][int(idx)] = ingrediente_actualizado
     activar_ficha_ingrediente("fila_receta", st.session_state["ingredientes"][int(idx)], int(idx))
@@ -3088,7 +3135,10 @@ def calcular_datos_ingrediente_receta(ing, orden=0):
     """
     Convierte un ingrediente de la app al formato de public.receta_ingredientes.
     """
-    codigo = str(ing.get("codigo", "")).strip().upper()
+    # Sin .upper(): se guarda el código EXACTO en receta_ingredientes. Un
+    # privado P-<slug>-NNNN debe conservar el slug en minúsculas para que al
+    # recargar la receta se recuperen sus alérgenos (seguridad alimentaria).
+    codigo = str(ing.get("codigo", "")).strip()
     cantidad_bruta = numero_seguro(ing.get("cantidad_bruta", 0.0))
     merma = numero_seguro(ing.get("merma", 0.0))
     precio_unidad = numero_seguro(ing.get("precio_unidad", 0.0))
@@ -5916,7 +5966,9 @@ def preparar_ingredientes_receta_para_sesion(ingredientes_df):
 
     ingredientes = []
     for _, fila in ingredientes_df.iterrows():
-        codigo = str(fila.get("codigo_ingrediente", "") or "").strip().upper()
+        # Sin .upper(): conservar el código exacto para recuperar los alérgenos
+        # de los privados (P-<slug>-NNNN en minúsculas) y casar con inventario.
+        codigo = str(fila.get("codigo_ingrediente", "") or "").strip()
         ingredientes.append(enriquecer_ingrediente_con_alergenos({
             "codigo": codigo if codigo else "S/C",
             "descripcion": str(fila.get("descripcion_ingrediente", "") or "").strip(),
@@ -7426,13 +7478,14 @@ with st.sidebar:
                     st.error(mensaje)
                 else:
                     indice_ficha = st.session_state.get("ingrediente_ficha_indice")
-                    codigo_ficha_norm = str(codigo_ficha or "").strip().upper()
+                    # Sin .upper(): comparar por código exacto (privados en minúsculas).
+                    codigo_ficha_norm = str(codigo_ficha or "").strip()
                     codigo_repetido_receta = (
                         modo_ficha == "fila_receta"
                         and codigo_ingrediente_valido(codigo_ficha_norm)
                         and any(
                             otro_idx != int(indice_ficha)
-                            and str(ingrediente.get("codigo", "") or "").strip().upper()
+                            and str(ingrediente.get("codigo", "") or "").strip()
                             == codigo_ficha_norm
                             for otro_idx, ingrediente in enumerate(st.session_state["ingredientes"])
                         )
@@ -7828,7 +7881,9 @@ def obtener_lookups_admin():
 
     inv_df = inventario.copy() if isinstance(inventario, pd.DataFrame) else pd.DataFrame()
     if not inv_df.empty:
-        inv_df["codigo"] = inv_df["codigo"].fillna("").astype(str).str.strip().str.upper()
+        # Sin .upper(): conservar el código exacto para que los privados
+        # P-<slug>-NNNN (minúsculas) casen con ingrediente_alergenos/recetas.
+        inv_df["codigo"] = inv_df["codigo"].fillna("").astype(str).str.strip()
     ingrediente_por_codigo, codigo_por_ingrediente, opciones_ingredientes = mapas(
         inv_df, "codigo", ["descripcion", "codigo", "familia"]
     )
@@ -7893,7 +7948,8 @@ def preparar_tabla_admin_intuitiva(nombre_tabla, df):
             editor_df[col] = ""
 
     if nombre_tabla == "ingrediente_alergenos":
-        editor_df["ingrediente"] = editor_df.get("codigo_ingrediente", "").fillna("").astype(str).str.upper().map(
+        # Sin .upper(): el código debe coincidir exacto con inv_df (privados en minúsculas).
+        editor_df["ingrediente"] = editor_df.get("codigo_ingrediente", "").fillna("").astype(str).str.strip().map(
             lookups["ingrediente_por_codigo"]
         ).fillna(editor_df.get("codigo_ingrediente", ""))
         editor_df["alergeno"] = editor_df.get("alergeno_id", "").fillna("").astype(str).map(
@@ -7903,7 +7959,7 @@ def preparar_tabla_admin_intuitiva(nombre_tabla, df):
         editor_df["receta"] = editor_df.get("receta_id", "").fillna("").astype(str).map(
             lookups["receta_por_id"]
         ).fillna("")
-        codigo_ing = editor_df.get("codigo_ingrediente", "").fillna("").astype(str).str.upper()
+        codigo_ing = editor_df.get("codigo_ingrediente", "").fillna("").astype(str).str.strip()
         editor_df["ingrediente"] = codigo_ing.map(lookups["ingrediente_por_codigo"]).fillna(
             editor_df.get("descripcion_ingrediente", "")
         )
@@ -8259,24 +8315,21 @@ def _renderizar_compartir_recetas(org_id):
                 }
             except Exception:
                 pass
-            # Nombres de las organizaciones destino (para no mostrar el UUID)
+            # Nombres de las organizaciones destino (para no mostrar el UUID).
+            # Usamos la RPC listar_organizaciones_destino (025c), que devuelve
+            # id+nombre de las orgs activas distintas a la propia, en lugar de
+            # leer la tabla organizaciones directamente (la app no accede a esa
+            # tabla salvo por RPC con control de gerente).
             try:
-                _ids_orgs = list({
-                    c["destino_organizacion_id"] for c in _comps
-                    if c.get("destino_organizacion_id")
-                })
-                if _ids_orgs:
-                    _resp_orgs = (
-                        supabase.table("organizaciones")
-                        .select("id, nombre")
-                        .in_("id", _ids_orgs)
-                        .execute()
-                    )
-                    _nombres_orgs = {
-                        o["id"]: o["nombre"]
-                        for o in (_resp_orgs.data or [])
-                        if o.get("id")
-                    }
+                _resp_orgs = supabase.rpc(
+                    "listar_organizaciones_destino",
+                    {"p_org_origen": str(org_id)},
+                ).execute()
+                _nombres_orgs = {
+                    o["id"]: o["nombre"]
+                    for o in (_resp_orgs.data or [])
+                    if o.get("id")
+                }
             except Exception:
                 pass
 
@@ -9504,7 +9557,9 @@ with main_tab_recetas:
         if not descripcion_editada:
             descripcion_editada = str(original.get("descripcion", "") or "").strip()
             fila_existente_invalida = True
-        codigo_editado = str(fila.get("codigo", "S/C") or "S/C").strip().upper() or "S/C"
+        # Sin .upper(): conservar el código exacto para casar con inventario y
+        # alérgenos (privados P-<slug>-NNNN en minúsculas).
+        codigo_editado = str(fila.get("codigo", "S/C") or "S/C").strip() or "S/C"
         original.update({
             "codigo": codigo_editado,
             "descripcion": descripcion_editada,
@@ -9527,7 +9582,7 @@ with main_tab_recetas:
     fila_nueva = tabla_ingredientes.iloc[len(ingredientes_activos)]
     borrador_actualizado = datos_ficha_ingrediente({
         **borrador_alta,
-        "codigo": str(fila_nueva.get("codigo", "S/C") or "S/C").strip().upper() or "S/C",
+        "codigo": str(fila_nueva.get("codigo", "S/C") or "S/C").strip() or "S/C",
         "descripcion": str(fila_nueva.get("descripcion", "") or "").strip(),
         "cantidad_bruta": parse_numero_usuario(fila_nueva.get("cantidad_bruta_txt", ""), 0.0, minimo=0.0),
         "unidad_medida": str(fila_nueva.get("unidad_medida", "") or "").strip(),
@@ -9559,7 +9614,7 @@ with main_tab_recetas:
             st.session_state["ingrediente_ficha_indice"] = indice_elegido
             st.session_state["ingrediente_ficha_datos"] = datos_ficha_ingrediente({
                 **inventario_dict.get(
-                    str(ingrediente_seleccionado.get("codigo", "")).strip().upper(),
+                    str(ingrediente_seleccionado.get("codigo", "")).strip(),
                     {},
                 ),
                 **ingrediente_seleccionado,
@@ -10020,6 +10075,15 @@ with main_tab_facturas:
                 if st.session_state.get("factura_cliente_id") not in opciones_clientes_factura:
                     st.session_state["factura_cliente_id"] = opciones_clientes_factura[0]
                 opciones_tipo_documento = ["presupuesto", "factura"]
+                # Si el documento cargado es una rectificativa, su tipo debe
+                # poder MOSTRARSE y CONSERVARSE (no es un tipo que se elija al
+                # crear: nace de rectificar una factura). Lo añadimos a las
+                # opciones para que el selector lo refleje sin resetearlo a
+                # "presupuesto"; más abajo el selector se muestra no editable.
+                _tipo_doc_actual = str(st.session_state.get("factura_tipo_documento") or "").strip()
+                _es_rectificativa = _tipo_doc_actual == "factura_rectificativa"
+                if _es_rectificativa:
+                    opciones_tipo_documento = ["presupuesto", "factura", "factura_rectificativa"]
                 opciones_estado_documento = ["borrador", "emitida", "cobrada", "anulada"]
                 opciones_estado_cobro = ["pendiente", "parcial", "cobrado"]
                 if st.session_state.get("factura_tipo_documento") not in opciones_tipo_documento:
@@ -10059,11 +10123,19 @@ with main_tab_facturas:
                         key="factura_cliente_id",
                         disabled=_es_solo_lectura,
                     )
+                    _etiquetas_tipo_doc = {
+                        "presupuesto": "Presupuesto",
+                        "factura": "Factura",
+                        "factura_rectificativa": "Factura rectificativa",
+                    }
                     tipo_documento = st.selectbox(
                         "Tipo de documento",
                         opciones_tipo_documento,
                         key="factura_tipo_documento",
-                        disabled=_es_solo_lectura,
+                        format_func=lambda t: _etiquetas_tipo_doc.get(t, t),
+                        # Una rectificativa conserva su tipo y NO es editable
+                        # (nace de rectificar una factura, no se elige a mano).
+                        disabled=_es_solo_lectura or _es_rectificativa,
                     )
                     # Fase 5: los borradores NO llevan número; se asigna al emitir.
                     if _numero_edicion:
@@ -10113,17 +10185,28 @@ with main_tab_facturas:
                     # IVA del documento (Fase 5). Valor inicial: IVA por defecto de
                     # la organización. Editable solo en borradores; en emitidos se
                     # muestra el IVA congelado y bloqueado.
-                    if "factura_iva_pct" not in st.session_state:
-                        st.session_state["factura_iva_pct"] = iva_defecto_organizacion()
+                    #
+                    # Al volver de la página Gerente, Streamlit recicla el estado
+                    # del widget (no se renderizó) y, como el number_input tiene
+                    # min_value=0.0 y antes no recibía value=, el IVA caía a 0.
+                    # Para que siga siendo el de iva_defecto_organizacion() lo
+                    # sembramos SIEMPRE con un valor válido y le pasamos value=
+                    # explícito (mismo patrón que el formulario de Gerente).
+                    _iva_doc_actual = st.session_state.get("factura_iva_pct")
+                    if _iva_doc_actual is None:
+                        _iva_doc_actual = iva_defecto_organizacion()
+                    _iva_doc_actual = numero_seguro(_iva_doc_actual, iva_defecto_organizacion())
+                    st.session_state["factura_iva_pct"] = _iva_doc_actual
                     iva_pct_documento = st.number_input(
                         "IVA (%)",
                         min_value=0.0,
                         max_value=100.0,
                         step=0.5,
-                        key="factura_iva_pct",
+                        value=float(_iva_doc_actual),
                         disabled=_es_solo_lectura,
                         help="IVA aplicado a las líneas del documento. Por defecto, el de la organización.",
                     )
+                    st.session_state["factura_iva_pct"] = float(iva_pct_documento)
 
                 concepto = st.text_input("Concepto", key="factura_concepto", disabled=_es_solo_lectura)
                 notas = st.text_area("Notas", key="factura_notas", height=80, disabled=_es_solo_lectura)
