@@ -8242,6 +8242,7 @@ def _renderizar_compartir_recetas(org_id):
         # Cargar nombres de recetas en segunda query (objeto_id no tiene FK a recetas
         # en PostgREST, así que el embed directo falla con PGRST200)
         _nombres_recetas = {}
+        _nombres_orgs = {}
         if _comps:
             try:
                 _ids_recetas = list({c["objeto_id"] for c in _comps if c.get("objeto_id")})
@@ -8258,15 +8259,37 @@ def _renderizar_compartir_recetas(org_id):
                 }
             except Exception:
                 pass
+            # Nombres de las organizaciones destino (para no mostrar el UUID)
+            try:
+                _ids_orgs = list({
+                    c["destino_organizacion_id"] for c in _comps
+                    if c.get("destino_organizacion_id")
+                })
+                if _ids_orgs:
+                    _resp_orgs = (
+                        supabase.table("organizaciones")
+                        .select("id, nombre")
+                        .in_("id", _ids_orgs)
+                        .execute()
+                    )
+                    _nombres_orgs = {
+                        o["id"]: o["nombre"]
+                        for o in (_resp_orgs.data or [])
+                        if o.get("id")
+                    }
+            except Exception:
+                pass
 
         if not _comps:
             st.info("No hay comparticiones activas.")
         else:
             for _c in _comps:
                 _nombre_r   = _nombres_recetas.get(_c.get("objeto_id", ""), _c.get("objeto_id", "—"))
-                _dest_texto = "Todas las orgs" if _c.get("destino") == "todas" else (
-                    _c.get("destino_organizacion_id", "?")
-                )
+                if _c.get("destino") == "todas":
+                    _dest_texto = "Todas las orgs"
+                else:
+                    _dest_org_id = _c.get("destino_organizacion_id")
+                    _dest_texto = _nombres_orgs.get(_dest_org_id, _dest_org_id or "?")
                 _estado = "✅ Activa" if _c.get("activa") else "🔴 Desactivada"
                 col1, col2, col3, col4 = st.columns([3, 2, 1, 1])
                 with col1:
@@ -8372,6 +8395,12 @@ def _renderizar_inventario_propio(org_id):
 
     # ── Crear ingrediente privado ──────────────────────────────────────────
     st.markdown("#### Añadir ingrediente privado")
+    # Catálogo de alérgenos (14 de la UE) desde Supabase, igual que la ficha normal.
+    _catalogo_alergenos_priv = cargar_alergenos_supabase(obtener_user_id_actual())
+    _opciones_alergenos_priv = (
+        _catalogo_alergenos_priv["nombre"].dropna().astype(str).tolist()
+        if not _catalogo_alergenos_priv.empty else []
+    )
     with st.form("form_ingrediente_privado"):
         new_desc    = st.text_input("Descripción *", key="priv_desc")
         # Familia obligatoria: selectbox con opciones comunes + libre
@@ -8385,6 +8414,13 @@ def _renderizar_inventario_propio(org_id):
         if new_familia == "Otro":
             new_familia = st.text_input("Familia (escribe la tuya)", key="priv_familia_libre")
         new_unidad  = st.selectbox("Unidad de medida", ["kg", "l", "ud", "g", "ml"], key="priv_unidad")
+        new_alergenos_nombres = st.multiselect(
+            "Alérgenos (de los 14 de la UE)",
+            options=_opciones_alergenos_priv,
+            key="priv_alergenos",
+            help="Se guardan en ingrediente_alergenos. Déjalo vacío solo si marcas "
+                 "'No contiene ninguno'.",
+        )
         new_sin_alerg = st.checkbox(
             "No contiene ninguno de los 14 alérgenos de la UE",
             key="priv_sin_alerg",
@@ -8392,17 +8428,29 @@ def _renderizar_inventario_propio(org_id):
         submitted = st.form_submit_button("Crear ingrediente privado")
 
     if submitted:
+        # Si marca "No contiene ninguno", el multiselect debe estar vacío.
+        _alergeno_ids_priv = alergeno_ids_desde_nombres(new_alergenos_nombres)
         if not new_desc:
             st.error("Introduce una descripción.")
         elif not new_familia:
             st.error("Selecciona una familia antes de guardar.")
+        elif new_sin_alerg and _alergeno_ids_priv:
+            st.error(
+                "Has marcado 'No contiene ninguno de los 14 alérgenos' pero has "
+                "seleccionado alérgenos. Quita la marca o vacía la lista."
+            )
+        elif not new_sin_alerg and not _alergeno_ids_priv:
+            st.error(
+                "Declara al menos un alérgeno o marca 'No contiene ninguno de los "
+                "14 alérgenos' antes de guardar."
+            )
         else:
             ok, msg, codigo_nuevo = guardar_ficha_en_inventario({
                 "descripcion":  new_desc,
                 "familia":      new_familia,
                 "unidad_medida": new_unidad,
                 "sin_alergenos": new_sin_alerg,
-                "alergeno_ids": [],
+                "alergeno_ids": _alergeno_ids_priv,
             })
             if ok:
                 st.success(msg)
@@ -8476,44 +8524,66 @@ def _renderizar_miembros_e_invitaciones(org_id, org_nombre):
     tab_m, tab_i = st.tabs(["Miembros", "Invitaciones"])
 
     with tab_m:
+        # Preferir la RPC listar_miembros_org (027): resuelve email/nombre de
+        # todos los miembros aunque el RLS de usuarios_app no deje al gerente leer
+        # las filas de otros usuarios. Si no está disponible, usar el método
+        # anterior (dos queries) como respaldo.
+        miembros = []
+        _usar_fallback = False
         try:
-            resp_m = (
-                supabase
-                .table("organizacion_miembros")
-                .select("id, user_id, rol, activo, joined_at")
-                .eq("organizacion_id", org_id)
-                .order("joined_at")
-                .execute()
-            )
-            miembros = resp_m.data or []
-        except Exception as e_m:
-            st.error(f"Error al cargar miembros: {e_m}")
-            miembros = []
+            resp_lm = supabase.rpc("listar_miembros_org", {"p_org": org_id}).execute()
+            miembros = resp_lm.data or []
+        except Exception as e_lm:
+            _msg_lm = str(e_lm).lower()
+            if ("could not find" in _msg_lm or "does not exist" in _msg_lm
+                    or "pgrst202" in _msg_lm or "function" in _msg_lm):
+                _usar_fallback = True
+            else:
+                st.error(f"Error al cargar miembros: {e_lm}")
+                miembros = []
 
-        _emails_uid = {}
-        if miembros:
+        if _usar_fallback:
             try:
-                _uids = [m["user_id"] for m in miembros if m.get("user_id")]
-                resp_ua = (
-                    supabase.table("usuarios_app")
-                    .select("user_id, email, nombre")
-                    .in_("user_id", _uids)
+                resp_m = (
+                    supabase
+                    .table("organizacion_miembros")
+                    .select("id, user_id, rol, activo, joined_at")
+                    .eq("organizacion_id", org_id)
+                    .order("joined_at")
                     .execute()
                 )
-                _emails_uid = {r["user_id"]: r for r in (resp_ua.data or [])}
-            except Exception:
-                pass
+                miembros = resp_m.data or []
+            except Exception as e_m:
+                st.error(f"Error al cargar miembros: {e_m}")
+                miembros = []
+
+            _emails_uid = {}
+            if miembros:
+                try:
+                    _uids = [m["user_id"] for m in miembros if m.get("user_id")]
+                    resp_ua = (
+                        supabase.table("usuarios_app")
+                        .select("user_id, email, nombre")
+                        .in_("user_id", _uids)
+                        .execute()
+                    )
+                    _emails_uid = {r["user_id"]: r for r in (resp_ua.data or [])}
+                except Exception:
+                    pass
+            for m in miembros:
+                ua = _emails_uid.get(m.get("user_id"), {})
+                m.setdefault("email", ua.get("email"))
+                m.setdefault("nombre", ua.get("nombre"))
 
         if not miembros:
             st.info("No hay miembros en esta organización todavía.")
         else:
             for m in miembros:
-                ua     = _emails_uid.get(m.get("user_id"), {})
-                email  = ua.get("email") or m.get("user_id", "")
-                nombre = ua.get("nombre") or ""
+                email  = m.get("email") or m.get("user_id", "")
+                nombre = m.get("nombre") or ""
                 rol    = m.get("rol", "chef")
                 activo = m.get("activo", True)
-                col1, col2, col3, col4 = st.columns([3, 2, 1, 1])
+                col1, col2, col3, col4 = st.columns([4, 2, 2, 2])
                 with col1:
                     st.write(f"**{email}**" + (f" ({nombre})" if nombre else ""))
                 with col2:
@@ -8522,7 +8592,7 @@ def _renderizar_miembros_e_invitaciones(org_id, org_nombre):
                     st.write("✅ activo" if activo else "❌ inactivo")
                 with col4:
                     if activo and m.get("user_id") != obtener_user_id_actual():
-                        if st.button("Desactivar", key=f"desact_m_{org_id}_{m['id']}"):
+                        if st.button("Desactivar", key=f"desact_m_{org_id}_{m['id']}", use_container_width=True):
                             try:
                                 supabase.table("organizacion_miembros").update(
                                     {"activo": False}
@@ -9768,28 +9838,40 @@ with main_tab_facturas:
     _doc_pendiente = st.session_state.pop("_doc_pendiente_cargar", None)
     if _doc_pendiente:
         _pd_id    = _doc_pendiente.get("factura_id")
-        _pd_modo  = _doc_pendiente.get("modo", "cargar")  # cargar | duplicar_origen
+        _pd_modo  = _doc_pendiente.get("modo", "cargar")  # cargar | crear_factura_desde_presupuesto
+
+        def _poner_feedback_carga(tipo, mensaje):
+            # No pisar un feedback ya presente (p.ej. "Documento emitido con número…"):
+            # solo establecer el mensaje de carga cuando no haya otro.
+            if st.session_state.get("factura_documento_feedback") is None:
+                st.session_state["factura_documento_feedback"] = (tipo, mensaje)
+
         try:
             _ok_pd, _msg_pd, _fac_pd, _lin_pd = cargar_factura_detalle_supabase(_pd_id)
             if _ok_pd:
-                cargar_factura_en_sesion(_fac_pd, _lin_pd)
                 if _pd_modo == "crear_factura_desde_presupuesto":
-                    # Convertir el presupuesto cargado en una nueva factura borrador
-                    st.session_state["factura_id_en_edicion"] = None
-                    st.session_state["factura_presupuesto_origen_id"] = _pd_id
-                    st.session_state["factura_tipo_documento"] = "factura"
-                    st.session_state["factura_numero_actual_factura"] = ""
-                    st.session_state["factura_estado"] = "borrador"
-                    st.session_state["factura_documento_feedback"] = (
-                        "success",
-                        "Factura creada desde el presupuesto como borrador. Revísala y emítela.",
-                    )
+                    # Si el presupuesto no tiene líneas, no lo convertimos.
+                    if _lin_pd is None or _lin_pd.empty:
+                        _poner_feedback_carga("warning", "El presupuesto no contiene menús.")
+                    else:
+                        cargar_factura_en_sesion(_fac_pd, _lin_pd)
+                        # Convertir el presupuesto cargado en una nueva factura borrador
+                        st.session_state["factura_id_en_edicion"] = None
+                        st.session_state["factura_presupuesto_origen_id"] = _pd_id
+                        st.session_state["factura_tipo_documento"] = "factura"
+                        st.session_state["factura_numero_actual_factura"] = ""
+                        st.session_state["factura_estado"] = "borrador"
+                        _poner_feedback_carga(
+                            "success",
+                            "Factura creada desde el presupuesto como borrador. Revísala y emítela.",
+                        )
                 else:
-                    st.session_state["factura_documento_feedback"] = ("success", _msg_pd)
+                    cargar_factura_en_sesion(_fac_pd, _lin_pd)
+                    _poner_feedback_carga("success", _msg_pd)
             else:
-                st.session_state["factura_documento_feedback"] = ("warning", _msg_pd)
+                _poner_feedback_carga("warning", _msg_pd)
         except Exception as _e_pd:
-            st.session_state["factura_documento_feedback"] = ("warning", f"No se pudo cargar el documento: {_e_pd}")
+            _poner_feedback_carga("warning", f"No se pudo cargar el documento: {_e_pd}")
 
     if not usuario_id_facturas:
         st.info("Inicia sesión para crear presupuestos y facturas en tu cuenta")
