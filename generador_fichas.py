@@ -8425,7 +8425,7 @@ def _renderizar_inventario_propio(org_id):
         _priv_resp = (
             supabase.table("inventario")
             .select("codigo, descripcion, familia, unidad_medida, merma, "
-                    "precio_unidad, alergenos_revisados, sin_alergenos, organizacion_id")
+                    "precio_unidad, alergenos_revisados, organizacion_id")
             .eq("organizacion_id", org_id)
             .order("codigo")
             .execute()
