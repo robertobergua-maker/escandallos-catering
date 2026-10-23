@@ -5401,6 +5401,16 @@ def normalizar_lineas_menu(lineas_menu):
         linea_normalizada = dict(linea)
         linea_normalizada["orden"] = int(numero_seguro(linea_normalizada.get("orden", orden), orden))
         linea_normalizada["seccion"] = str(linea_normalizada.get("seccion", "") or "").strip()
+        # Las líneas que vienen de cargar_menu_detalle_supabase traen el PVP de
+        # la receta en precio_receta_sin_iva / precio_receta_con_iva, pero
+        # recalcular_linea_menu lee la clave 'precio_receta'. Sin este mapeo, el
+        # precio de venta se perdía y la venta neta del documento caía al coste.
+        if linea_normalizada.get("precio_receta") is None:
+            _pvp = linea_normalizada.get("precio_receta_sin_iva")
+            if _pvp is None or pd.isna(_pvp):
+                _pvp = linea_normalizada.get("precio_receta_con_iva")
+            if _pvp is not None and not pd.isna(_pvp):
+                linea_normalizada["precio_receta"] = float(numero_seguro(_pvp, 0.0))
         lineas.append(recalcular_linea_menu(linea_normalizada))
 
     lineas = sorted(lineas, key=lambda item: int(numero_seguro(item.get("orden", 0), 0)))
@@ -9750,6 +9760,37 @@ with main_tab_clientes:
 with main_tab_facturas:
     st.subheader("Facturas")
     usuario_id_facturas = obtener_user_id_actual()
+
+    # Documento pendiente de cargar (patrón para no modificar claves de widgets
+    # ya instanciados): los botones Cargar/Duplicar/Rectificativa/Crear-desde-
+    # presupuesto guardan aquí el id y hacen rerun; aquí, ANTES de pintar ningún
+    # widget del formulario, se carga en sesión.
+    _doc_pendiente = st.session_state.pop("_doc_pendiente_cargar", None)
+    if _doc_pendiente:
+        _pd_id    = _doc_pendiente.get("factura_id")
+        _pd_modo  = _doc_pendiente.get("modo", "cargar")  # cargar | duplicar_origen
+        try:
+            _ok_pd, _msg_pd, _fac_pd, _lin_pd = cargar_factura_detalle_supabase(_pd_id)
+            if _ok_pd:
+                cargar_factura_en_sesion(_fac_pd, _lin_pd)
+                if _pd_modo == "crear_factura_desde_presupuesto":
+                    # Convertir el presupuesto cargado en una nueva factura borrador
+                    st.session_state["factura_id_en_edicion"] = None
+                    st.session_state["factura_presupuesto_origen_id"] = _pd_id
+                    st.session_state["factura_tipo_documento"] = "factura"
+                    st.session_state["factura_numero_actual_factura"] = ""
+                    st.session_state["factura_estado"] = "borrador"
+                    st.session_state["factura_documento_feedback"] = (
+                        "success",
+                        "Factura creada desde el presupuesto como borrador. Revísala y emítela.",
+                    )
+                else:
+                    st.session_state["factura_documento_feedback"] = ("success", _msg_pd)
+            else:
+                st.session_state["factura_documento_feedback"] = ("warning", _msg_pd)
+        except Exception as _e_pd:
+            st.session_state["factura_documento_feedback"] = ("warning", f"No se pudo cargar el documento: {_e_pd}")
+
     if not usuario_id_facturas:
         st.info("Inicia sesión para crear presupuestos y facturas en tu cuenta")
     else:
@@ -9830,26 +9871,27 @@ with main_tab_facturas:
                             st.info(etiqueta_menu_documento)
                     cargar_col, duplicar_col, facturar_col = st.columns(3)
                     with cargar_col:
+                        # Guardar el documento pendiente y recargar: la carga real
+                        # ocurre al principio del rerun, antes de pintar los widgets,
+                        # para no modificar claves de widgets ya instanciados.
                         if st.button("Cargar documento", use_container_width=True):
-                            ok_detalle, mensaje_detalle, factura_detalle, lineas_detalle = cargar_factura_detalle_supabase(
-                                factura_guardada_id
-                            )
-                            if ok_detalle:
-                                cargar_factura_en_sesion(factura_detalle, lineas_detalle)
-                                st.session_state["factura_documento_feedback"] = ("success", mensaje_detalle)
-                                st.rerun()
-                            else:
-                                st.error(mensaje_detalle)
+                            st.session_state["_doc_pendiente_cargar"] = {
+                                "factura_id": factura_guardada_id,
+                                "modo": "cargar",
+                            }
+                            st.rerun()
                     with duplicar_col:
                         if st.button("Duplicar documento", use_container_width=True):
+                            # Duplicar crea un documento nuevo en BD y devuelve su id;
+                            # ese nuevo borrador se carga mediante el patrón pendiente.
                             ok_duplicar, mensaje_duplicar, factura_duplicada = duplicar_factura_supabase(
                                 factura_guardada_id
                             )
                             if ok_duplicar:
-                                st.session_state["factura_documento_feedback"] = (
-                                    "success",
-                                    f"{mensaje_duplicar} {factura_duplicada.get('numero_factura', '')}"
-                                )
+                                st.session_state["_doc_pendiente_cargar"] = {
+                                    "factura_id": str((factura_duplicada or {}).get("id") or "").strip(),
+                                    "modo": "cargar",
+                                }
                                 st.rerun()
                             else:
                                 st.error(mensaje_duplicar)
@@ -9864,24 +9906,11 @@ with main_tab_facturas:
                             disabled=not es_presupuesto_seleccionado,
                             use_container_width=True,
                         ):
-                            ok_detalle, mensaje_detalle, presupuesto_detalle, lineas_detalle = cargar_factura_detalle_supabase(
-                                factura_guardada_id
-                            )
-                            if ok_detalle and not lineas_detalle.empty:
-                                cargar_factura_en_sesion(presupuesto_detalle, lineas_detalle)
-                                st.session_state["factura_id_en_edicion"] = None
-                                st.session_state["factura_presupuesto_origen_id"] = factura_guardada_id
-                                st.session_state["factura_tipo_documento"] = "factura"
-                                # Fase 5: borrador sin número (se asigna al emitir)
-                                st.session_state["factura_numero_actual_factura"] = ""
-                                st.session_state["factura_estado"] = "borrador"
-                                st.session_state["factura_documento_feedback"] = (
-                                    "success",
-                                    "Factura creada desde el presupuesto como borrador. Revísala y emítela.",
-                                )
-                                st.rerun()
-                            else:
-                                st.error(mensaje_detalle or "El presupuesto no contiene menús.")
+                            st.session_state["_doc_pendiente_cargar"] = {
+                                "factura_id": factura_guardada_id,
+                                "modo": "crear_factura_desde_presupuesto",
+                            }
+                            st.rerun()
 
                     columnas_documentos = [
                         "numero_factura", "tipo_documento", "cliente",
@@ -10063,6 +10092,7 @@ with main_tab_facturas:
                                 "Añadir menú",
                                 type="primary",
                                 use_container_width=True,
+                                disabled=_es_solo_lectura,
                             )
 
                         st.caption("Cada presupuesto o factura puede incluir uno o más menús. Cada menú se desglosa por sus recetas y raciones.")
@@ -10114,7 +10144,7 @@ with main_tab_facturas:
 
                 lineas_accion_col1, lineas_accion_col2 = st.columns(2)
                 with lineas_accion_col1:
-                    if st.button("Quitar último menú", use_container_width=True):
+                    if st.button("Quitar último menú", use_container_width=True, disabled=_es_solo_lectura):
                         lineas_actuales_doc = [
                             dict(linea) for linea in st.session_state.get("factura_lineas_actual", [])
                             if str(linea.get("descripcion", "") or "").strip()
@@ -10132,7 +10162,7 @@ with main_tab_facturas:
                         else:
                             st.info("No hay menú para quitar.")
                 with lineas_accion_col2:
-                    if st.button("Limpiar documento", use_container_width=True):
+                    if st.button("Limpiar documento", use_container_width=True, disabled=_es_solo_lectura):
                         st.session_state["factura_lineas_actual"] = []
                         st.session_state["factura_id_en_edicion"] = None
                         st.session_state["factura_presupuesto_origen_id"] = None
@@ -10357,22 +10387,51 @@ with main_tab_facturas:
                                     supabase.table("facturas").update(
                                         {"estado": "cobrada"}
                                     ).eq("id", factura_id_en_edicion).execute()
-                                    cargar_facturas_supabase()  # refresca el cache externo si lo hubiera
-                                    st.success("Documento marcado como cobrado.")
+                                    # Recargar el documento para reflejar estado real
+                                    st.session_state["_doc_pendiente_cargar"] = {
+                                        "factura_id": factura_id_en_edicion, "modo": "cargar",
+                                    }
+                                    st.session_state["factura_documento_feedback"] = (
+                                        "success", "Documento marcado como cobrado.",
+                                    )
                                     st.rerun()
                                 except Exception as _e_cob:
                                     st.error(f"No se pudo marcar como cobrado: {_e_cob}")
                         with _acc_col2:
                             if _tipo_edicion == "presupuesto":
+                                # Anular presupuesto pide confirmación (patrón de "Limpiar todos")
+                                _clave_conf_anular = f"_confirmar_anular_{factura_id_en_edicion}"
                                 if st.button("Anular presupuesto", use_container_width=True):
-                                    try:
-                                        supabase.table("facturas").update(
-                                            {"estado": "anulada"}
-                                        ).eq("id", factura_id_en_edicion).execute()
-                                        st.success("Presupuesto anulado.")
-                                        st.rerun()
-                                    except Exception as _e_anul:
-                                        st.error(f"No se pudo anular: {_e_anul}")
+                                    st.session_state[_clave_conf_anular] = True
+                                if st.session_state.get(_clave_conf_anular, False):
+                                    st.warning(
+                                        "Vas a anular este presupuesto emitido. "
+                                        "La anulación no se puede deshacer."
+                                    )
+                                    _anul_c1, _anul_c2 = st.columns(2)
+                                    with _anul_c1:
+                                        if st.button("Sí, anular presupuesto", type="primary",
+                                                     use_container_width=True,
+                                                     key=f"btn_conf_anular_{factura_id_en_edicion}"):
+                                            try:
+                                                supabase.table("facturas").update(
+                                                    {"estado": "anulada"}
+                                                ).eq("id", factura_id_en_edicion).execute()
+                                                st.session_state.pop(_clave_conf_anular, None)
+                                                st.session_state["_doc_pendiente_cargar"] = {
+                                                    "factura_id": factura_id_en_edicion, "modo": "cargar",
+                                                }
+                                                st.session_state["factura_documento_feedback"] = (
+                                                    "success", "Presupuesto anulado.",
+                                                )
+                                                st.rerun()
+                                            except Exception as _e_anul:
+                                                st.error(f"No se pudo anular: {_e_anul}")
+                                    with _anul_c2:
+                                        if st.button("Cancelar", use_container_width=True,
+                                                     key=f"btn_cancel_anular_{factura_id_en_edicion}"):
+                                            st.session_state.pop(_clave_conf_anular, None)
+                                            st.rerun()
                             elif _tipo_edicion == "factura" and _es_gerente_fact:
                                 if st.button("Crear rectificativa", use_container_width=True):
                                     try:
@@ -10381,18 +10440,17 @@ with main_tab_facturas:
                                             {"p_factura_original": factura_id_en_edicion},
                                         ).execute()
                                         _rect_id = _resp_rect.data
-                                        ok_det, msg_det, rect_det, rect_lineas = cargar_factura_detalle_supabase(
-                                            _rect_id if isinstance(_rect_id, str) else str(_rect_id or "")
+                                        # Cargar el borrador rectificativo mediante el
+                                        # patrón pendiente (no modificar widgets ya pintados).
+                                        st.session_state["_doc_pendiente_cargar"] = {
+                                            "factura_id": _rect_id if isinstance(_rect_id, str) else str(_rect_id or ""),
+                                            "modo": "cargar",
+                                        }
+                                        st.session_state["factura_documento_feedback"] = (
+                                            "success",
+                                            "Borrador rectificativo creado. Edítalo y emítelo cuando esté listo.",
                                         )
-                                        if ok_det:
-                                            cargar_factura_en_sesion(rect_det, rect_lineas)
-                                            st.session_state["factura_documento_feedback"] = (
-                                                "success",
-                                                "Borrador rectificativo creado. Edítalo y emítelo cuando esté listo.",
-                                            )
-                                            st.rerun()
-                                        else:
-                                            st.error(msg_det)
+                                        st.rerun()
                                     except Exception as _e_rect:
                                         st.error(f"No se pudo crear la rectificativa: {_e_rect}")
                     else:
@@ -10418,6 +10476,11 @@ with main_tab_facturas:
                                     {"p_factura_id": factura_id_en_edicion},
                                 ).execute()
                                 _num_emitido = _resp_emit.data
+                                # Recargar el documento para que los widgets muestren
+                                # el número, estado y estado de cobro reales.
+                                st.session_state["_doc_pendiente_cargar"] = {
+                                    "factura_id": factura_id_en_edicion, "modo": "cargar",
+                                }
                                 st.session_state["factura_documento_feedback"] = (
                                     "success",
                                     f"Documento emitido con número {_num_emitido}.",
