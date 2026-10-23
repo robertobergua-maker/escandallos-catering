@@ -1,0 +1,15 @@
+{
+  "name": "manual-gestor-escandallos",
+  "private": true,
+  "description": "Generadores del manual de usuario (Word y PowerPoint)",
+  "scripts": {
+    "imagenes": "python3 preparar_imagenes.py",
+    "word": "node manual_docx.js",
+    "ppt": "node manual_pptx.js",
+    "todo": "python3 preparar_imagenes.py && node manual_docx.js && node manual_pptx.js"
+  },
+  "dependencies": {
+    "docx": "^9.0.0",
+    "pptxgenjs": "^4.0.1"
+  }
+}
