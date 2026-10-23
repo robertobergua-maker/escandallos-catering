@@ -8466,44 +8466,72 @@ def _renderizar_miembros_e_invitaciones(org_id, org_nombre):
     tab_m, tab_i = st.tabs(["Miembros", "Invitaciones"])
 
     with tab_m:
+        # Preferir la RPC listar_miembros_org (027): resuelve el email/nombre de
+        # todos los miembros aunque el RLS de usuarios_app no deje al gerente leer
+        # las filas de otros usuarios. Si no está disponible, se usa el método
+        # anterior (dos queries) como respaldo.
+        miembros = []
+        _usar_fallback = False
         try:
-            resp_m = (
-                supabase
-                .table("organizacion_miembros")
-                .select("id, user_id, rol, activo, joined_at")
-                .eq("organizacion_id", org_id)
-                .order("joined_at")
-                .execute()
-            )
-            miembros = resp_m.data or []
-        except Exception as e_m:
-            st.error(f"Error al cargar miembros: {e_m}")
-            miembros = []
+            resp_lm = supabase.rpc(
+                "listar_miembros_org", {"p_org": org_id}
+            ).execute()
+            miembros = resp_lm.data or []
+        except Exception as e_lm:
+            _msg_lm = str(e_lm).lower()
+            if ("could not find" in _msg_lm or "does not exist" in _msg_lm
+                    or "pgrst202" in _msg_lm or "function" in _msg_lm):
+                # La función 027 aún no está aplicada: usar el método anterior.
+                _usar_fallback = True
+            else:
+                st.error(f"Error al cargar miembros: {e_lm}")
+                miembros = []
 
-        _emails_uid = {}
-        if miembros:
+        if _usar_fallback:
             try:
-                _uids = [m["user_id"] for m in miembros if m.get("user_id")]
-                resp_ua = (
-                    supabase.table("usuarios_app")
-                    .select("user_id, email, nombre")
-                    .in_("user_id", _uids)
+                resp_m = (
+                    supabase
+                    .table("organizacion_miembros")
+                    .select("id, user_id, rol, activo, joined_at")
+                    .eq("organizacion_id", org_id)
+                    .order("joined_at")
                     .execute()
                 )
-                _emails_uid = {r["user_id"]: r for r in (resp_ua.data or [])}
-            except Exception:
-                pass
+                miembros = resp_m.data or []
+            except Exception as e_m:
+                st.error(f"Error al cargar miembros: {e_m}")
+                miembros = []
+
+            _emails_uid = {}
+            if miembros:
+                try:
+                    _uids = [m["user_id"] for m in miembros if m.get("user_id")]
+                    resp_ua = (
+                        supabase.table("usuarios_app")
+                        .select("user_id, email, nombre")
+                        .in_("user_id", _uids)
+                        .execute()
+                    )
+                    _emails_uid = {r["user_id"]: r for r in (resp_ua.data or [])}
+                except Exception:
+                    pass
+            # Fusionar email/nombre en cada miembro para unificar el render
+            for m in miembros:
+                ua = _emails_uid.get(m.get("user_id"), {})
+                m.setdefault("email", ua.get("email"))
+                m.setdefault("nombre", ua.get("nombre"))
 
         if not miembros:
             st.info("No hay miembros en esta organización todavía.")
         else:
             for m in miembros:
-                ua     = _emails_uid.get(m.get("user_id"), {})
-                email  = ua.get("email") or m.get("user_id", "")
-                nombre = ua.get("nombre") or ""
+                email  = m.get("email") or m.get("user_id", "")
+                nombre = m.get("nombre") or ""
                 rol    = m.get("rol", "chef")
                 activo = m.get("activo", True)
-                col1, col2, col3, col4 = st.columns([3, 2, 1, 1])
+                # Columnas más anchas para la acción: así el botón "Desactivar"
+                # no se corta en pantallas estrechas.
+                col1, col2, col3, col4 = st.columns([4, 2, 2, 2])
                 with col1:
                     st.write(f"**{email}**" + (f" ({nombre})" if nombre else ""))
                 with col2:
@@ -8512,7 +8540,7 @@ def _renderizar_miembros_e_invitaciones(org_id, org_nombre):
                     st.write("✅ activo" if activo else "❌ inactivo")
                 with col4:
                     if activo and m.get("user_id") != obtener_user_id_actual():
-                        if st.button("Desactivar", key=f"desact_m_{org_id}_{m['id']}"):
+                        if st.button("Desactivar", key=f"desact_m_{org_id}_{m['id']}", use_container_width=True):
                             try:
                                 supabase.table("organizacion_miembros").update(
                                     {"activo": False}
