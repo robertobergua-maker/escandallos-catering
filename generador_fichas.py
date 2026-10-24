@@ -1085,25 +1085,30 @@ def obtener_org_activa_nombre():
 
 def establecer_org_activa(org_id, org_nombre):
     """Cambia la organización activa y vacía las cachés de datos."""
+    _org_anterior = st.session_state.get("organizacion_activa_id")
     st.session_state["organizacion_activa_id"] = org_id
     st.session_state["organizacion_activa_nombre"] = org_nombre
     vaciar_caches_datos_org()
     # Invalidar cachés de config y logo de org (dependen de la org activa)
     st.session_state.pop("_org_config_cache", None)
     st.session_state.pop("_org_logo_cache", None)
-    # Limpiar el estado del documento de facturación en curso para que NADA se
-    # arrastre de la organización anterior (IVA por defecto, líneas, cliente,
-    # snapshots, documento en edición). El siguiente documento nuevo partirá del
-    # IVA por defecto y la config de la organización recién seleccionada.
-    _limpiar_estado_documento_facturacion()
+    # Limpiar el estado del documento de facturación SOLO cuando la organización
+    # cambia de verdad. Si org_id es el mismo que ya estaba activo (p.ej. porque
+    # _inicializar_org_activa confirma la única org del chef en cada render),
+    # conservar el estado de facturación en curso evita borrar líneas de
+    # documentos a medio editar y el KeyError en factura_lineas_actual.
+    if org_id != _org_anterior:
+        _limpiar_estado_documento_facturacion()
 
 
 def _limpiar_estado_documento_facturacion():
     """Resetea todo el estado de sesión del módulo de facturación."""
     for _clave in [
         "factura_iva_pct",
-        "factura_lineas_actual",
-        "factura_lineas_bd",
+        # factura_lineas_actual y factura_lineas_bd se dejan como [] en vez de
+        # borrarse: si se borran y la ejecución continúa sin st.rerun() (p.ej.
+        # cuando _inicializar_org_activa establece la org en el primer render),
+        # los accesos con corchete de la tab de facturas producen KeyError.
         "factura_id_en_edicion",
         "factura_presupuesto_origen_id",
         "factura_detalle_cargado",
@@ -1121,6 +1126,9 @@ def _limpiar_estado_documento_facturacion():
         "selector_cliente_factura",
     ]:
         st.session_state.pop(_clave, None)
+    # Listas de líneas: reset a vacío, nunca borrar la clave.
+    st.session_state["factura_lineas_actual"] = []
+    st.session_state["factura_lineas_bd"]     = []
     # Claves de número por tipo (factura_numero_actual_<tipo>)
     for _tipo in ("factura", "presupuesto", "factura_rectificativa"):
         st.session_state.pop(f"factura_numero_actual_{_tipo}", None)
@@ -10390,7 +10398,7 @@ with main_tab_facturas:
                 ]
                 lineas_documento_visibles = [
                     calcular_linea_factura(linea)
-                    for linea in st.session_state["factura_lineas_actual"]
+                    for linea in st.session_state.get("factura_lineas_actual", [])
                     if str(linea.get("descripcion", "") or "").strip()
                 ]
                 grupos_documento_visibles = agrupar_lineas_documento_por_menu(lineas_documento_visibles)
@@ -10431,8 +10439,8 @@ with main_tab_facturas:
                 lineas_actualizadas = []
                 for idx, linea_editada in enumerate(lineas_editadas_df.to_dict(orient="records")):
                     linea_origen = (
-                        st.session_state["factura_lineas_actual"][idx]
-                        if idx < len(st.session_state["factura_lineas_actual"])
+                        st.session_state.get("factura_lineas_actual", [])[idx]
+                        if idx < len(st.session_state.get("factura_lineas_actual", []))
                         else {}
                     )
                     for campo_origen in [
@@ -10448,22 +10456,22 @@ with main_tab_facturas:
                     # no cantidad de menú. La relación de menú se mantiene por menu_origen_id.
                     linea_editada["iva_pct"] = iva_documento_actual()
                     lineas_actualizadas.append(calcular_linea_factura(linea_editada))
-                if lineas_actualizadas != st.session_state["factura_lineas_actual"]:
+                if lineas_actualizadas != st.session_state.get("factura_lineas_actual", []):
                     st.session_state["factura_lineas_actual"] = lineas_actualizadas
                     st.rerun()
 
                 iva_aplicable_documento = iva_documento_actual()
                 st.session_state["factura_lineas_actual"] = [
                     {**dict(linea), "iva_pct": iva_aplicable_documento}
-                    for linea in st.session_state["factura_lineas_actual"]
+                    for linea in st.session_state.get("factura_lineas_actual", [])
                 ]
                 totales_factura = calcular_totales_factura(
-                    st.session_state["factura_lineas_actual"],
+                    st.session_state.get("factura_lineas_actual", []),
                     iva_pct=iva_aplicable_documento,
                     retencion_pct=retencion_pct
                 )
                 lineas_menu_documento = extraer_lineas_menu_documento(
-                    st.session_state["factura_lineas_actual"]
+                    st.session_state.get("factura_lineas_actual", [])
                 )
                 coste_documento = (
                     calcular_coste_presupuesto(lineas_menu_documento)
@@ -10551,7 +10559,7 @@ with main_tab_facturas:
                 else:
                     lineas_validas_descarga = [
                         calcular_linea_factura(linea)
-                        for linea in st.session_state["factura_lineas_actual"]
+                        for linea in st.session_state.get("factura_lineas_actual", [])
                         if str(linea.get("descripcion", "") or "").strip()
                     ]
                 menu_id_descarga = obtener_menu_id_desde_lineas_factura(lineas_validas_descarga)
@@ -10727,7 +10735,7 @@ with main_tab_facturas:
                         st.stop()
                     ok_guardar_doc, mensaje_guardar_doc, factura_guardada = guardar_factura_supabase(
                         factura_actual,
-                        st.session_state["factura_lineas_actual"]
+                        st.session_state.get("factura_lineas_actual", [])
                     )
                     if ok_guardar_doc:
                         st.success(f"{mensaje_guardar_doc}")
@@ -10743,7 +10751,7 @@ with main_tab_facturas:
                     ok_actualizar_doc, mensaje_actualizar_doc, factura_actualizada = actualizar_factura_supabase(
                         st.session_state.get("factura_id_en_edicion"),
                         factura_actual,
-                        st.session_state["factura_lineas_actual"]
+                        st.session_state.get("factura_lineas_actual", [])
                     )
                     if ok_actualizar_doc:
                         st.success(f"{mensaje_actualizar_doc}")
