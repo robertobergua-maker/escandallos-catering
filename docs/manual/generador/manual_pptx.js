@@ -172,14 +172,17 @@ function aviso(s, texto, { x = 0.5, y = 4.3, w = 4.6, h = 0.75, color = C.rojo, 
 const CAJA_DER = { x: 5.4, y: 1.1, w: 4.1, h: 4.0 };
 
 // Diapositiva estándar: pasos o puntos a la izquierda, captura a la derecha.
-function diapo({ titulo, gerente, fig, figs, pasos: ps, puntos: pt, aviso: av, notas, tamTexto }) {
+function diapo({ titulo, gerente, fig, figs, horizontal, pasos: ps, puntos: pt, aviso: av, notas, tamTexto }) {
   const s = nuevaDiapositiva(titulo, { gerente });
   const largo = ps && ps.some((t) => t.replace(/\*\*/g, "").length > 85);
   if (ps) pasos(s, ps, { tam: tamTexto || 14, alto: largo ? 0.8 : ps.length > 4 ? 0.58 : 0.66 });
   if (pt) puntos(s, pt, { tam: tamTexto || 14, h: av ? 3.0 : 3.8 });
   if (av) aviso(s, av);
   if (fig) ponerFigura(s, fig, CAJA_DER);
-  if (figs) {
+  if (figs && horizontal) {
+    const ancho = (CAJA_DER.w - 0.2 * (figs.length - 1)) / figs.length;
+    figs.forEach((id, i) => ponerFigura(s, id, { ...CAJA_DER, x: CAJA_DER.x + i * (ancho + 0.2), w: ancho }));
+  } else if (figs) {
     let y = CAJA_DER.y;
     const hueco = (CAJA_DER.h - 0.2 * (figs.length - 1)) / figs.length;
     figs.forEach((id) => {
@@ -287,26 +290,35 @@ seccion("Introducción");
 diapoSeccion("01", "Acceso", "Entrar, recuperar la contraseña y unirte a tu organización");
 diapo({
   titulo: "Entrar en la aplicación",
-  fig: "01",
+  figs: ["00", "01"],
+  horizontal: true,
   pasos: [
     "Abre la app y pulsa **Entrar a la aplicación**.",
-    "Pulsa **Entrar con Google**, o escribe **Email** y **Contraseña** y pulsa **Iniciar sesión**.",
+    "En la barra lateral, pulsa **Entrar con Google**, o escribe **Email** y **Contraseña** y pulsa **Iniciar sesión**.",
     "Verás **Sesión iniciada** con tu correo en la barra lateral.",
     "¿Olvidaste la contraseña? **¿Has olvidado tu contraseña?** → **Enviar enlace de recuperación**.",
   ],
   notas: "Desde el correo de recuperación se llega a «Nueva contraseña» / «Repite la contraseña» / «Guardar contraseña». «Continuar como invitado» es solo para probar: no guarda cambios.",
 });
-diapo({
-  titulo: "Unirte a tu organización",
-  fig: "02",
-  pasos: [
-    "Tu gerente te da un **código de invitación**.",
-    "Entra con el **mismo correo** de la invitación.",
-    "Pega el código en **Código de invitación**.",
-    "Pulsa **Canjear invitación**: verás «¡Te has unido a…!».",
-  ],
-  notas: "Si llega un enlace de invitación en lugar de un código, abrirlo con la sesión iniciada canjea la invitación automáticamente.",
-});
+{
+  const s = nuevaDiapositiva("Unirte a tu organización");
+  const etapas = [
+    ["Recibe el código", "Te lo da tu gerente: es tu **código de invitación**."],
+    ["Entra", "Con el **mismo correo** al que se envió la invitación."],
+    ["Pega el código", "En el campo **Código de invitación**."],
+    ["Canjea", "Pulsa **Canjear invitación**: verás «¡Te has unido a…!»."],
+  ];
+  etapas.forEach(([t, d], i) => {
+    const x = 0.5 + i * 2.3;
+    s.addShape(pres.shapes.ROUNDED_RECTANGLE, { x, y: 1.5, w: 2.05, h: 2.4, rectRadius: 0.1, fill: { color: C.crema }, line: { color: C.doradoClaro, width: 1 }, objectName: `Etapa ${i + 1}` });
+    s.addText(String(i + 1), { x: x + 0.75, y: 1.7, w: 0.55, h: 0.55, shape: pres.shapes.OVAL, fill: { color: C.dorado }, color: C.blanco, bold: true, fontSize: 18, align: "center", valign: "middle", margin: 0, isTextBox: true });
+    s.addText(t, { x: x + 0.15, y: 2.4, w: 1.75, h: 0.4, fontFace: F_TIT, fontSize: 16, bold: true, color: C.marron, align: "center", margin: 0, isTextBox: true });
+    s.addText(conNegrita(d), { x: x + 0.15, y: 2.85, w: 1.75, h: 0.95, fontFace: F_TXT, fontSize: 13, color: C.texto, align: "center", valign: "top", margin: 0, isTextBox: true });
+    if (i < 3) s.addShape(pres.shapes.RIGHT_ARROW, { x: x + 2.08, y: 2.6, w: 0.19, h: 0.22, fill: { color: C.dorado }, line: { color: C.dorado }, objectName: "Flecha" });
+  });
+  s.addText("Si te llega un enlace de invitación, ábrelo con la sesión iniciada: se canjea solo.", { x: 0.5, y: 4.3, w: 9, h: 0.4, fontFace: F_TXT, fontSize: 14, italic: true, color: C.gris, margin: 0, isTextBox: true });
+  s.addNotes("Este paso solo aparece si el usuario aún no pertenece a ninguna organización.");
+}
 diapo({
   titulo: "La pantalla principal",
   fig: "10",
@@ -314,19 +326,10 @@ diapo({
     "**Barra lateral**: logo y organización, tu sesión, **Ficha de ingrediente**.",
     "**Pestañas**: Recetas, Menús, Clientes y Facturas.",
     "El gerente ve además **Navegación**: App / Gerente.",
+    "¿Varias organizaciones? Elige en **Organización activa**.",
     "¿No ves un cambio de rol? Pulsa **Recargar permisos**.",
   ],
-  notas: "Cerrar sesión siempre en ordenadores compartidos.",
-});
-diapo({
-  titulo: "Cambiar de organización activa",
-  fig: "11",
-  pasos: [
-    "Solo si perteneces a **más de una** organización.",
-    "Abre **Organización activa** en la barra lateral.",
-    "Elige la organización: la app se recarga con sus datos y su logo.",
-  ],
-  aviso: "Guarda tu trabajo antes: el documento abierto en Facturas se limpia.",
+  notas: "Cerrar sesión siempre en ordenadores compartidos. Al cambiar de organización activa se limpia el documento abierto en Facturas: guardar antes.",
 });
 
 diapoSeccion("02", "Recetas", "Escandallos, costes, alérgenos e inteligencia artificial");
@@ -448,8 +451,17 @@ diapo({
     "Pulsa **Descargar ficha Excel** para la ficha técnica.",
     "Borrar: **Mantenimiento** → escribe ELIMINAR.",
   ],
-  notas: "El gerente ve además el botón «Compartir» junto a «Cargar receta». Falta la captura de la ficha abierta en Excel (22b).",
+  notas: "El gerente ve además el botón «Compartir» junto a «Cargar receta».",
 });
+{
+  const s = nuevaDiapositiva("La ficha técnica en Excel");
+  puntos(s, [
+    "Por ingrediente: código, cantidad bruta, **merma**, cantidad neta, precio y coste.",
+    "Al final: costes indirectos, beneficio, IVA y **precio por ración**.",
+  ], { w: 9, h: 0.9 });
+  ponerFigura(s, "22b", { x: 0.5, y: 2.05, w: 9, h: 3.05 });
+  s.addNotes("Se descarga con «Descargar ficha Excel». Un precio de 0,00 € en la ficha indica un ingrediente sin precio: revisarlo antes de dar el coste por bueno.");
+}
 diapo({
   titulo: "Recetas compartidas con mi organización",
   gerente: true,
@@ -614,17 +626,17 @@ diapo({
   pasos: [
     "Carga la factura emitida.",
     "Pulsa **Crear rectificativa**.",
-    "Corrige el borrador y guárdalo.",
+    "Tipo «Factura rectificativa» (fijo); corrige y pulsa **Actualizar borrador**.",
     "Pulsa **Emitir documento**: número **REC-AAAA-NNNN**.",
   ],
 });
 diapo({
   titulo: "Anular un presupuesto",
   gerente: true,
-  fig: "68",
+  figs: ["63", "68"],
   pasos: [
     "Carga el presupuesto emitido.",
-    "Pulsa **Anular presupuesto** (confirma si te lo pide).",
+    "Pulsa **Anular presupuesto** y confirma con **Sí, anular presupuesto**.",
     "Queda en estado **anulada**.",
   ],
   aviso: "Solo presupuestos. La anulación **no se puede deshacer**.",
@@ -682,7 +694,7 @@ diapo({
   fig: "76",
   pasos: [
     "**Añadir ingrediente privado**: descripción, familia y unidad.",
-    "Declara sus **Alérgenos** o marca «No contiene ninguno».",
+    "**Obligatorio**: declara sus **Alérgenos** o marca «No contiene ninguno».",
     "Pulsa **Crear ingrediente privado** (código P-…).",
   ],
   aviso: "⚠️ = alérgenos **pendientes de revisión**. Revísalos antes de usarlos.",
@@ -691,14 +703,14 @@ diapo({
 diapo({
   titulo: "Compartir recetas",
   gerente: true,
-  fig: "77",
+  figs: ["77", "78"],
   pasos: [
     "**Compartir recetas** → elige la receta.",
     "Elige el **Destino**: una organización o todas.",
     "Pulsa **Compartir**.",
     "**Comparticiones activas** → **Desactivar** para dejar de compartir.",
   ],
-  notas: "Las otras organizaciones ven una vista previa sin precios y pueden hacer una copia independiente. Falta la captura de «Comparticiones activas» (78).",
+  notas: "Las otras organizaciones ven una vista previa sin precios y pueden hacer una copia independiente. En la captura 78 se ha ocultado el destino.",
 });
 
 seccion("Cierre");

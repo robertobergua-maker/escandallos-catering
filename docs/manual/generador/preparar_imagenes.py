@@ -29,6 +29,8 @@ RECORTES = {
     "61a-presupuesto-cabecera.png": ("61a-presupuesto-cabecera.png", (0, 0, 720, 700)),
     "31-menu-alergenos.png": ("30-menu-nuevo.png", (263, 675, 720, 935)),
     "22-descarga-ficha.png": ("16-alergenos-receta.png", (263, 540, 720, 745)),
+    # La 67 muestra el identificador interno del borrador y los totales sin recalcular.
+    "67-rectificativa.png": ("67-rectificativa.png", (211, 92, 720, 345)),
 }
 
 # Recortes para el PowerPoint: solo la zona de la pantalla de la que habla cada
@@ -58,11 +60,20 @@ RECORTES_PPT = {
     "75-inventario-propio.png": (263, 190, 720, 680),
     "76-ingrediente-privado.png": (263, 140, 720, 600),
     "77-compartir-receta.png": (263, 130, 720, 460),
+    "00-portada.png": (84, 28, 628, 545),
+    "01-login.png": (0, 350, 263, 700),
+    "17d-ia-imagen-resultado.png": (0, 60, 720, 560),
+    "17c-ia-imagen-subida.png": (0, 100, 720, 330),
+    "50-chef-borrador.png": (211, 40, 720, 265),
+    "51-chef-sin-emitir.png": (211, 335, 720, 470),
+    "78-comparticiones-activas.png": (263, 130, 720, 370),
 }
 
 # Zonas a tapar (datos que no deben circular): código de invitación real.
 OCULTAR = {
     "72-invitaciones.png": [((322, 662, 792, 700), "código de invitación oculto")],
+    # La captura muestra el identificador interno de la organización destino.
+    "78-comparticiones-activas.png": [((444, 296, 582, 362), "(oculto)")],
 }
 
 

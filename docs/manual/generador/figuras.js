@@ -13,17 +13,12 @@ const path = require("path");
 const IMG_DIR = path.join(__dirname, "_build", "img");
 
 // Capturas que existen pero no deben usarse tal cual.
-const REHACER = {
-  "78-comparticiones-activas.png":
-    "rehacer: la captura actual muestra el identificador interno de la organización destino en vez de su nombre",
-};
+const REHACER = {};
 
 const FIGURAS = {
   "00": { file: "00-portada.png", desc: "Portada con el botón «Entrar a la aplicación»" },
-  "01": { file: "01-login.png", desc: "Pantalla de acceso: Google, email y contraseña, ¿Has olvidado tu contraseña?" },
-  "02": { file: "02-canjear-invitacion.png", desc: "Usuario sin organización: campo «Código de invitación» y botón «Canjear invitación»" },
+  "01": { file: "01-login.png", desc: "Acceso en la barra lateral: Entrar con Google, email y contraseña" },
   "10": { file: "10-inicio-sidebar.png", desc: "Pantalla principal del chef con la barra lateral" },
-  "11": { file: "11-selector-organizacion.png", desc: "Desplegable «Organización activa» abierto" },
   "12": { file: "12-receta-nueva.png", desc: "Receta nueva: nombre, categoría, tipo de plato y raciones base" },
   "17b": { file: "17b-ia-texto-resultado.png", desc: "Tabla de ingredientes con cantidades y unidades" },
   "14": { file: "14-ficha-ingrediente.png", desc: "Ficha de ingrediente en la barra lateral" },
@@ -49,14 +44,14 @@ const FIGURAS = {
   "61a": { file: "61a-presupuesto-cabecera.png", desc: "Cabecera del documento en borrador" },
   "61": { file: "61-presupuesto-borrador.png", desc: "Presupuesto en borrador con un menú añadido" },
   "50": { file: "50-chef-borrador.png", desc: "Borrador de presupuesto creado por el chef (sin número)" },
-  "51": { file: "51-chef-sin-emitir.png", desc: "Lo que ve el chef en lugar del botón «Emitir documento»" },
+  "51": { file: "51-chef-sin-emitir.png", desc: "El chef ve «Solo el gerente puede emitir el documento»" },
   "62a": { file: "62a-antes-de-emitir.png", desc: "Botón «Emitir documento» en un borrador guardado" },
   "62": { file: "62-emitido.png", desc: "Mensaje tras emitir (PRE-2026-0001)" },
   "63": { file: "63-documento-emitido.png", desc: "Documento emitido: acciones disponibles" },
   "64": { file: "64-pdf-presupuesto.png", desc: "PDF del presupuesto descargado" },
   "65": { file: "65-factura-emitida.png", desc: "Factura emitida (FAC-2026-0001)" },
   "66": { file: "66-marcar-cobrado.png", desc: "Factura en estado cobrada" },
-  "67": { file: "67-rectificativa.png", desc: "«Crear rectificativa» y la rectificativa resultante" },
+  "67": { file: "67-rectificativa.png", desc: "Borrador rectificativo: tipo «Factura rectificativa» y concepto" },
   "68": { file: "68-anular-presupuesto.png", desc: "Presupuesto anulado" },
   "70": { file: "70-nav-gerente.png", desc: "Navegación App / Gerente y página de gestión" },
   "71": { file: "71-miembros.png", desc: "Miembros de la organización" },
@@ -66,7 +61,7 @@ const FIGURAS = {
   "75": { file: "75-inventario-propio.png", desc: "Precio propio de un ingrediente del catálogo" },
   "76": { file: "76-ingrediente-privado.png", desc: "Añadir un ingrediente privado con sus alérgenos" },
   "77": { file: "77-compartir-receta.png", desc: "Compartir una receta con otra organización" },
-  "78": { file: "78-comparticiones-activas.png", desc: "Comparticiones activas de la organización" },
+  "78": { file: "78-comparticiones-activas.png", desc: "Comparticiones activas de la organización (destino oculto en la captura)" },
 };
 
 // Devuelve { id, desc, path|null, pendiente, nota } para una figura.
