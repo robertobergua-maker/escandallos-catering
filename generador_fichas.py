@@ -9138,11 +9138,24 @@ def _renderizar_recetas_de_chefs(org_id):
         dueno = email_por_id.get(prop, "sin propietario") if prop else "sin propietario"
         return f"{r.get('codigo_receta', '')} · {r.get('nombre', '')} · {dueno}"
 
-    tab_conceder, tab_actuales, tab_propietario = st.tabs(
-        ["Conceder acceso", "Permisos actuales", "Propietario de recetas"]
+    # st.tabs resetea a la primera pestaña en cada st.rerun(). Usamos un
+    # st.radio horizontal guardado en session_state para que la subpestaña
+    # activa se conserve tras conceder, quitar o asignar.
+    _TABS_RECETAS_CHEFS = ["Conceder acceso", "Permisos actuales", "Propietario de recetas"]
+    _tab_key = f"_recetas_chefs_tab_{org_id}"
+    # Restaurar la pestaña activa guardada antes del rerun (si la hay)
+    _tab_guardada = st.session_state.pop(f"_recetas_chefs_tab_volver_{org_id}", None)
+    if _tab_guardada and _tab_guardada in _TABS_RECETAS_CHEFS:
+        st.session_state[_tab_key] = _tab_guardada
+    _tab_actual = st.radio(
+        "Sección",
+        _TABS_RECETAS_CHEFS,
+        horizontal=True,
+        key=_tab_key,
+        label_visibility="collapsed",
     )
 
-    with tab_conceder:
+    if _tab_actual == "Conceder acceso":
         if not chefs:
             st.info("No hay chefs activos en la organización.")
         else:
@@ -9196,11 +9209,12 @@ def _renderizar_recetas_de_chefs(org_id):
                         st.session_state["_recetas_chefs_feedback"] = (
                             "success", f"Acceso concedido o actualizado: {n} permiso(s)."
                         )
+                        st.session_state[f"_recetas_chefs_tab_volver_{org_id}"] = "Conceder acceso"
                         st.rerun()
                     except Exception as e_perm:
                         st.error(f"No se pudo conceder el acceso: {e_perm}")
 
-    with tab_actuales:
+    elif _tab_actual == "Permisos actuales":
         try:
             permisos = (
                 supabase.table("receta_permisos")
@@ -9245,11 +9259,12 @@ def _renderizar_recetas_de_chefs(org_id):
                     }).execute().data
                     cargar_mis_permisos_recetas.clear()
                     st.session_state["_recetas_chefs_feedback"] = ("success", f"Permisos quitados: {n}.")
+                    st.session_state[f"_recetas_chefs_tab_volver_{org_id}"] = "Permisos actuales"
                     st.rerun()
                 except Exception as e_rev:
                     st.error(f"No se pudieron quitar los permisos: {e_rev}")
 
-    with tab_propietario:
+    else:  # "Propietario de recetas"
         if not recetas:
             st.info("La organización no tiene recetas.")
         else:
@@ -9290,6 +9305,7 @@ def _renderizar_recetas_de_chefs(org_id):
                     st.session_state["_recetas_chefs_feedback"] = (
                         "success", f"Propietario asignado a {n} receta(s)."
                     )
+                    st.session_state[f"_recetas_chefs_tab_volver_{org_id}"] = "Propietario de recetas"
                     st.rerun()
                 except Exception as e_ap:
                     st.error(f"No se pudo asignar el propietario: {e_ap}")
