@@ -31,6 +31,8 @@ RECORTES = {
     "22-descarga-ficha.png": ("16-alergenos-receta.png", (263, 540, 720, 745)),
     # La 67 muestra el identificador interno del borrador y los totales sin recalcular.
     "67-rectificativa.png": ("67-rectificativa.png", (211, 92, 720, 345)),
+    # 79a: sin la barra lateral (sesión de un usuario real).
+    "79a-recetas-chefs-conceder.png": ("79a-recetas-chefs-conceder.png", (263, 60, 720, 620)),
 }
 
 # Recortes para el PowerPoint: solo la zona de la pantalla de la que habla cada
@@ -67,6 +69,7 @@ RECORTES_PPT = {
     "50-chef-borrador.png": (211, 40, 720, 265),
     "51-chef-sin-emitir.png": (211, 335, 720, 470),
     "78-comparticiones-activas.png": (263, 130, 720, 370),
+    "79a-recetas-chefs-conceder.png": (263, 60, 720, 620),
 }
 
 # Zonas a tapar (datos que no deben circular): código de invitación real.
@@ -75,6 +78,39 @@ OCULTAR = {
     # La captura muestra el identificador interno de la organización destino.
     "78-comparticiones-activas.png": [((444, 296, 582, 362), "(oculto)")],
 }
+
+
+# Correos reales de producción sustituidos por correos de ejemplo:
+# (caja a tapar, texto nuevo, color de fondo, color de texto, tamaño, (x, y) del texto).
+_ROJO, _BLANCO = (255, 75, 75), (255, 255, 255)
+SUSTITUIR = {
+    "79a-recetas-chefs-conceder.png": [
+        ((286, 336, 462, 361), "chef.ana@ejemplo.com  ×", _ROJO, _BLANCO, 12, (295, 341)),
+        ((286, 462, 460, 488), "chef.luis@ejemplo.com  ×", _ROJO, _BLANCO, 12, (295, 468)),
+        # Barra lateral (el recorte de 79a la deja fuera; por si se usa entera)
+        ((40, 462, 250, 486), "gerente@ejemplo.com", (220, 240, 228), (40, 120, 70), 14, (42, 465)),
+    ],
+    "79b-recetas-chefs-permisos.png": [
+        ((126, 262, 300, 288), "chef.ana@ejemplo.com", _BLANCO, (49, 51, 63), 11, (130, 268)),
+        ((312, 262, 590, 288), "Todas las recetas de chef.luis@ejemplo.com", _BLANCO, (49, 51, 63), 11, (316, 268)),
+    ],
+    "79c-recetas-chefs-propietario.png": [
+        ((24, 343, 300, 370), "chef.ana@ejemplo.com", (240, 242, 246), (49, 51, 63), 12, (28, 349)),
+    ],
+}
+
+
+def _abrir(nombre):
+    """Abre una captura y aplica las zonas ocultas y los correos sustituidos."""
+    im = Image.open(CAPTURAS / nombre).convert("RGB")
+    d = ImageDraw.Draw(im)
+    for (caja, texto) in OCULTAR.get(nombre, []):
+        d.rectangle(caja, fill=(225, 225, 225))
+        d.text((caja[0] + 12, caja[1] + 9), texto, fill=(90, 90, 90), font=_fuente(15))
+    for (caja, texto, fondo, color, tam, pos) in SUSTITUIR.get(nombre, []):
+        d.rounded_rectangle(caja, radius=4, fill=fondo) if fondo == _ROJO else d.rectangle(caja, fill=fondo)
+        d.text(pos, texto, fill=color, font=_fuente(tam))
+    return im
 
 
 def _fuente(tam):
@@ -90,11 +126,7 @@ def main():
     SALIDA.mkdir(parents=True, exist_ok=True)
     hechas = 0
     for png in sorted(CAPTURAS.glob("*.png")):
-        im = Image.open(png).convert("RGB")
-        for (caja, texto) in OCULTAR.get(png.name, []):
-            d = ImageDraw.Draw(im)
-            d.rectangle(caja, fill=(225, 225, 225))
-            d.text((caja[0] + 12, caja[1] + 9), texto, fill=(90, 90, 90), font=_fuente(15))
+        im = _abrir(png.name)
         im.save(SALIDA / png.name, optimize=True)
         if png.name in RECORTES_PPT:
             im.crop(RECORTES_PPT[png.name]).save(SALIDA / f"ppt-{png.name}", optimize=True)
@@ -103,7 +135,7 @@ def main():
         ruta = CAPTURAS / origen
         if not ruta.exists():
             continue
-        im = Image.open(ruta).convert("RGB")
+        im = _abrir(origen)
         if caja:
             im = im.crop(caja)
         im.save(SALIDA / destino, optimize=True)

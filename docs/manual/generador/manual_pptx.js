@@ -243,17 +243,20 @@ seccion("Introducción");
   const s = nuevaDiapositiva("Organizaciones y roles");
   puntos(s, [
     "Cada empresa es una **organización** con sus datos separados.",
-    "Lo que guardas es de la **organización**, no tuyo: todos sus miembros lo ven.",
+    "Menús, clientes y documentos son de la **organización**: todos los miembros los ven.",
+    "Las **recetas** son de cada chef; el gerente decide quién ve las de otros.",
     "Hay dos roles: **Chef** y **Gerente**.",
-  ], { w: 3.9, h: 2.4 });
+  ], { w: 3.9, h: 3.2 });
   const filas = [
     ["", "Chef", "Gerente"],
-    ["Recetas, menús y clientes", "Sí", "Sí"],
+    ["Sus recetas, menús y clientes", "Sí", "Sí"],
+    ["Recetas de otros chefs", "Con acceso", "Sí"],
     ["Borradores y PDF", "Sí", "Sí"],
     ["Emitir, cobrar, anular, rectificar", "No", "Sí"],
     ["Copiar y compartir recetas", "No", "Sí"],
     ["Precios propios e ingredientes privados", "No", "Sí"],
     ["Miembros, datos y logo", "No", "Sí"],
+    ["Acceso a recetas y propietarios", "No", "Sí"],
   ];
   const cab = { bold: true, color: C.blanco, fill: { color: C.marron }, align: "center" };
   s.addTable(
@@ -463,6 +466,18 @@ diapo({
   s.addNotes("Se descarga con «Descargar ficha Excel». Un precio de 0,00 € en la ficha indica un ingrediente sin precio: revisarlo antes de dar el coste por bueno.");
 }
 diapo({
+  titulo: "Qué recetas ves y cuáles modificas",
+  figs: ["24a", "24b"],
+  puntos: [
+    "Ves **tus recetas**, las que están en algún **menú** y aquellas a las que te dé acceso el gerente.",
+    "Las ajenas salen como «de otro chef» o «de otro chef (**solo lectura**)».",
+    "En solo lectura, **Actualizar receta** está desactivado: usa **Guardar** o **Duplicar** para tener tu copia.",
+    "Borrar: solo el **propietario** o el **gerente**.",
+  ],
+  tamTexto: 13,
+  notas: "Cada receta tiene un propietario: el chef que la creó. Para modificar la original hay que pedir al gerente permiso de edición.",
+});
+diapo({
   titulo: "Recetas compartidas con mi organización",
   gerente: true,
   fig: "23",
@@ -649,7 +664,7 @@ diapo({
   fig: "70",
   pasos: [
     "En **Navegación**, elige **Gerente**.",
-    "Pestañas: **Miembros e invitaciones**, **Datos de la organización**, **Inventario propio** y **Compartir recetas**.",
+    "Pestañas: Miembros e invitaciones, **Recetas de chefs**, Datos de la organización, Inventario propio y Compartir recetas.",
     "Para volver, elige **App**.",
   ],
 });
@@ -664,6 +679,40 @@ diapo({
     "**Revocar** anula una invitación pendiente.",
   ],
   notas: "En la pestaña Miembros se ve cada persona con su rol y estado; «Desactivar» le quita el acceso. En la captura, el código está oculto a propósito.",
+});
+diapo({
+  titulo: "Invitar chefs desde un archivo",
+  gerente: true,
+  fig: "72b",
+  pasos: [
+    "**Descargar plantilla CSV** para ver el formato.",
+    "Prepara un CSV o Excel con una columna «email», un chef por fila.",
+    "Súbelo en **Archivo de chefs (CSV o Excel)**.",
+    "Se crea una invitación por email válido: descarga los códigos.",
+  ],
+});
+diapo({
+  titulo: "Recetas de chefs: conceder acceso",
+  gerente: true,
+  fig: "79a",
+  pasos: [
+    "Elige los **chefs que reciben el acceso**.",
+    "**Acceso a**: todas las recetas de unos propietarios (también las futuras) o recetas concretas.",
+    "**Permiso**: Solo lectura o Lectura y edición.",
+    "Pulsa **Conceder acceso** (si ya existía, cambia el nivel).",
+  ],
+  notas: "Cada chef ve y edita solo sus recetas; el gerente ve y edita todas. Si el gerente edita la receta de un chef, sigue siendo de ese chef. En las capturas, los correos son de ejemplo.",
+});
+diapo({
+  titulo: "Permisos actuales y propietarios",
+  gerente: true,
+  figs: ["79b", "79c"],
+  puntos: [
+    "**Permisos actuales**: marca **Quitar** y pulsa **Quitar seleccionados**.",
+    "**Propietario de recetas**: elige recetas, **Nuevo propietario** y **Asignar propietario**.",
+    "«Mostrar solo recetas sin propietario» localiza las recetas antiguas sin dueño.",
+  ],
+  notas: "Las recetas sin propietario solo las ve el gerente, salvo que estén en un menú. Tras cada acción, la pantalla se queda en el apartado en el que estabas.",
 });
 diapo({
   titulo: "Datos de la organización y logo",
