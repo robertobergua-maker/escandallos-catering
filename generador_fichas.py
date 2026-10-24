@@ -11569,23 +11569,31 @@ with main_tab_recetas:
             observaciones_receta = st.text_area("Elaboración / observaciones", key="input_receta_observaciones", height=80)
 
         _receta_cargada_id = str(st.session_state.get("receta_id_cargada") or "")
-        if _receta_cargada_id and recetas_por_chef_activo():
-            _receta_cargada = {
-                "id": _receta_cargada_id,
-                "user_id": st.session_state.get("receta_user_id_cargada"),
-            }
-            if not receta_editable_por_mi(_receta_cargada):
-                st.caption(
-                    "Esta receta es de otro chef y la tienes en solo lectura: "
-                    "«Actualizar receta» no está disponible. Con «Guardar receta» o "
-                    "«Duplicar receta» guardas tu propia copia."
-                )
+        _receta_cargada = {
+            "id": _receta_cargada_id,
+            "user_id": st.session_state.get("receta_user_id_cargada"),
+        }
+        _receta_solo_lectura = bool(
+            _receta_cargada_id
+            and recetas_por_chef_activo()
+            and not receta_editable_por_mi(_receta_cargada)
+        )
+        if _receta_solo_lectura:
+            st.caption(
+                "Esta receta es de otro chef y la tienes en solo lectura: "
+                "«Actualizar receta» no está disponible. Con «Guardar receta» o "
+                "«Duplicar receta» guardas tu propia copia."
+            )
 
         guardar_col, actualizar_col, duplicar_col = st.columns(3)
         with guardar_col:
             guardar_nueva = st.form_submit_button("Guardar receta", type="primary", use_container_width=True)
         with actualizar_col:
-            actualizar_existente = st.form_submit_button("Actualizar receta", use_container_width=True)
+            actualizar_existente = st.form_submit_button(
+                "Actualizar receta",
+                use_container_width=True,
+                disabled=_receta_solo_lectura,
+            )
         with duplicar_col:
             duplicar_existente = st.form_submit_button("Duplicar receta", use_container_width=True)
 
