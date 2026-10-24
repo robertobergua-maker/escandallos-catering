@@ -7461,7 +7461,6 @@ with st.sidebar:
         st.warning("👀 Modo invitado: estás probando la app. Nada de lo que hagas se guarda. Crea una cuenta para conservar tus cambios.")
 
     st.divider()
-    st.info("💡 Consejo: el inventario común se gestiona desde Administración, disponible solo para usuarios admin.")
 
     st.markdown("#### 🧾 Ficha de ingrediente")
     modo_ficha = st.session_state.get("ingrediente_ficha_modo", "sin_seleccion")
@@ -9139,11 +9138,24 @@ def _renderizar_recetas_de_chefs(org_id):
         dueno = email_por_id.get(prop, "sin propietario") if prop else "sin propietario"
         return f"{r.get('codigo_receta', '')} · {r.get('nombre', '')} · {dueno}"
 
-    tab_conceder, tab_actuales, tab_propietario = st.tabs(
-        ["Conceder acceso", "Permisos actuales", "Propietario de recetas"]
+    # st.tabs resetea a la primera pestaña en cada st.rerun(). Usamos un
+    # st.radio horizontal guardado en session_state para que la subpestaña
+    # activa se conserve tras conceder, quitar o asignar.
+    _TABS_RECETAS_CHEFS = ["Conceder acceso", "Permisos actuales", "Propietario de recetas"]
+    _tab_key = f"_recetas_chefs_tab_{org_id}"
+    # Restaurar la pestaña activa guardada antes del rerun (si la hay)
+    _tab_guardada = st.session_state.pop(f"_recetas_chefs_tab_volver_{org_id}", None)
+    if _tab_guardada and _tab_guardada in _TABS_RECETAS_CHEFS:
+        st.session_state[_tab_key] = _tab_guardada
+    _tab_actual = st.radio(
+        "Sección",
+        _TABS_RECETAS_CHEFS,
+        horizontal=True,
+        key=_tab_key,
+        label_visibility="collapsed",
     )
 
-    with tab_conceder:
+    if _tab_actual == "Conceder acceso":
         if not chefs:
             st.info("No hay chefs activos en la organización.")
         else:
@@ -9197,11 +9209,12 @@ def _renderizar_recetas_de_chefs(org_id):
                         st.session_state["_recetas_chefs_feedback"] = (
                             "success", f"Acceso concedido o actualizado: {n} permiso(s)."
                         )
+                        st.session_state[f"_recetas_chefs_tab_volver_{org_id}"] = "Conceder acceso"
                         st.rerun()
                     except Exception as e_perm:
                         st.error(f"No se pudo conceder el acceso: {e_perm}")
 
-    with tab_actuales:
+    elif _tab_actual == "Permisos actuales":
         try:
             permisos = (
                 supabase.table("receta_permisos")
@@ -9246,11 +9259,12 @@ def _renderizar_recetas_de_chefs(org_id):
                     }).execute().data
                     cargar_mis_permisos_recetas.clear()
                     st.session_state["_recetas_chefs_feedback"] = ("success", f"Permisos quitados: {n}.")
+                    st.session_state[f"_recetas_chefs_tab_volver_{org_id}"] = "Permisos actuales"
                     st.rerun()
                 except Exception as e_rev:
                     st.error(f"No se pudieron quitar los permisos: {e_rev}")
 
-    with tab_propietario:
+    else:  # "Propietario de recetas"
         if not recetas:
             st.info("La organización no tiene recetas.")
         else:
@@ -9291,6 +9305,7 @@ def _renderizar_recetas_de_chefs(org_id):
                     st.session_state["_recetas_chefs_feedback"] = (
                         "success", f"Propietario asignado a {n} receta(s)."
                     )
+                    st.session_state[f"_recetas_chefs_tab_volver_{org_id}"] = "Propietario de recetas"
                     st.rerun()
                 except Exception as e_ap:
                     st.error(f"No se pudo asignar el propietario: {e_ap}")
@@ -11570,23 +11585,31 @@ with main_tab_recetas:
             observaciones_receta = st.text_area("Elaboración / observaciones", key="input_receta_observaciones", height=80)
 
         _receta_cargada_id = str(st.session_state.get("receta_id_cargada") or "")
-        if _receta_cargada_id and recetas_por_chef_activo():
-            _receta_cargada = {
-                "id": _receta_cargada_id,
-                "user_id": st.session_state.get("receta_user_id_cargada"),
-            }
-            if not receta_editable_por_mi(_receta_cargada):
-                st.caption(
-                    "Esta receta es de otro chef y la tienes en solo lectura: "
-                    "«Actualizar receta» no está disponible. Con «Guardar receta» o "
-                    "«Duplicar receta» guardas tu propia copia."
-                )
+        _receta_cargada = {
+            "id": _receta_cargada_id,
+            "user_id": st.session_state.get("receta_user_id_cargada"),
+        }
+        _receta_solo_lectura = bool(
+            _receta_cargada_id
+            and recetas_por_chef_activo()
+            and not receta_editable_por_mi(_receta_cargada)
+        )
+        if _receta_solo_lectura:
+            st.caption(
+                "Esta receta es de otro chef y la tienes en solo lectura: "
+                "«Actualizar receta» no está disponible. Con «Guardar receta» o "
+                "«Duplicar receta» guardas tu propia copia."
+            )
 
         guardar_col, actualizar_col, duplicar_col = st.columns(3)
         with guardar_col:
             guardar_nueva = st.form_submit_button("Guardar receta", type="primary", use_container_width=True)
         with actualizar_col:
-            actualizar_existente = st.form_submit_button("Actualizar receta", use_container_width=True)
+            actualizar_existente = st.form_submit_button(
+                "Actualizar receta",
+                use_container_width=True,
+                disabled=_receta_solo_lectura,
+            )
         with duplicar_col:
             duplicar_existente = st.form_submit_button("Duplicar receta", use_container_width=True)
 
