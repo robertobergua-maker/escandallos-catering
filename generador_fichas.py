@@ -1627,7 +1627,7 @@ def receta_es_propia_o_antigua(receta):
 
 def receta_es_modificable(receta):
     if obtener_org_activa_id():
-        return _objeto_pertenece_a_org_activa(receta)
+        return _objeto_pertenece_a_org_activa(receta) and receta_editable_por_mi(receta)
     user_id_actual = obtener_user_id_actual()
     receta_user_id = valor_user_id_receta(receta)
     if user_id_actual:
@@ -1635,8 +1635,131 @@ def receta_es_modificable(receta):
     return receta_user_id is None
 
 
+def receta_es_borrable(receta):
+    """Borrar: solo el gerente o el propietario (028). Sin 028, como modificar."""
+    if not receta_es_modificable(receta):
+        return False
+    if not obtener_org_activa_id() or not recetas_por_chef_activo():
+        return True
+    return usuario_es_gerente_org_activa() or valor_user_id_receta(receta) == obtener_user_id_actual()
+
+
 def mensaje_receta_no_modificable():
+    if obtener_org_activa_id() and recetas_por_chef_activo():
+        return (
+            "No puedes modificar esta receta: es de otro chef y no tienes permiso de "
+            "edición. Pídeselo a tu gerente o usa «Duplicar receta» para guardar tu copia."
+        )
     return "No puedes modificar una receta de otra organización"
+
+
+# ── Recetas por chef (028) ───────────────────────────────────────────────────
+# Cada receta es de su propietario (recetas.user_id). El gerente ve y edita
+# todas y concede a los chefs acceso a recetas de otros (receta_permisos).
+# RLS en la BD es la barrera real; estas funciones solo deciden la UI.
+
+@st.cache_data(ttl=300)
+def _recetas_por_chef_disponible(user_id_actual):
+    """True si la migración 028 está aplicada (existe receta_permisos).
+    Cacheado por usuario: un fallo puntual no afecta a las demás sesiones."""
+    if not supabase_disponible or supabase is None:
+        return False
+    try:
+        supabase.table("receta_permisos").select("id").limit(1).execute()
+        return True
+    except Exception:
+        return False
+
+
+def recetas_por_chef_activo():
+    return bool(obtener_org_activa_id()) and _recetas_por_chef_disponible(
+        obtener_user_id_actual() or ""
+    )
+
+
+@st.cache_data(ttl=60)
+def cargar_mis_permisos_recetas(user_id_actual, organizacion_activa_id):
+    """Permisos del usuario actual en la org activa (lista de dicts)."""
+    if not user_id_actual or not organizacion_activa_id or supabase is None:
+        return []
+    try:
+        respuesta = (
+            supabase.table("receta_permisos")
+            .select("id,propietario_id,receta_id,nivel")
+            .eq("organizacion_id", organizacion_activa_id)
+            .eq("chef_id", user_id_actual)
+            .execute()
+        )
+        return respuesta.data or []
+    except Exception:
+        return []
+
+
+def _nivel_permiso_receta(receta):
+    """'propietario', 'gerente', 'edicion', 'lectura' o None para la receta."""
+    if not recetas_por_chef_activo():
+        return "gerente"  # sin 028: cualquier miembro edita (comportamiento anterior)
+    if usuario_es_gerente_org_activa():
+        return "gerente"
+    user_id_actual = obtener_user_id_actual()
+    propietario = valor_user_id_receta(receta)
+    if user_id_actual and propietario == user_id_actual:
+        return "propietario"
+    receta_id = str((receta or {}).get("id") or "")
+    niveles = set()
+    for p in cargar_mis_permisos_recetas(user_id_actual, obtener_org_activa_id()):
+        if (p.get("receta_id") and str(p["receta_id"]) == receta_id) or (
+            p.get("propietario_id") and propietario and str(p["propietario_id"]) == propietario
+        ):
+            niveles.add(p.get("nivel"))
+    if "edicion" in niveles:
+        return "edicion"
+    if "lectura" in niveles:
+        return "lectura"
+    return None
+
+
+def receta_editable_por_mi(receta):
+    return _nivel_permiso_receta(receta) in ("gerente", "propietario", "edicion")
+
+
+def etiqueta_acceso_receta(receta):
+    """Sufijo para los selectores de recetas: de quién es y si es solo lectura."""
+    if not recetas_por_chef_activo():
+        return ""
+    nivel = _nivel_permiso_receta(receta)
+    if nivel == "propietario":
+        return ""
+    propietario = valor_user_id_receta(receta)
+    if usuario_es_gerente_org_activa():
+        if propietario is None:
+            return " · sin propietario"
+        if propietario == obtener_user_id_actual():
+            return ""
+        email = _emails_miembros_org().get(propietario)
+        return f" · de {email}" if email else " · de otro chef"
+    if nivel == "edicion":
+        return " · de otro chef"
+    return " · de otro chef (solo lectura)"
+
+
+def _emails_miembros_org():
+    """user_id → email de los miembros de la org activa (solo gerente; 027)."""
+    org_id = obtener_org_activa_id()
+    if not org_id or not usuario_es_gerente_org_activa():
+        return {}
+    return {
+        str(m.get("user_id")): (m.get("email") or str(m.get("user_id")))
+        for m in _listar_miembros_org_cache(org_id, obtener_user_id_actual())
+    }
+
+
+@st.cache_data(ttl=120)
+def _listar_miembros_org_cache(org_id, user_id_actual):
+    try:
+        return supabase.rpc("listar_miembros_org", {"p_org": org_id}).execute().data or []
+    except Exception:
+        return []
 
 
 def valor_user_id_menu(menu):
@@ -3578,7 +3701,9 @@ def eliminar_receta_supabase(receta_id):
         cabecera_actual, _ = cargar_receta_detalle_supabase(receta_id)
         if not cabecera_actual:
             return False, "No se pudo comprobar la receta antes de eliminarla."
-        if not receta_es_modificable(cabecera_actual):
+        if not receta_es_borrable(cabecera_actual):
+            if receta_es_modificable(cabecera_actual):
+                return False, "Solo el propietario de la receta o el gerente pueden borrarla."
             return False, mensaje_receta_no_modificable()
 
         respuesta_uso_menu = (
@@ -6058,6 +6183,7 @@ def cargar_receta_guardada_en_sesion(receta_id):
     codigo_cargado = str(cabecera.get("codigo_receta", "") or "").strip()
     nombre_cargado = str(cabecera.get("nombre", "") or "receta").strip()
     st.session_state["receta_id_cargada"] = str(cabecera.get("id", receta_id))
+    st.session_state["receta_user_id_cargada"] = valor_user_id_receta(cabecera)
     st.session_state["codigo_receta_cargada"] = codigo_cargado
     st.session_state.pop("receta_carga_pendiente_id", None)
 
@@ -6102,6 +6228,14 @@ def sincronizar_receta_guardada_en_sesion(receta_guardada=None, datos_receta=Non
         for ingrediente in (ingredientes_guardados or [])
     ]
 
+    # Propietario: el de la receta guardada; si no viene, se conserva el de la
+    # receta ya cargada o, si es nueva, el usuario actual (028).
+    misma_receta = receta_id and receta_id == str(st.session_state.get("receta_id_cargada") or "")
+    st.session_state["receta_user_id_cargada"] = (
+        valor_user_id_receta(receta_guardada)
+        or valor_user_id_receta(datos_receta)
+        or (st.session_state.get("receta_user_id_cargada") if misma_receta else obtener_user_id_actual())
+    )
     st.session_state["receta_id_cargada"] = receta_id or None
     st.session_state["codigo_receta_cargada"] = codigo_receta
     st.session_state["receta_nombre"] = nombre_receta
@@ -8748,6 +8882,11 @@ def _renderizar_miembros_e_invitaciones(org_id, org_nombre):
                     st.error(f"Error al crear la invitación: {e_inv}")
 
         st.divider()
+        _renderizar_invitaciones_desde_archivo(
+            org_id, [m.get("email") for m in miembros if m.get("email")]
+        )
+
+        st.divider()
         st.write("**Invitaciones activas**")
         try:
             resp_inv = (
@@ -8956,6 +9095,341 @@ def _renderizar_datos_organizacion(org_id):
             st.error(f"No se pudieron guardar los datos: {e_sv}")
 
 
+def _mostrar_feedback_gerente(clave):
+    """Muestra el mensaje guardado antes de un st.rerun()."""
+    feedback = st.session_state.pop(clave, None)
+    if feedback:
+        tipo, mensaje = feedback
+        (st.success if tipo == "success" else st.error)(mensaje)
+
+
+def _renderizar_recetas_de_chefs(org_id):
+    """
+    Gerente → Recetas de chefs (028): quién puede ver o editar las recetas de
+    quién, y propietario de cada receta. Todas las acciones son en bloque.
+    """
+    st.caption(
+        "Cada chef ve y edita solo sus recetas. Aquí decides qué chefs pueden "
+        "consultar o editar recetas de otros. Las recetas usadas en un menú las "
+        "puede consultar toda la organización, porque los menús son de todos."
+    )
+    if not recetas_por_chef_activo():
+        st.info(
+            "Disponible cuando se aplique la migración sql/028_recetas_por_chef.sql. "
+            "Hasta entonces, todos los miembros ven y editan todas las recetas."
+        )
+        return
+
+    _mostrar_feedback_gerente("_recetas_chefs_feedback")
+
+    miembros = [m for m in _listar_miembros_org_cache(org_id, obtener_user_id_actual()) if m.get("activo")]
+    if not miembros:
+        st.warning("No se pudieron cargar los miembros de la organización.")
+        return
+    email_por_id = {str(m["user_id"]): (m.get("email") or str(m["user_id"])) for m in miembros}
+    chefs = [str(m["user_id"]) for m in miembros if m.get("rol") == "chef"]
+    todos = list(email_por_id.keys())
+
+    recetas_df = cargar_recetas_supabase(obtener_user_id_actual(), org_id)
+    recetas = [r for r in recetas_df.to_dict("records") if r.get("id")]
+
+    def etiqueta_receta(receta_id):
+        r = next((x for x in recetas if str(x["id"]) == str(receta_id)), {})
+        prop = valor_user_id_receta(r)
+        dueno = email_por_id.get(prop, "sin propietario") if prop else "sin propietario"
+        return f"{r.get('codigo_receta', '')} · {r.get('nombre', '')} · {dueno}"
+
+    tab_conceder, tab_actuales, tab_propietario = st.tabs(
+        ["Conceder acceso", "Permisos actuales", "Propietario de recetas"]
+    )
+
+    with tab_conceder:
+        if not chefs:
+            st.info("No hay chefs activos en la organización.")
+        else:
+            chefs_sel = st.multiselect(
+                "Chefs que reciben el acceso",
+                chefs,
+                format_func=lambda uid: email_por_id.get(uid, uid),
+                key=f"perm_chefs_{org_id}",
+            )
+            modo = st.radio(
+                "Acceso a",
+                ["Todas las recetas de estos chefs", "Recetas concretas"],
+                horizontal=True,
+                key=f"perm_modo_{org_id}",
+            )
+            propietarios_sel, recetas_sel = [], []
+            if modo == "Todas las recetas de estos chefs":
+                propietarios_sel = st.multiselect(
+                    "Propietarios",
+                    todos,
+                    format_func=lambda uid: email_por_id.get(uid, uid),
+                    key=f"perm_props_{org_id}",
+                    help="Incluye también las recetas que creen en el futuro.",
+                )
+            else:
+                recetas_sel = st.multiselect(
+                    "Recetas",
+                    [str(r["id"]) for r in recetas],
+                    format_func=etiqueta_receta,
+                    key=f"perm_recetas_{org_id}",
+                )
+            nivel_txt = st.radio(
+                "Permiso",
+                ["Solo lectura", "Lectura y edición"],
+                horizontal=True,
+                key=f"perm_nivel_{org_id}",
+            )
+            if st.button("Conceder acceso", type="primary", key=f"btn_conceder_perm_{org_id}"):
+                if not chefs_sel or not (propietarios_sel or recetas_sel):
+                    st.warning("Elige al menos un chef y al menos un propietario o una receta.")
+                else:
+                    try:
+                        n = supabase.rpc("conceder_permisos_recetas", {
+                            "p_org": org_id,
+                            "p_chefs": chefs_sel,
+                            "p_propietarios": propietarios_sel or None,
+                            "p_recetas": recetas_sel or None,
+                            "p_nivel": "edicion" if nivel_txt == "Lectura y edición" else "lectura",
+                        }).execute().data
+                        cargar_mis_permisos_recetas.clear()
+                        st.session_state["_recetas_chefs_feedback"] = (
+                            "success", f"Acceso concedido o actualizado: {n} permiso(s)."
+                        )
+                        st.rerun()
+                    except Exception as e_perm:
+                        st.error(f"No se pudo conceder el acceso: {e_perm}")
+
+    with tab_actuales:
+        try:
+            permisos = (
+                supabase.table("receta_permisos")
+                .select("id,chef_id,propietario_id,receta_id,nivel,created_at")
+                .eq("organizacion_id", org_id)
+                .order("created_at", desc=True)
+                .execute()
+            ).data or []
+        except Exception as e_lp:
+            st.error(f"No se pudieron cargar los permisos: {e_lp}")
+            permisos = []
+        if not permisos:
+            st.info("No hay permisos concedidos. Cada chef ve solo sus recetas.")
+        else:
+            filas = [{
+                "Quitar": False,
+                "Chef": email_por_id.get(str(p["chef_id"]), str(p["chef_id"])),
+                "Acceso a": (
+                    f"Todas las recetas de {email_por_id.get(str(p['propietario_id']), 'un exmiembro')}"
+                    if p.get("propietario_id") else etiqueta_receta(p.get("receta_id"))
+                ),
+                "Permiso": "Lectura y edición" if p.get("nivel") == "edicion" else "Solo lectura",
+                "id": str(p["id"]),
+            } for p in permisos]
+            editado = st.data_editor(
+                pd.DataFrame(filas),
+                hide_index=True,
+                use_container_width=True,
+                disabled=["Chef", "Acceso a", "Permiso"],
+                column_config={"id": None},
+                key=f"perm_tabla_{org_id}",
+            )
+            ids_quitar = editado.loc[editado["Quitar"], "id"].tolist()
+            if st.button(
+                f"Quitar seleccionados ({len(ids_quitar)})",
+                disabled=not ids_quitar,
+                key=f"btn_quitar_perm_{org_id}",
+            ):
+                try:
+                    n = supabase.rpc("revocar_permisos_recetas", {
+                        "p_org": org_id, "p_ids": ids_quitar,
+                    }).execute().data
+                    cargar_mis_permisos_recetas.clear()
+                    st.session_state["_recetas_chefs_feedback"] = ("success", f"Permisos quitados: {n}.")
+                    st.rerun()
+                except Exception as e_rev:
+                    st.error(f"No se pudieron quitar los permisos: {e_rev}")
+
+    with tab_propietario:
+        if not recetas:
+            st.info("La organización no tiene recetas.")
+        else:
+            sin_propietario = [str(r["id"]) for r in recetas if not valor_user_id_receta(r)]
+            if sin_propietario:
+                st.warning(
+                    f"Hay {len(sin_propietario)} receta(s) sin propietario: solo las ves tú "
+                    "(y toda la organización si están en un menú). Asígnales un chef."
+                )
+            solo_sin = st.checkbox(
+                "Mostrar solo recetas sin propietario",
+                value=bool(sin_propietario),
+                key=f"prop_solo_sin_{org_id}",
+            )
+            opciones = sin_propietario if solo_sin else [str(r["id"]) for r in recetas]
+            recetas_asignar = st.multiselect(
+                "Recetas",
+                opciones,
+                format_func=etiqueta_receta,
+                key=f"prop_recetas_{org_id}",
+            )
+            nuevo_prop = st.selectbox(
+                "Nuevo propietario",
+                todos,
+                format_func=lambda uid: email_por_id.get(uid, uid),
+                key=f"prop_nuevo_{org_id}",
+            )
+            if st.button(
+                f"Asignar propietario ({len(recetas_asignar)})",
+                disabled=not recetas_asignar,
+                key=f"btn_asignar_prop_{org_id}",
+            ):
+                try:
+                    n = supabase.rpc("asignar_propietario_recetas", {
+                        "p_org": org_id, "p_recetas": recetas_asignar, "p_propietario": nuevo_prop,
+                    }).execute().data
+                    limpiar_cache_recetas_guardadas()
+                    st.session_state["_recetas_chefs_feedback"] = (
+                        "success", f"Propietario asignado a {n} receta(s)."
+                    )
+                    st.rerun()
+                except Exception as e_ap:
+                    st.error(f"No se pudo asignar el propietario: {e_ap}")
+
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _leer_emails_desde_archivo(archivo):
+    """
+    Lee un CSV o Excel y devuelve la lista de emails (texto) en orden.
+    Usa la columna llamada email / correo / e-mail; si no hay, la primera.
+    """
+    nombre = (archivo.name or "").lower()
+    if nombre.endswith(".xlsx"):
+        df = pd.read_excel(archivo, dtype=str)
+    else:
+        contenido = archivo.getvalue().decode("utf-8-sig", errors="replace")
+        separador = ";" if contenido.count(";") > contenido.count(",") else ","
+        df = pd.read_csv(io.StringIO(contenido), sep=separador, dtype=str)
+    if df.empty and len(df.columns) == 1:
+        # Un solo email sin cabecera: pandas lo toma como nombre de columna
+        return [str(df.columns[0]).strip()]
+    columnas = {str(c).strip().lower(): c for c in df.columns}
+    col = next((columnas[c] for c in ("email", "correo", "e-mail", "mail") if c in columnas), None)
+    if col is None:
+        # Sin cabecera reconocible: primera columna, incluida la cabecera si es un email
+        col = df.columns[0]
+        primera = str(col).strip()
+        valores = ([primera] if _EMAIL_RE.match(primera) else []) + df[col].dropna().tolist()
+    else:
+        valores = df[col].dropna().tolist()
+    return [str(v).strip() for v in valores if str(v).strip()]
+
+
+def _renderizar_invitaciones_desde_archivo(org_id, emails_miembros):
+    """
+    Gerente: genera invitaciones de chef en bloque a partir de un CSV/Excel y
+    deja descargar los códigos (no se vuelven a mostrar).
+    """
+    st.write("**Invitar chefs desde un archivo**")
+    st.caption(
+        "Sube un CSV o Excel con una columna «email» (un chef por fila). Se crea "
+        "una invitación de chef por cada email válido y podrás descargar los códigos."
+    )
+    st.download_button(
+        "Descargar plantilla CSV",
+        data="email\nchef1@ejemplo.com\nchef2@ejemplo.com\n".encode("utf-8"),
+        file_name="plantilla_chefs.csv",
+        mime="text/csv",
+        key=f"btn_plantilla_chefs_{org_id}",
+    )
+    archivo = st.file_uploader(
+        "Archivo de chefs (CSV o Excel)",
+        type=["csv", "xlsx"],
+        key=f"archivo_chefs_{org_id}",
+    )
+    clave_resultado = f"_invitaciones_archivo_{org_id}"
+
+    if archivo is not None:
+        try:
+            emails = _leer_emails_desde_archivo(archivo)
+        except Exception as e_arch:
+            st.error(f"No se pudo leer el archivo: {e_arch}")
+            emails = []
+        miembros_norm = {str(e).strip().lower() for e in emails_miembros if e}
+        vistos, filas = set(), []
+        for email in emails:
+            email_norm = email.lower()
+            if not _EMAIL_RE.match(email_norm):
+                estado = "✖ email no válido"
+            elif email_norm in vistos:
+                estado = "✖ repetido en el archivo"
+            elif email_norm in miembros_norm:
+                estado = "✖ ya es miembro"
+            else:
+                estado = "✔ se invitará"
+            vistos.add(email_norm)
+            filas.append({"email": email_norm, "estado": estado})
+        if not filas:
+            st.warning("El archivo no contiene emails.")
+        else:
+            st.dataframe(pd.DataFrame(filas), hide_index=True, use_container_width=True)
+            a_invitar = [f["email"] for f in filas if f["estado"].startswith("✔")]
+            dias = st.number_input(
+                "Días de validez", min_value=1, max_value=30, value=7,
+                key=f"dias_archivo_chefs_{org_id}",
+            )
+            if st.button(
+                f"Generar {len(a_invitar)} invitación(es) de chef",
+                type="primary",
+                disabled=not a_invitar,
+                key=f"btn_generar_archivo_chefs_{org_id}",
+            ):
+                resultado = []
+                for email in a_invitar:
+                    try:
+                        codigo = supabase.rpc("crear_invitacion", {
+                            "p_organizacion_id": org_id,
+                            "p_email": email,
+                            "p_rol": "chef",
+                            "p_dias_validez": int(dias),
+                        }).execute().data
+                        resultado.append({"email": email, "codigo": codigo, "dias_validez": int(dias), "error": ""})
+                    except Exception as e_ci:
+                        resultado.append({"email": email, "codigo": "", "dias_validez": int(dias), "error": str(e_ci)[:150]})
+                # Guardar antes del rerun: los códigos no se pueden volver a consultar.
+                st.session_state[clave_resultado] = resultado
+                st.rerun()
+
+    resultado = st.session_state.get(clave_resultado)
+    if resultado:
+        creadas = [r for r in resultado if r["codigo"]]
+        fallidas = [r for r in resultado if not r["codigo"]]
+        if creadas:
+            st.success(
+                f"Invitaciones creadas: {len(creadas)}. **Descarga ahora el archivo con los "
+                "códigos**: no se vuelven a mostrar."
+            )
+        if fallidas:
+            st.error(f"No se pudieron crear {len(fallidas)} invitación(es). Revisa la columna «error».")
+        df_res = pd.DataFrame(resultado)
+        st.dataframe(df_res, hide_index=True, use_container_width=True)
+        st.download_button(
+            "Descargar códigos (CSV)",
+            data=df_res.to_csv(index=False).encode("utf-8-sig"),
+            file_name=f"invitaciones_chefs_{pd.Timestamp.now():%Y%m%d_%H%M}.csv",
+            mime="text/csv",
+            type="primary",
+            key=f"btn_descargar_codigos_{org_id}",
+        )
+        st.caption(
+            "Cada chef entra en la app con su email y pega su código en «Código de invitación»."
+        )
+        if st.button("Ocultar códigos", key=f"btn_ocultar_codigos_{org_id}"):
+            st.session_state.pop(clave_resultado, None)
+            st.rerun()
+
+
 def render_pagina_gerente():
     """
     Pantalla de gestión de la organización activa para gerentes.
@@ -8973,13 +9447,16 @@ def render_pagina_gerente():
 
     st.subheader(f"Gestión de {org_nombre}")
 
-    ger_tab_miembros_inv, ger_tab_datos, ger_tab_inv, ger_tab_compartir = st.tabs([
-        "Miembros e invitaciones", "Datos de la organización",
+    ger_tab_miembros_inv, ger_tab_recetas_chefs, ger_tab_datos, ger_tab_inv, ger_tab_compartir = st.tabs([
+        "Miembros e invitaciones", "Recetas de chefs", "Datos de la organización",
         "Inventario propio", "Compartir recetas"
     ])
 
     with ger_tab_miembros_inv:
         _renderizar_miembros_e_invitaciones(org_id, org_nombre)
+
+    with ger_tab_recetas_chefs:
+        _renderizar_recetas_de_chefs(org_id)
 
     with ger_tab_datos:
         _renderizar_datos_organizacion(org_id)
@@ -10868,7 +11345,11 @@ with main_tab_recetas:
             recetas_guardadas_df["etiqueta_selector"] = recetas_guardadas_df.apply(
                 lambda row: (
                     f"{row.get('codigo_receta', '')} · {row.get('nombre', '')}"
-                    f"{' · sin propietario' if valor_user_id_receta(row.to_dict()) is None else ''}"
+                    + (
+                        etiqueta_acceso_receta(row.to_dict())
+                        if recetas_por_chef_activo()
+                        else (' · sin propietario' if valor_user_id_receta(row.to_dict()) is None else '')
+                    )
                 ).strip(" ·"),
                 axis=1
             )
@@ -11088,6 +11569,19 @@ with main_tab_recetas:
         with st.expander("Elaboración y observaciones", expanded=False):
             observaciones_receta = st.text_area("Elaboración / observaciones", key="input_receta_observaciones", height=80)
 
+        _receta_cargada_id = str(st.session_state.get("receta_id_cargada") or "")
+        if _receta_cargada_id and recetas_por_chef_activo():
+            _receta_cargada = {
+                "id": _receta_cargada_id,
+                "user_id": st.session_state.get("receta_user_id_cargada"),
+            }
+            if not receta_editable_por_mi(_receta_cargada):
+                st.caption(
+                    "Esta receta es de otro chef y la tienes en solo lectura: "
+                    "«Actualizar receta» no está disponible. Con «Guardar receta» o "
+                    "«Duplicar receta» guardas tu propia copia."
+                )
+
         guardar_col, actualizar_col, duplicar_col = st.columns(3)
         with guardar_col:
             guardar_nueva = st.form_submit_button("Guardar receta", type="primary", use_container_width=True)
@@ -11244,8 +11738,11 @@ with main_tab_recetas:
             st.warning("El inventario no está disponible. No se puede eliminar la receta ahora.")
         elif not receta_id_para_eliminar:
             st.info("Selecciona o carga una receta antes de intentar eliminarla.")
-        elif receta_para_eliminar and not receta_es_modificable(receta_para_eliminar):
-            st.warning(mensaje_receta_no_modificable())
+        elif receta_para_eliminar and not receta_es_borrable(receta_para_eliminar):
+            if receta_es_modificable(receta_para_eliminar):
+                st.info("Solo el propietario de la receta o el gerente pueden borrarla.")
+            else:
+                st.warning(mensaje_receta_no_modificable())
             if not obtener_org_activa_id() and valor_user_id_receta(receta_para_eliminar) is None:
                 st.info("Esta receta antigua no tiene propietario. Cierra sesión para eliminarla o duplícala en tu cuenta.")
         else:
