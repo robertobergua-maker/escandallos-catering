@@ -7461,7 +7461,6 @@ with st.sidebar:
         st.warning("👀 Modo invitado: estás probando la app. Nada de lo que hagas se guarda. Crea una cuenta para conservar tus cambios.")
 
     st.divider()
-    st.info("💡 Consejo: el inventario común se gestiona desde Administración, disponible solo para usuarios admin.")
 
     st.markdown("#### 🧾 Ficha de ingrediente")
     modo_ficha = st.session_state.get("ingrediente_ficha_modo", "sin_seleccion")
